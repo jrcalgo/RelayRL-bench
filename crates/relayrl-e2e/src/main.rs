@@ -130,7 +130,9 @@ async fn train_on_arrow<Tr: AlgorithmTrait<ArrowTrajectory>>(
             Err(e) => eprintln!("Warning: could not read Arrow {}: {}", file.display(), e),
         }
     }
-    trainer.train_model();
+    // train_model is sync but calls Handle::block_on internally; use
+    // block_in_place so we don't panic inside the Tokio runtime.
+    tokio::task::block_in_place(|| trainer.train_model());
     trainer.log_epoch();
     trainer.save(save_prefix);
 }
@@ -150,7 +152,7 @@ async fn train_on_csv<Tr: AlgorithmTrait<CsvTrajectory>>(
             Err(e) => eprintln!("Warning: could not read CSV {}: {}", file.display(), e),
         }
     }
-    trainer.train_model();
+    tokio::task::block_in_place(|| trainer.train_model());
     trainer.log_epoch();
     trainer.save(save_prefix);
 }
@@ -200,14 +202,24 @@ where
 
     let initial_model = ModelModule::<B>::load_from_path(&args.model_path)?;
 
-    let (mut agent, params) = AgentBuilder::<B, 2, 2, Float, Float>::builder()
+    // Use a local config.json to cap max_traj_length and avoid the 100M-element
+    // default allocation.  Fall back gracefully if the file doesn't exist.
+    let config_path = PathBuf::from("./config.json");
+
+    let builder = AgentBuilder::<B, 2, 2, Float, Float>::builder()
         .actor_count(args.actor_count as u32)
         .default_device(device_type.clone())
         .actor_inference_mode(ActorInferenceMode::Local(model_mode))
         .actor_training_data_mode(ActorTrainingDataMode::Offline(Some(traj_params)))
-        .default_model(initial_model)
-        .build()
-        .await?;
+        .default_model(initial_model);
+
+    let builder = if config_path.exists() {
+        builder.config_path(config_path)
+    } else {
+        builder
+    };
+
+    let (mut agent, params) = builder.build().await?;
 
     agent.start(params).await?;
     let actor_ids = agent.get_actor_ids()?;
@@ -238,7 +250,19 @@ where
     macro_rules! training_loop {
         ($trainer:ident) => {{
             for epoch in 0..args.num_epochs {
-                // ── Phase 1 : Data collection ────────────────────────────────
+                // ── Phase 1 : Clear stale trajectory files from previous epochs
+                // to prevent stale UUIDs from creating default-initialized agent
+                // slots (obs_dim=1) in the algorithm's registry.
+                if let Ok(entries) = std::fs::read_dir(&args.traj_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.extension().and_then(|e| e.to_str()) == Some(expected_ext) {
+                            let _ = std::fs::remove_file(&p);
+                        }
+                    }
+                }
+
+                // ── Phase 2 : Data collection ────────────────────────────────
                 let mut episodes_done = 0usize;
                 while episodes_done < args.traj_per_epoch {
                     env.reset();
@@ -253,12 +277,10 @@ where
                                 TensorData::new(obs_vec, [1, obs_dim]),
                                 &device,
                             );
-                            // All-ones mask: no action masking in GridWorld.
-                            let mask_tensor =
-                                Tensor::<B, 2, Float>::ones([1, act_dim], &device);
-
+                            // GridWorld has no action masking; pass None to
+                            // avoid the upstream byte-multiply mask path.
                             let actions = agent
-                                .request_action(vec![*id], obs_tensor, Some(mask_tensor), 0.0)
+                                .request_action(vec![*id], obs_tensor, None, 0.0)
                                 .await?;
 
                             if let Some((_, relay_action)) = actions.first() {
@@ -328,6 +350,11 @@ where
                 } else {
                     train_on_arrow(&mut $trainer, &traj_files, &save_prefix).await;
                 }
+
+                // Reset per-agent trajectory counters after our manual train step
+                // so that receive_trajectory doesn't auto-call train_model (which
+                // uses Handle::block_on and panics inside the Tokio runtime).
+                $trainer.reset_epoch();
 
                 // ── Phase 3 : Model update ───────────────────────────────────
                 // `save()` is currently a stub in relayrl_algorithms 0.1.0 – it does

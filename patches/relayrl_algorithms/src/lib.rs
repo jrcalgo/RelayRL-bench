@@ -386,6 +386,9 @@ where
     OutK: TensorKind<B>,
     K: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
 {
+    /// Reset per-agent counts; no-op for REINFORCE (counts are handled internally).
+    pub fn reset_epoch(&mut self) {}
+
     /// Constructs a trainer from a [`ReinforceTrainerSpec`] and a kernel instance.
     pub fn new(spec: ReinforceTrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
@@ -475,6 +478,9 @@ where
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
 {
+    /// No-op for multi-agent trainers; per-actor count reset is handled internally.
+    pub fn reset_epoch(&mut self) {}
+
     /// Builds from a [`MultiagentTrainerSpec`] (MAPPO or MAREINFORCE).
     pub fn new(spec: MultiagentTrainerSpec) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
@@ -672,6 +678,24 @@ where
         match self {
             Self::PPO(algorithm) => AlgorithmTrait::<T>::log_epoch(algorithm),
             Self::IPPO(algorithm) => AlgorithmTrait::<T>::log_epoch(algorithm),
+        }
+    }
+}
+
+impl<B, InK, OutK, K> PpoTrainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: PPOKernelTrait<B, InK, OutK> + Default,
+{
+    /// Reset per-agent trajectory counters after a manual train step so that the
+    /// algorithm's `all_agents_ready()` guard doesn't auto-trigger `train_model`
+    /// (with a nested `block_on`) from inside an async context.
+    pub fn reset_epoch(&mut self) {
+        match self {
+            Self::PPO(algorithm) => algorithm.reset_agent_counts(),
+            Self::IPPO(algorithm) => algorithm.reset_agent_counts(),
         }
     }
 }

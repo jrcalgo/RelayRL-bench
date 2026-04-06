@@ -5,5 +5,5 @@
     "output_dtype": { "NdArray": "F32" },
     "input_shape": [1, 100],
     "output_shape": [1, 4],
-    "default_device": "cpu"
+    "default_device": "Cpu"
 }

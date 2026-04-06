@@ -261,10 +261,11 @@ mod training {
             };
 
             let obs_dim = net.obs_dim;
+            let obs_flat_data = obs_flat(&obs_tensors[..n]);
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
 
             let obs = Tensor::<TB, 2, Float>::from_data(
-                BurnTensorData::new(obs_flat(&obs_tensors[..n]), [n, obs_dim]),
+                BurnTensorData::new(obs_flat_data, [n, obs_dim]),
                 &device,
             );
             let v_pred = net.forward(obs).reshape([n]);

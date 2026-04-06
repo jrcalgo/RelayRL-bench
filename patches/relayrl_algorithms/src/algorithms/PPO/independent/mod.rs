@@ -314,7 +314,7 @@ where
                 .all(|slot| slot.trajectory_count >= self.hyperparams.traj_per_epoch)
     }
 
-    fn reset_agent_counts(&mut self) {
+    pub fn reset_agent_counts(&mut self) {
         for slot in &mut self.runtime.components.agent_slots {
             slot.trajectory_count = 0;
         }
