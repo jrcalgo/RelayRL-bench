@@ -1,6 +1,6 @@
-use relayrl_framework::prelude::templates::{EnvironmentTrainingTrait, EnvironmentError};
-use relayrl_framework::prelude::tensor::burn::backend::Backend;
-use relayrl_framework::prelude::tensor::burn::{Float, Tensor, TensorData};
+use relayrl_types::prelude::tensor::burn::backend::Backend;
+use relayrl_types::prelude::tensor::burn::{Float, Tensor, TensorData};
+use relayrl_env_trait::environment_traits::{EnvironmentTrait, TrainingPerformanceReturnFn, EnvironmentError};
 use std::any::Any;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -401,7 +401,7 @@ where
     }
 }
 
-impl<B: Backend> EnvironmentTrainingTrait for GridWorldEnv<B>
+impl<B: Backend> EnvironmentTrait for GridWorldEnv<B>
 where
     B::Device: Clone,
 {
@@ -423,21 +423,24 @@ where
         );
         Ok(Box::new(tensor))
     }
+}
 
-    fn calculate_performance_return(&self) -> Result<Box<dyn Any>, EnvironmentError> {
-        {
-            let actors = self.actors.borrow();
-            let mut returns = self.episode_returns.borrow_mut();
-            for (i, actor) in actors.iter().enumerate() {
-                returns[i] = actor.cumulative_reward;
-            }
-        }
-        let flat = self.episode_returns.borrow().clone();
-        let n = flat.len();
-        let tensor = Tensor::<B, 1, Float>::from_data(
-            TensorData::new(flat, [n]),
-            &self.device,
-        );
-        Ok(Box::new(tensor))
-    }
+impl<B: Backend> TrainingPerformanceReturnFn for GridWorldEnv<B> {
+	fn calculate_performance_return(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+		{
+			let actors = self.actors.borrow();
+			let mut returns = self.episode_returns.borrow_mut();
+			for (i, actor) in actors.iter().enumerate() {
+			returns[i] = actor.cumulative_reward;
+			}
+		}	
+		let flat = self.episode_returns.borrow().clone();
+		let n = flat.len();
+		let tensor = Tensor::<B, 1, Float>::from_data(
+			TensorData::new(flat, [n]),
+			&self.device,
+		);
+		Ok(Box::new(tensor))
+}
+
 }
