@@ -1,6 +1,6 @@
 [package]
 name = "gridworld-rl"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["jrcalgo <jacksonr121@outlook.com"]
 edition = "2024"
 description = "A deep reinforcement learning 2D gridworld environment with single- and multi-agent support."
@@ -19,7 +19,8 @@ crate-type = ["rlib"]
 render = ["iced"]
 
 [dependencies]
-relayrl_framework = { workspace = true }
+relayrl_env_trait = { workspace = true }
+relayrl_types = { workspace = true }
 iced = { workspace = true, optional = true, features = ["canvas"] }
 
 [[example]]
