@@ -1,1 +1,3 @@
 /target/
+trajectories/*.arrow
+trajectories/*.csv
