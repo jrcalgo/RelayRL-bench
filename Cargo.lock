@@ -5774,6 +5774,7 @@ dependencies = [
  "burn-tch",
  "burn-tensor",
  "clap",
+ "futures",
  "gridworld-rl",
  "relayrl_algorithms",
  "relayrl_env_trait",

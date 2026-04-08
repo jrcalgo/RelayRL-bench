@@ -4,6 +4,7 @@ use environments::build_gridworld_env;
 use std::path::PathBuf;
 
 use clap::Parser;
+use futures::future::join_all;
 
 use burn_ndarray::NdArray;
 use burn_tensor::{Float, Tensor, TensorData};
@@ -80,6 +81,10 @@ struct Args {
     /// CUDA device index (only used when backend = "tch-cuda")
     #[arg(long, default_value_t = 0)]
     cuda_device: usize,
+
+    /// Number of router tasks (parallelism for action dispatch)
+    #[arg(long, default_value_t = 1)]
+    router_scale: u32,
 }
 
 // ─────────────────────────────── Entry point ─────────────────────────────────
@@ -211,7 +216,8 @@ where
         .default_device(device_type.clone())
         .actor_inference_mode(ActorInferenceMode::Local(model_mode))
         .actor_training_data_mode(ActorTrainingDataMode::Offline(Some(traj_params)))
-        .default_model(initial_model);
+        .default_model(initial_model)
+        .router_scale(args.router_scale);
 
     let builder = if config_path.exists() {
         builder.config_path(config_path)
@@ -268,43 +274,48 @@ where
                     env.reset();
 
                     'episode: loop {
-                        // Request one action per actor using its own observation.
-                        let mut step_actions: Vec<u8> = vec![0u8; env.actor_count()];
+                        // Collect all observations upfront (synchronous env access).
+                        let obs_vecs: Vec<Vec<f32>> = (0..env.actor_count())
+                            .map(|i| env.get_observation(i))
+                            .collect();
 
-                        for (i, id) in actor_ids.iter().enumerate() {
-                            let obs_vec = env.get_observation(i);
+                        // Fire all action requests concurrently.
+                        let action_futures = actor_ids.iter().zip(obs_vecs.iter()).map(|(id, obs_vec)| {
                             let obs_tensor = Tensor::<B, 2, Float>::from_data(
-                                TensorData::new(obs_vec, [1, obs_dim]),
+                                TensorData::new(obs_vec.clone(), [1, obs_dim]),
                                 &device,
                             );
-                            // GridWorld has no action masking; pass None to
-                            // avoid the upstream byte-multiply mask path.
-                            let actions = agent
-                                .request_action(vec![*id], obs_tensor, None, 0.0)
-                                .await?;
+                            agent.request_action(vec![*id], obs_tensor, None, 0.0)
+                        });
+                        let all_results = join_all(action_futures).await;
 
-                            if let Some((_, relay_action)) = actions.first() {
-                                // The ONNX model outputs raw logits [1, act_dim].
-                                // Take argmax to get discrete action index 0-3.
-                                let action_u8 = relay_action
-                                    .get_act()
-                                    .map(|act_data| {
-                                        act_data
-                                            .data
-                                            .chunks_exact(4)
-                                            .map(|b| {
-                                                f32::from_le_bytes([b[0], b[1], b[2], b[3]])
-                                            })
-                                            .enumerate()
-                                            .max_by(|(_, a), (_, b)| {
-                                                a.partial_cmp(b)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            })
-                                            .map(|(idx, _)| idx as u8)
-                                            .unwrap_or(0)
-                                    })
-                                    .unwrap_or(0);
-                                step_actions[i] = action_u8;
+                        // Process results into step_actions.
+                        let mut step_actions: Vec<u8> = vec![0u8; env.actor_count()];
+                        for (i, result) in all_results.into_iter().enumerate() {
+                            if let Ok(actions) = result {
+                                if let Some((_, relay_action)) = actions.first() {
+                                    // The ONNX model outputs raw logits [1, act_dim].
+                                    // Take argmax to get discrete action index 0-3.
+                                    let action_u8 = relay_action
+                                        .get_act()
+                                        .map(|act_data| {
+                                            act_data
+                                                .data
+                                                .chunks_exact(4)
+                                                .map(|b| {
+                                                    f32::from_le_bytes([b[0], b[1], b[2], b[3]])
+                                                })
+                                                .enumerate()
+                                                .max_by(|(_, a), (_, b)| {
+                                                    a.partial_cmp(b)
+                                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                                })
+                                                .map(|(idx, _)| idx as u8)
+                                                .unwrap_or(0)
+                                        })
+                                        .unwrap_or(0);
+                                    step_actions[i] = action_u8;
+                                }
                             }
                         }
 
