@@ -85,6 +85,10 @@ struct Args {
     /// Number of router tasks (parallelism for action dispatch)
     #[arg(long, default_value_t = 1)]
     router_scale: u32,
+
+    /// Disable trajectory collection (no file writes, inference-only)
+    #[arg(long, default_value_t = false)]
+    disable_traj: bool,
 }
 
 // ─────────────────────────────── Entry point ─────────────────────────────────
@@ -211,11 +215,17 @@ where
     // default allocation.  Fall back gracefully if the file doesn't exist.
     let config_path = PathBuf::from("./config.json");
 
+    let training_data_mode = if args.disable_traj {
+        ActorTrainingDataMode::Disabled
+    } else {
+        ActorTrainingDataMode::Offline(Some(traj_params))
+    };
+
     let builder = AgentBuilder::<B, 2, 2, Float, Float>::builder()
         .actor_count(args.actor_count as u32)
         .default_device(device_type.clone())
         .actor_inference_mode(ActorInferenceMode::Local(model_mode))
-        .actor_training_data_mode(ActorTrainingDataMode::Offline(Some(traj_params)))
+        .actor_training_data_mode(training_data_mode)
         .default_model(initial_model)
         .router_scale(args.router_scale);
 
