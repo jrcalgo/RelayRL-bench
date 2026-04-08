@@ -5,6 +5,7 @@ pub use kernel::*;
 pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
+use crate::algorithms::PPO::kernel::PPOKernelTrait;
 use crate::templates::base_algorithm::{
     AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
 };
@@ -230,7 +231,7 @@ where
     B: Backend + BackendMatcher,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    KN: StepKernelTrait<B, InK, OutK> + Default,
+    KN: PPOKernelTrait<B, InK, OutK> + Default,
 {
     #[allow(dead_code)]
     pub(crate) fn new(
@@ -287,7 +288,12 @@ where
             .components
             .seed_kernel
             .take()
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                KN::new_for_actor(
+                    self.runtime.args.obs_dim,
+                    self.runtime.args.act_dim,
+                )
+            });
         let index = self.runtime.components.agent_slots.len();
         self.runtime
             .components

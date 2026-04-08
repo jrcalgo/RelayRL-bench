@@ -51,6 +51,13 @@ where
 pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>:
     StepKernelTrait<B, InK, OutK>
 {
+    /// Construct a new kernel instance with the given observation and action dimensions.
+    /// Called by `IndependentPPOAlgorithm` when registering actors beyond the first,
+    /// since the seed kernel can only be consumed once.
+    fn new_for_actor(obs_dim: usize, act_dim: usize) -> Self
+    where
+        Self: Sized;
+
     fn ppo_pi_loss(
         &mut self,
         obs: &[TensorData],
@@ -515,6 +522,20 @@ where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
 {
+    fn new_for_actor(obs_dim: usize, act_dim: usize) -> Self {
+        let device = B::Device::default();
+        Self::new(
+            obs_dim,
+            act_dim,
+            true,
+            &[64, 64],
+            ActivationKind::ReLU,
+            3e-4,
+            1e-3,
+            &device,
+        )
+    }
+
     fn ppo_pi_loss(
         &mut self,
         obs: &[TensorData],

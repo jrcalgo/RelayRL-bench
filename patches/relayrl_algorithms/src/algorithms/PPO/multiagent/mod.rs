@@ -37,14 +37,14 @@ fn resolve_agent_key(trajectory: &RelayRLTrajectory) -> AgentKey {
 fn sample_buffer_blocking<RB: GenericReplayBuffer>(
     buffer: &RB,
 ) -> Result<Batch, ReplayBufferError> {
-    match tokio::runtime::Handle::try_current() {
+    tokio::task::block_in_place(|| match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle.block_on(buffer.sample_buffer()),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| ReplayBufferError::BufferSamplingError(e.to_string()))?
             .block_on(buffer.sample_buffer()),
-    }
+    })
 }
 
 #[derive(Default)]
