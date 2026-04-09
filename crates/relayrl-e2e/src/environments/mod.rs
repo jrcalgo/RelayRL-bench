@@ -24,7 +24,10 @@ where
         .map(|i| ((i / grid_size) as isize, (i % grid_size) as isize))
         .collect();
 
-    // Use the standard wall layout only for the default 10×10 grid.
+    // Use the standard wall layout only for the default 10×10 grid, filtering
+    // out any wall cells that an actor is already occupying.
+    let actor_set: std::collections::HashSet<(isize, isize)> =
+        actor_positions.iter().copied().collect();
     let wall_positions: Vec<(isize, isize)> = if grid_size == 10 {
         vec![
             (2, 1),
@@ -40,6 +43,9 @@ where
             (2, 7),
             (2, 8),
         ]
+        .into_iter()
+        .filter(|w| !actor_set.contains(w))
+        .collect()
     } else {
         vec![]
     };

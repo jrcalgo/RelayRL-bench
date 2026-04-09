@@ -16,6 +16,7 @@ use relayrl_framework::prelude::network::{
 use relayrl_framework::prelude::types::model::ModelModule;
 use relayrl_framework::prelude::types::tensor::relayrl::{BackendMatcher, DeviceType};
 
+use relayrl_algorithms::algorithms::onnx_builder::build_onnx_mlp_bytes;
 use relayrl_algorithms::algorithms::PPO::PPOPolicyWithBaseline;
 use relayrl_algorithms::algorithms::REINFORCE::ActivationKind;
 use relayrl_algorithms::{AlgorithmTrait, MultiagentTrainer, RelayRLTrainer, TrainerArgs};
@@ -166,6 +167,38 @@ async fn train_on_csv<Tr: AlgorithmTrait<CsvTrajectory>>(
     trainer.save(save_prefix);
 }
 
+// ── Bootstrap a zero-weight ONNX model when the saved model's obs_dim doesn't
+// match the current grid size (e.g. running 128 actors on a 12×12 grid with a
+// model saved for a 10×10 grid).  Zero weights produce equal logits → action 0
+// on every step until the first `update_model` push after epoch 1 training.
+fn make_bootstrap_model<B>(
+    obs_dim: usize,
+    act_dim: usize,
+) -> Result<ModelModule<B>, Box<dyn std::error::Error>>
+where
+    B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>,
+{
+    use relayrl_types::data::tensor::{DType, NdArrayDType};
+    use relayrl_types::model::{ModelFileType, ModelMetadata};
+
+    let layer_specs: Vec<(usize, usize, Vec<f32>, Vec<f32>)> = vec![
+        (obs_dim, 64, vec![0.0f32; 64 * obs_dim], vec![0.0f32; 64]),
+        (64, 64, vec![0.0f32; 64 * 64], vec![0.0f32; 64]),
+        (64, act_dim, vec![0.0f32; act_dim * 64], vec![0.0f32; act_dim]),
+    ];
+    let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
+    let metadata = ModelMetadata {
+        model_file: "bootstrap.onnx".to_string(),
+        model_type: ModelFileType::Onnx,
+        input_dtype: DType::NdArray(NdArrayDType::F32),
+        output_dtype: DType::NdArray(NdArrayDType::F32),
+        input_shape: vec![1, obs_dim],
+        output_shape: vec![1, act_dim],
+        default_device: Some(DeviceType::Cpu),
+    };
+    Ok(ModelModule::<B>::from_onnx_bytes(onnx_bytes, metadata)?)
+}
+
 // ─────────────────────────────── Training loop ───────────────────────────────
 
 async fn run_training_loop<B>(
@@ -209,7 +242,18 @@ where
         ModelMode::Independent
     };
 
-    let initial_model = ModelModule::<B>::load_from_path(&args.model_path)?;
+    let initial_model = {
+        let m = ModelModule::<B>::load_from_path(&args.model_path)?;
+        // If the saved model's input obs_dim doesn't match the current grid,
+        // replace it with a zero-weight bootstrap model of the right shape so
+        // that ORT doesn't reject the tensor at inference time.
+        let saved_obs_dim = m.metadata.input_shape.get(1).copied().unwrap_or(obs_dim);
+        if saved_obs_dim != obs_dim {
+            make_bootstrap_model::<B>(obs_dim, act_dim)?
+        } else {
+            m
+        }
+    };
 
     // Use a local config.json to cap max_traj_length and avoid the 100M-element
     // default allocation.  Fall back gracefully if the file doesn't exist.

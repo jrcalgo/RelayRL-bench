@@ -249,7 +249,7 @@ pub fn build_onnx_mlp_bytes(layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)]) 
     }
     graph.extend(field_str(2, "mlp")); // name, field 2
     for init in &initializers {
-        graph.extend(field_msg(6, init)); // initializer: repeated TensorProto, field 6
+        graph.extend(field_msg(3, init)); // initializer: repeated TensorProto, field 3
     }
     graph.extend(field_msg(11, &input_info)); // input, field 11
     graph.extend(field_msg(12, &output_info)); // output, field 12
