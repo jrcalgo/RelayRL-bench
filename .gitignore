@@ -1,3 +1,8 @@
 /target/
-trajectories/*.arrow
-trajectories/*.csv
+trajectories/
+trajectories_ippo8/
+trajectories_mappo8/
+trained_model_ippo8/
+trained_model_mappo8/
+*.arrow
+*.ipc
