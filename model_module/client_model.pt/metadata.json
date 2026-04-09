@@ -1,5 +1,5 @@
 {
-  "model_file": "lunarlander_policy.onnx",
+  "model_file": "policy.onnx",
   "model_type": "onnx",
   "input_dtype": {
     "NdArray": "F32"
