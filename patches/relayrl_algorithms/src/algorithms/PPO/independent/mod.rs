@@ -6,8 +6,9 @@ pub use replay_buffer::*;
 
 use crate::logging::{EpochLogger, SessionLogger};
 use crate::algorithms::PPO::kernel::PPOKernelTrait;
+use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
 use crate::templates::base_algorithm::{
-    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
+    AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData, WeightProvider,
 };
 use crate::templates::base_replay_buffer::{
     Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars,
@@ -324,6 +325,51 @@ where
         for slot in &mut self.runtime.components.agent_slots {
             slot.trajectory_count = 0;
         }
+    }
+}
+
+impl<B, InK, OutK, KN> IndependentPPOAlgorithm<B, InK, OutK, KN>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: burn_tensor::TensorKind<B>,
+    OutK: burn_tensor::TensorKind<B>,
+    KN: StepKernelTrait<B, InK, OutK> + WeightProvider + Default,
+{
+    /// Build a [`relayrl_types::model::ModelModule`] from the currently trained policy
+    /// weights, without any filesystem access. Returns `None` if no training has
+    /// happened yet (no agent slots have been populated).
+    pub fn acquire_model_module(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B>> {
+        // Prefer the most-recently-trained slot; fall back to the first slot.
+        let slot = self.runtime.components.agent_slots.first()?;
+        let layer_specs = slot.kernel.get_pi_layer_specs()?;
+        let obs_dim = self.runtime.args.obs_dim;
+        let act_dim = self.runtime.args.act_dim;
+
+        let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
+
+        #[cfg(feature = "ndarray-backend")]
+        {
+            use relayrl_types::data::tensor::{DeviceType, DType, NdArrayDType};
+            use relayrl_types::model::ModelFileType;
+            let metadata = relayrl_types::model::ModelMetadata {
+                model_file: "policy.onnx".to_string(),
+                model_type: ModelFileType::Onnx,
+                input_dtype: DType::NdArray(NdArrayDType::F32),
+                output_dtype: DType::NdArray(NdArrayDType::F32),
+                input_shape: vec![1, obs_dim],
+                output_shape: vec![1, act_dim],
+                default_device: Some(DeviceType::Cpu),
+            };
+            return relayrl_types::model::ModelModule::<B>::from_onnx_bytes(
+                onnx_bytes,
+                metadata,
+            )
+            .ok();
+        }
+        #[cfg(not(feature = "ndarray-backend"))]
+        None
     }
 }
 

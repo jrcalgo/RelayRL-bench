@@ -231,6 +231,37 @@ impl<B: Backend + BackendMatcher<Backend = B>> Model<B> {
     fn inference(&self) -> &InferenceModel {
         &self.inference
     }
+
+    /// Build a `Model` directly from raw ONNX bytes, without touching the filesystem.
+    /// Uses ORT's `commit_from_memory` for zero-copy session creation.
+    pub fn from_onnx_bytes(bytes: Vec<u8>) -> Result<Self, ModelError> {
+        #[cfg(feature = "onnx-model")]
+        {
+            let session = Arc::new(std::sync::Mutex::new(
+                Session::builder()
+                    .map_err(|e| ModelError::BackendError(e.to_string()))?
+                    .commit_from_memory(&bytes)
+                    .map_err(|e| ModelError::BackendError(e.to_string()))?,
+            ));
+            let raw_bytes: Arc<[u8]> = bytes.into();
+            return Ok(Self {
+                file_type: ModelFileType::Onnx,
+                raw_bytes,
+                inference: InferenceModel::Onnx(session),
+                _phantom: PhantomData,
+            });
+        }
+        #[cfg(not(feature = "onnx-model"))]
+        {
+            let raw_bytes: Arc<[u8]> = bytes.into();
+            Ok(Self {
+                file_type: ModelFileType::Onnx,
+                raw_bytes,
+                inference: InferenceModel::Unsupported,
+                _phantom: PhantomData,
+            })
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -283,6 +314,13 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         let model_path = self.metadata.resolve_model_path(&dir);
         self.model.save_to_path(&model_path)?;
         Ok(())
+    }
+
+    /// Build a `ModelModule` directly from raw ONNX bytes without touching the filesystem.
+    /// The caller supplies the `metadata` describing input/output shapes and dtypes.
+    pub fn from_onnx_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        let model = Model::<B>::from_onnx_bytes(bytes)?;
+        Ok(Self { model, metadata })
     }
 
     /// Generic forward; dispatches to ONNX or LibTorch paths based on metadata.

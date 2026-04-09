@@ -70,6 +70,7 @@ pub mod templates;
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
+pub use templates::base_algorithm::WeightProvider;
 
 use std::path::PathBuf;
 
@@ -481,6 +482,23 @@ where
     /// No-op for multi-agent trainers; per-actor count reset is handled internally.
     pub fn reset_epoch(&mut self) {}
 
+    /// Build a [`relayrl_types::model::ModelModule`] from the trained shared policy
+    /// weights held in memory, bypassing any filesystem save/load cycle.
+    ///
+    /// Returns `None` if training has not yet produced any agent slots, or if the
+    /// variant is MAREINFORCE (which has no PPO policy network).
+    pub fn acquire_model_module(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B>>
+    where
+        B: BackendMatcher<Backend = B>,
+    {
+        match self {
+            Self::MAPPO { trainer } => trainer.acquire_model_module(),
+            Self::MAREINFORCE { .. } => None,
+        }
+    }
+
     /// Builds from a [`MultiagentTrainerSpec`] (MAPPO or MAREINFORCE).
     pub fn new(spec: MultiagentTrainerSpec) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
@@ -684,10 +702,10 @@ where
 
 impl<B, InK, OutK, K> PpoTrainer<B, InK, OutK, K>
 where
-    B: Backend + BackendMatcher,
+    B: Backend + BackendMatcher<Backend = B>,
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
-    K: PPOKernelTrait<B, InK, OutK> + Default,
+    K: PPOKernelTrait<B, InK, OutK> + WeightProvider + Default,
 {
     /// Reset per-agent trajectory counters after a manual train step so that the
     /// algorithm's `all_agents_ready()` guard doesn't auto-trigger `train_model`
@@ -696,6 +714,17 @@ where
         match self {
             Self::PPO(algorithm) => algorithm.reset_agent_counts(),
             Self::IPPO(algorithm) => algorithm.reset_agent_counts(),
+        }
+    }
+
+    /// Build a [`relayrl_types::model::ModelModule`] from the trained policy weights
+    /// held in memory, bypassing any filesystem save/load cycle.
+    ///
+    /// Returns `None` if training has not yet produced any agent slots.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::PPO(algorithm) => algorithm.acquire_model_module(),
+            Self::IPPO(algorithm) => algorithm.acquire_model_module(),
         }
     }
 }

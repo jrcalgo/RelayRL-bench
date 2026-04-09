@@ -141,6 +141,22 @@ pub trait StepKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK:
     fn get_output_dim(&self) -> usize;
 }
 
+/// Trait for kernels (and algorithms) that can expose the trained policy-network
+/// weights as a sequence of layer specifications.
+///
+/// Each entry in the returned `Vec` represents one linear layer and contains:
+/// - `in_dim`: number of input features
+/// - `out_dim`: number of output features
+/// - `weights`: row-major f32 slice of shape `[out_dim, in_dim]`
+/// - `biases`: f32 slice of length `out_dim`
+///
+/// The layers must be ordered from input to output; ReLU activations are assumed
+/// between all layers except the last. Returns `None` when the network has not
+/// yet been trained (i.e. no trajectories have been processed).
+pub trait WeightProvider {
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
+}
+
 /// Trait for kernels that support gradient-based training.
 ///
 /// The backend type used for autodiff is encapsulated inside the implementation —

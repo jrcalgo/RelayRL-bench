@@ -378,21 +378,19 @@ where
                 $trainer.reset_epoch();
 
                 // ── Phase 3 : Model update ───────────────────────────────────
-                // `save()` is currently a stub in relayrl_algorithms 0.1.0 – it does
-                // not persist weights.  We fall back to the original model path so
-                // the agent continues to run with the initial checkpoint.
-                let model_reload_path = if args.save_model_path.join("metadata.json").exists() {
-                    args.save_model_path.clone()
-                } else {
-                    args.model_path.clone()
-                };
-                match ModelModule::<B>::load_from_path(&model_reload_path) {
-                    Ok(new_model) => {
+                // Prefer in-memory weight export so no disk I/O is required.
+                // Fall back to the original model path if the trainer has no
+                // weights yet (empty replay buffer on epoch 0).
+                let updated_model = $trainer
+                    .acquire_model_module()
+                    .or_else(|| ModelModule::<B>::load_from_path(&args.model_path).ok());
+                match updated_model {
+                    Some(new_model) => {
                         let _ = agent
                             .update_model(new_model, Some(actor_ids.clone()))
                             .await;
                     }
-                    Err(e) => eprintln!("Warning: model reload failed: {}", e),
+                    None => eprintln!("Warning: could not acquire updated model weights"),
                 }
 
                 // Clean up trajectory files so they are not replayed next epoch.

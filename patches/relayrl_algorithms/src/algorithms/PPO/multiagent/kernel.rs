@@ -148,6 +148,44 @@ impl MultiagentPPOKernel {
     pub fn hidden_sizes(&self) -> &[usize] {
         &self.hidden_sizes
     }
+
+    /// Extract layer specs from the first trained actor network.
+    /// Returns `None` if no training has occurred yet.
+    pub fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        #[cfg(feature = "ndarray-backend")]
+        {
+            let trainer = self.trainer.as_ref()?;
+            let module = trainer.module.as_ref()?;
+            let actor = module.actors.first()?;
+
+            let specs = actor
+                .layers
+                .iter()
+                .map(|layer| {
+                    let w = layer.weight.val();
+                    let dims = w.dims();
+                    let out_dim = dims[0];
+                    let in_dim = dims[1];
+                    let w_data: Vec<f32> =
+                        w.into_data().to_vec::<f32>().unwrap_or_default();
+
+                    let b_data = layer
+                        .bias
+                        .as_ref()
+                        .map(|b| {
+                            b.val().into_data().to_vec::<f32>().unwrap_or_default()
+                        })
+                        .unwrap_or_else(|| vec![0.0f32; out_dim]);
+
+                    (in_dim, out_dim, w_data, b_data)
+                })
+                .collect();
+
+            return Some(specs);
+        }
+        #[cfg(not(feature = "ndarray-backend"))]
+        None
+    }
 }
 
 fn sample_count_for_batch(batch: &AgentBatch) -> usize {

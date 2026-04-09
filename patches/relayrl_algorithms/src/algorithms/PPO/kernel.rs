@@ -3,7 +3,7 @@
 use crate::algorithms::REINFORCE::{
     ActivationKind, BaselineValueNetwork, ContinuousPolicyNetwork, DiscretePolicyNetwork,
 };
-use crate::templates::base_algorithm::{StepAction, StepKernelTrait};
+use crate::templates::base_algorithm::{StepAction, StepKernelTrait, WeightProvider};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -564,5 +564,47 @@ where
         }
 
         0.0
+    }
+}
+
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> WeightProvider
+    for PPOPolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B>,
+{
+    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        #[cfg(feature = "ndarray-backend")]
+        {
+            let trainer = self.pi_trainer.as_ref()?;
+            let network = trainer.network.as_ref()?;
+
+            let specs = network
+                .layers
+                .iter()
+                .map(|layer| {
+                    let w = layer.weight.val();
+                    let dims = w.dims();
+                    let out_dim = dims[0];
+                    let in_dim = dims[1];
+                    let w_data: Vec<f32> =
+                        w.into_data().to_vec::<f32>().unwrap_or_default();
+
+                    let b_data = layer
+                        .bias
+                        .as_ref()
+                        .map(|b| {
+                            b.val().into_data().to_vec::<f32>().unwrap_or_default()
+                        })
+                        .unwrap_or_else(|| vec![0.0f32; out_dim]);
+
+                    (in_dim, out_dim, w_data, b_data)
+                })
+                .collect();
+
+            return Some(specs);
+        }
+        #[cfg(not(feature = "ndarray-backend"))]
+        None
     }
 }

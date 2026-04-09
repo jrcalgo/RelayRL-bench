@@ -297,6 +297,44 @@ where
             slot.trajectory_count = 0;
         }
     }
+
+    /// Build a [`relayrl_types::model::ModelModule`] from the currently trained shared
+    /// actor policy weights, without any filesystem access.
+    pub fn acquire_model_module(
+        &self,
+    ) -> Option<relayrl_types::model::ModelModule<B>>
+    where
+        B: BackendMatcher<Backend = B>,
+    {
+        use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
+        let layer_specs = self.runtime.components.kernel.get_pi_layer_specs()?;
+        let obs_dim = self.runtime.args.obs_dim;
+        let act_dim = self.runtime.args.act_dim;
+
+        let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
+
+        #[cfg(feature = "ndarray-backend")]
+        {
+            use relayrl_types::data::tensor::{DeviceType, DType, NdArrayDType};
+            use relayrl_types::model::ModelFileType;
+            let metadata = relayrl_types::model::ModelMetadata {
+                model_file: "policy.onnx".to_string(),
+                model_type: ModelFileType::Onnx,
+                input_dtype: DType::NdArray(NdArrayDType::F32),
+                output_dtype: DType::NdArray(NdArrayDType::F32),
+                input_shape: vec![1, obs_dim],
+                output_shape: vec![1, act_dim],
+                default_device: Some(DeviceType::Cpu),
+            };
+            return relayrl_types::model::ModelModule::<B>::from_onnx_bytes(
+                onnx_bytes,
+                metadata,
+            )
+            .ok();
+        }
+        #[cfg(not(feature = "ndarray-backend"))]
+        None
+    }
 }
 
 impl<B, InK, OutK, T> AlgorithmTrait<T> for MultiagentPPOAlgorithm<B, InK, OutK>
