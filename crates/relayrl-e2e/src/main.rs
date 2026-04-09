@@ -319,8 +319,26 @@ where
     // phase dispatches to the type-explicit helpers `train_on_arrow` /
     // `train_on_csv` so the compiler can resolve which `AlgorithmTrait<T>`
     // implementation to call.
+    // ── Perf / RSS helpers ───────────────────────────────────────────────────
+    fn read_rss_kb() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("VmRSS:"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
     macro_rules! training_loop {
         ($trainer:ident) => {{
+            let t_bench_start = std::time::Instant::now();
+            let mut total_steps: u64 = 0;
+            let mut rss_samples: Vec<u64> = Vec::new();
+            rss_samples.push(read_rss_kb());
+
             for epoch in 0..args.num_epochs {
                 // ── Phase 1 : Clear stale trajectory files from previous epochs
                 // to prevent stale UUIDs from creating default-initialized agent
@@ -389,6 +407,7 @@ where
                         for (i, &action) in step_actions.iter().enumerate() {
                             let _ = env.step(i, action);
                         }
+                        total_steps += env.actor_count() as u64;
 
                         // Check for episode termination.
                         if env.all_done() || env.is_max_steps_reached() {
@@ -454,8 +473,34 @@ where
                     let _ = std::fs::remove_file(file);
                 }
 
+                rss_samples.push(read_rss_kb());
                 println!("Epoch {}/{} complete", epoch + 1, args.num_epochs);
             }
+
+            // ── Benchmark summary ────────────────────────────────────────
+            let elapsed = t_bench_start.elapsed().as_secs_f64();
+            let steps_per_sec = total_steps as f64 / elapsed;
+            let rss_init  = rss_samples.first().copied().unwrap_or(0);
+            let rss_peak  = rss_samples.iter().copied().max().unwrap_or(0);
+            let rss_mean  = rss_samples.iter().copied().sum::<u64>()
+                            / rss_samples.len().max(1) as u64;
+            let rss_final = rss_samples.last().copied().unwrap_or(0);
+            println!();
+            println!("{}", "=".repeat(58));
+            println!("  Rust e2e  —  IPPO LunarLander-v3  benchmark");
+            println!("{}", "=".repeat(58));
+            println!("  Epochs        : {}  ({} traj/epoch)",
+                     args.num_epochs, args.traj_per_epoch);
+            println!("  Total steps   : {total_steps}");
+            println!("  Wall time     : {elapsed:.2}s");
+            println!("  Steps/sec     : {steps_per_sec:.0}");
+            println!();
+            println!("  RSS init      : {:.1} MB", rss_init  as f64 / 1024.0);
+            println!("  RSS peak      : {:.1} MB", rss_peak  as f64 / 1024.0);
+            println!("  RSS mean      : {:.1} MB", rss_mean  as f64 / 1024.0);
+            println!("  RSS final     : {:.1} MB", rss_final as f64 / 1024.0);
+            println!("  RSS samples   : {}", rss_samples.len());
+            println!("{}", "=".repeat(58));
         }};
     }
 
