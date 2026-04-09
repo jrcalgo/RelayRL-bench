@@ -90,6 +90,9 @@ zerocopy = ["bytes"]
 name = "relayrl_types"
 path = "src/lib.rs"
 
+[dependencies.arc-swap]
+version = "1"
+
 [dependencies.arrow]
 version = "57.3.0"
 

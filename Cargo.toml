@@ -14,3 +14,4 @@ iced = "0.14.0"
 # Override defaults to exclude tch-model/tch-backend (libtorch unavailable in this env).
 relayrl_types = { path = "./patches/relayrl_types" }
 relayrl_algorithms = { path = "./patches/relayrl_algorithms" }
+relayrl_framework = { path = "./patches/relayrl_framework" }
