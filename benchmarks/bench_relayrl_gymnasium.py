@@ -21,8 +21,8 @@ import relayrl_pyo3
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-EPOCHS         = 20
-TRAJ_PER_EPOCH = 8
+EPOCHS         = 76
+TRAJ_PER_EPOCH = 20
 MAX_STEPS      = 1000
 MODEL_PATH     = "./model_lunar"       # must exist (created by relayrl-e2e)
 TRAJ_DIR       = "./trajectories_lunar_pyo3"
