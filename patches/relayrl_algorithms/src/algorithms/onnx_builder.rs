@@ -94,8 +94,8 @@ fn make_tensor_proto(name: &str, dims: &[i64], float_data: &[f32]) -> Vec<u8> {
 fn make_attr_int(name: &str, value: i64) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend(field_str(1, name)); // name, field 1
-    buf.extend(field_i32(20, 3)); // type = INT (3), field 20
-    buf.extend(field_i64(6, value)); // i: int64, field 6
+    buf.extend(field_i32(20, 2)); // type = INT (2), field 20
+    buf.extend(field_i64(3, value)); // i: int64, field 3
     buf
 }
 
@@ -104,12 +104,13 @@ fn make_attr_float(name: &str, value: f32) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend(field_str(1, name)); // name, field 1
     buf.extend(field_i32(20, 1)); // type = FLOAT (1), field 20
-    buf.extend(field_f32(4, value)); // f: float, field 4
+    buf.extend(field_f32(2, value)); // f: float, field 2
     buf
 }
 
-/// `NodeProto` for a `Gemm` node: `Y = alpha * A @ B^T + beta * C`.
-/// We use `transB=1` so B matches Burn's `[out, in]` weight layout directly.
+/// `NodeProto` for a `Gemm` node: `Y = alpha * A @ B + beta * C`.
+/// Burn Linear stores weights as `[in, out]`, so we use `transB=0` and export
+/// weights directly as `[in_dim, out_dim]` matching Burn's row-major layout.
 fn make_gemm_node(name: &str, inputs: &[&str], output: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     for &inp in inputs {
@@ -118,9 +119,9 @@ fn make_gemm_node(name: &str, inputs: &[&str], output: &str) -> Vec<u8> {
     buf.extend(field_str(2, output)); // output, field 2
     buf.extend(field_str(3, name)); // name, field 3
     buf.extend(field_str(4, "Gemm")); // op_type, field 4
-    buf.extend(field_msg(7, &make_attr_int("transB", 1)));
-    buf.extend(field_msg(7, &make_attr_float("alpha", 1.0)));
-    buf.extend(field_msg(7, &make_attr_float("beta", 1.0)));
+    buf.extend(field_msg(5, &make_attr_int("transB", 0)));   // attribute, field 5
+    buf.extend(field_msg(5, &make_attr_float("alpha", 1.0)));
+    buf.extend(field_msg(5, &make_attr_float("beta", 1.0)));
     buf
 }
 
@@ -182,7 +183,7 @@ fn make_value_info(name: &str, elem_type: i32, dims: Vec<Vec<u8>>) -> Vec<u8> {
 /// Build raw ONNX `ModelProto` bytes for a fully-connected MLP.
 ///
 /// `layer_specs` is a slice of `(in_dim, out_dim, weights, biases)` where:
-/// - `weights` is a row-major `f32` slice of shape `[out_dim, in_dim]`
+/// - `weights` is a row-major `f32` slice of shape `[in_dim, out_dim]` (Burn's Linear layout)
 /// - `biases` is a `f32` slice of length `out_dim`
 ///
 /// ReLU activations are inserted between all layers **except** the last.
@@ -206,10 +207,10 @@ pub fn build_onnx_mlp_bytes(layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)]) 
         let relu_name = format!("h{i}");
         let is_last = i == n - 1;
 
-        // Weight initializer: shape [out_dim, in_dim]
+        // Weight initializer: shape [in_dim, out_dim] matching Burn's row-major layout
         initializers.push(make_tensor_proto(
             &w_name,
-            &[*out_dim as i64, *in_dim as i64],
+            &[*in_dim as i64, *out_dim as i64],
             weights,
         ));
         // Bias initializer: shape [out_dim]
@@ -249,7 +250,7 @@ pub fn build_onnx_mlp_bytes(layer_specs: &[(usize, usize, Vec<f32>, Vec<f32>)]) 
     }
     graph.extend(field_str(2, "mlp")); // name, field 2
     for init in &initializers {
-        graph.extend(field_msg(3, init)); // initializer: repeated TensorProto, field 3
+        graph.extend(field_msg(5, init)); // initializer: repeated TensorProto, field 5
     }
     graph.extend(field_msg(11, &input_info)); // input, field 11
     graph.extend(field_msg(12, &output_info)); // output, field 12

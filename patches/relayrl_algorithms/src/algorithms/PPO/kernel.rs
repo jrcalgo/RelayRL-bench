@@ -585,8 +585,9 @@ where
                 .map(|layer| {
                     let w = layer.weight.val();
                     let dims = w.dims();
-                    let out_dim = dims[0];
-                    let in_dim = dims[1];
+                    // Burn Linear stores weights as [in_features, out_features]
+                    let in_dim = dims[0];
+                    let out_dim = dims[1];
                     let w_data: Vec<f32> =
                         w.into_data().to_vec::<f32>().unwrap_or_default();
 
