@@ -29,6 +29,7 @@ relayrl_algorithms = { workspace = true }
 relayrl_types = { workspace = true }
 relayrl_env_trait = { workspace = true }
 gridworld-rl = { path = "../gridworld-rl" }
+lunarlander-rl = { path = "../lunarlander-rl" }
 
 burn-ndarray = { version = "0.20.1", optional = true }
 burn-tch    = { version = "0.20.1", optional = true }

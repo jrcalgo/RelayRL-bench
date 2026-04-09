@@ -1,6 +1,57 @@
 use burn_tensor::backend::Backend;
 use gridworld_rl::env::{GridWorldEnv, RewardConfig};
+use lunarlander_rl::env::LunarLanderEnv;
 use relayrl_env_trait::environment_traits::EnvironmentError;
+
+/// Minimal environment interface used by the training loop.
+/// Both GridWorldEnv and LunarLanderEnv satisfy this via blanket delegates.
+pub trait SimpleEnv {
+    fn reset(&self);
+    fn step(&self, actor_idx: usize, action: u8) -> Result<(f32, bool), EnvironmentError>;
+    fn get_observation(&self, actor_idx: usize) -> Vec<f32>;
+    fn get_last_reward(&self, actor_idx: usize) -> f32;
+    fn all_done(&self) -> bool;
+    fn is_max_steps_reached(&self) -> bool;
+    fn actor_count(&self) -> usize;
+}
+
+impl<B: Backend> SimpleEnv for GridWorldEnv<B>
+where
+    B::Device: Clone,
+{
+    fn reset(&self) { GridWorldEnv::reset(self); }
+    fn step(&self, actor_idx: usize, action: u8) -> Result<(f32, bool), EnvironmentError> {
+        GridWorldEnv::step(self, actor_idx, action)
+    }
+    fn get_observation(&self, actor_idx: usize) -> Vec<f32> {
+        GridWorldEnv::get_observation(self, actor_idx)
+    }
+    fn get_last_reward(&self, actor_idx: usize) -> f32 {
+        GridWorldEnv::get_last_reward(self, actor_idx)
+    }
+    fn all_done(&self) -> bool { GridWorldEnv::all_done(self) }
+    fn is_max_steps_reached(&self) -> bool { GridWorldEnv::is_max_steps_reached(self) }
+    fn actor_count(&self) -> usize { GridWorldEnv::actor_count(self) }
+}
+
+impl<B: Backend> SimpleEnv for LunarLanderEnv<B>
+where
+    B::Device: Clone,
+{
+    fn reset(&self) { LunarLanderEnv::reset(self); }
+    fn step(&self, actor_idx: usize, action: u8) -> Result<(f32, bool), EnvironmentError> {
+        LunarLanderEnv::step(self, actor_idx, action)
+    }
+    fn get_observation(&self, actor_idx: usize) -> Vec<f32> {
+        LunarLanderEnv::get_observation(self, actor_idx)
+    }
+    fn get_last_reward(&self, actor_idx: usize) -> f32 {
+        LunarLanderEnv::get_last_reward(self, actor_idx)
+    }
+    fn all_done(&self) -> bool { LunarLanderEnv::all_done(self) }
+    fn is_max_steps_reached(&self) -> bool { LunarLanderEnv::is_max_steps_reached(self) }
+    fn actor_count(&self) -> usize { LunarLanderEnv::actor_count(self) }
+}
 
 /// Build a `GridWorldEnv` for `actor_count` actors on a `grid_size × grid_size` grid.
 ///
@@ -61,4 +112,16 @@ where
         Some(max_steps),
         device,
     )
+}
+
+/// Build a single-actor `LunarLanderEnv`.
+pub fn build_lunarlander_env<B>(
+    max_steps: usize,
+    device: B::Device,
+) -> Result<LunarLanderEnv<B>, EnvironmentError>
+where
+    B: Backend,
+    B::Device: Clone,
+{
+    Ok(LunarLanderEnv::new(max_steps, device))
 }

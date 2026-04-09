@@ -1,5 +1,5 @@
 pub mod environments;
-use environments::build_gridworld_env;
+use environments::{build_gridworld_env, build_lunarlander_env, SimpleEnv};
 
 use std::path::PathBuf;
 
@@ -90,6 +90,10 @@ struct Args {
     /// Disable trajectory collection (no file writes, inference-only)
     #[arg(long, default_value_t = false)]
     disable_traj: bool,
+
+    /// Environment: "gridworld" (default) or "lunarlander"
+    #[arg(long, default_value = "gridworld")]
+    env: String,
 }
 
 // ─────────────────────────────── Entry point ─────────────────────────────────
@@ -181,10 +185,11 @@ where
     use relayrl_types::data::tensor::{DType, NdArrayDType};
     use relayrl_types::model::{ModelFileType, ModelMetadata};
 
+    // Use small non-zero weights (0.01) — ORT silently rejects all-zero raw_data.
     let layer_specs: Vec<(usize, usize, Vec<f32>, Vec<f32>)> = vec![
-        (obs_dim, 64, vec![0.0f32; 64 * obs_dim], vec![0.0f32; 64]),
-        (64, 64, vec![0.0f32; 64 * 64], vec![0.0f32; 64]),
-        (64, act_dim, vec![0.0f32; act_dim * 64], vec![0.0f32; act_dim]),
+        (obs_dim, 64, vec![0.01f32; 64 * obs_dim], vec![0.0f32; 64]),
+        (64, 64, vec![0.01f32; 64 * 64], vec![0.0f32; 64]),
+        (64, act_dim, vec![0.01f32; act_dim * 64], vec![0.0f32; act_dim]),
     ];
     let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
     let metadata = ModelMetadata {
@@ -210,19 +215,26 @@ where
     B::Device: Clone + Default,
     Tensor<B, 2, Float>: ToAnyBurnTensor<B, 2>,
 {
-    let obs_dim = args.grid_size * args.grid_size;
+    // obs_dim depends on environment selection.
+    let obs_dim = match args.env.as_str() {
+        "lunarlander" => 8,
+        _ => args.grid_size * args.grid_size,
+    };
     let act_dim: usize = 4;
 
     // ── Burn device ─────────────────────────────────────────────────────────
     let device: B::Device = B::get_device(&device_type).unwrap_or_default();
 
-    // ── GridWorld environment ────────────────────────────────────────────────
-    let env = build_gridworld_env::<B>(
-        args.actor_count,
-        args.grid_size,
-        args.max_steps,
-        device.clone(),
-    )?;
+    // ── Environment ─────────────────────────────────────────────────────────
+    let env: Box<dyn SimpleEnv> = match args.env.as_str() {
+        "lunarlander" => Box::new(build_lunarlander_env::<B>(args.max_steps, device.clone())?),
+        _ => Box::new(build_gridworld_env::<B>(
+            args.actor_count,
+            args.grid_size,
+            args.max_steps,
+            device.clone(),
+        )?),
+    };
 
     // ── Trajectory sink configuration ───────────────────────────────────────
     std::fs::create_dir_all(&args.traj_dir)?;
