@@ -44,7 +44,28 @@ fn sample_buffer_blocking<RB: GenericReplayBuffer>(
     buffer: &RB,
 ) -> Result<Batch, ReplayBufferError> {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(buffer.sample_buffer()),
+        Ok(_) => {
+            // We are already inside a Tokio runtime context.  Calling
+            // Handle::block_on from here would panic ("cannot start a runtime
+            // from within a runtime").  Instead, spawn a scoped OS thread that
+            // creates its own single-thread runtime so the async work runs in
+            // isolation.  GenericReplayBuffer: Send + Sync makes this safe.
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| ReplayBufferError::BufferSamplingError(e.to_string()))?
+                        .block_on(buffer.sample_buffer())
+                })
+                .join()
+                .map_err(|_| {
+                    ReplayBufferError::BufferSamplingError(
+                        "sample_buffer thread panicked".to_string(),
+                    )
+                })?
+            })
+        }
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

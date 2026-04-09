@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/relayrl-e2e", "crates/gridworld-rl", "crates/lunarlander-rl"]
+members = ["crates/relayrl-e2e", "crates/gridworld-rl", "crates/lunarlander-rl", "crates/relayrl-pyo3"]
 resolver = "3"
 
 [workspace.dependencies]

@@ -1,0 +1,26 @@
+[package]
+name = "relayrl_pyo3"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "relayrl_pyo3"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+burn-ndarray = "0.20.1"
+burn-tensor = "0.20.1"
+relayrl_framework = { workspace = true, default-features = false, features = ["client"] }
+relayrl_algorithms = { workspace = true, features = ["ndarray-backend"] }
+relayrl_types = { workspace = true }
+
+[features]
+default = []
+
+[profile.release]
+opt-level = 3
+lto = true
