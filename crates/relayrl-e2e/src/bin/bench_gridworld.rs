@@ -49,6 +49,10 @@ struct Args {
     #[arg(long, default_value_t = 1_000_000u64)]
     target_calls: u64,
 
+    /// Number of router tasks (default: matches actor_count for 1:1 ratio)
+    #[arg(long)]
+    router_scale: Option<u32>,
+
     /// GridWorld size
     #[arg(long, default_value_t = 10)]
     grid_size: usize,
@@ -189,9 +193,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     type B = NdArray;
 
     let args    = Args::parse();
-    let n       = args.actor_count;
-    let calls   = args.target_calls;
-    let gs      = args.grid_size;
+    let n            = args.actor_count;
+    let calls        = args.target_calls;
+    let gs           = args.grid_size;
+    let router_scale = args.router_scale.unwrap_or(n as u32);
     let obs_dim = gs * gs;
 
     let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
@@ -200,8 +205,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL GridWorld benchmark");
-    println!("  {} actors · {} calls · {}×{} grid · {} logical cores",
-             n, calls, gs, gs, num_cores);
+    println!("  {} actors · {} routers · {} calls · {}×{} grid · {} logical cores",
+             n, router_scale, calls, gs, gs, num_cores);
     println!("  Total env steps = {} × {} = {}",
              n, calls, n as u64 * calls);
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -230,7 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
         .actor_training_data_mode(ActorTrainingDataMode::Disabled)
         .default_model(model)
-        .router_scale(1);
+        .router_scale(router_scale);
     if cfgpath.exists() { bld = bld.config_path(cfgpath); }
 
     let (mut agent, params) = bld.build().await?;
@@ -413,7 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Report ────────────────────────────────────────────────────────────────
     println!();
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL GridWorld — FINAL RESULTS  ({} actors)", n);
+    println!("  RelayRL GridWorld — FINAL RESULTS  ({} actors / {} routers)", n, router_scale);
     println!("═══════════════════════════════════════════════════════════════════\n");
 
     println!("─── Throughput ──────────────────────────────────────────────────────");
