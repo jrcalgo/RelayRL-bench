@@ -1,0 +1,19 @@
+[package]
+name = "rlox-bench"
+# Excluded from workspace due to burn 0.16/0.20.1 torch-sys link conflict.
+# Build with: cargo build --release --manifest-path crates/rlox-bench/Cargo.toml
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rlox-bench"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+rlox-core = "0.1.0"
+rlox-nn   = "0.1.0"
+rlox-burn  = "0.1.0"
+# Must match rlox-burn's burn version (0.16) — not the workspace burn 0.20.1
+burn = { version = "0.16", features = ["autodiff", "ndarray"] }
