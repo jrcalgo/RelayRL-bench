@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL — LunarLander comprehensive benchmark");
-    println!("  {} actor{} · {} steps · ndarray · {} logical cores",
+    println!("  {} actor{} · {} steps/actor · ndarray · {} logical cores",
         actor_count, if actor_count == 1 { "" } else { "s" }, target_steps, num_cores);
     println!("═══════════════════════════════════════════════════════════════════\n");
 
@@ -201,12 +201,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(actor_ids.len(), actor_count, "actor ID count mismatch");
 
     // ── Storage (pre-allocate for target_steps per actor) ────────────────────
-    let cap = target_steps as usize;
+    let total_cap  = (target_steps * actor_count as u64) as usize;
+    let rounds_cap = target_steps as usize; // one round per target_steps/actor
     // Round-trip time per step (whole actor loop iteration = sum of all actors)
-    let mut round_times_ns:  Vec<u64> = Vec::with_capacity(cap / actor_count);
+    let mut round_times_ns:  Vec<u64> = Vec::with_capacity(rounds_cap);
     // Per-actor-request timing
-    let mut infer_times_ns:  Vec<u64> = Vec::with_capacity(cap);
-    let mut env_times_ns:    Vec<u64> = Vec::with_capacity(cap);
+    let mut infer_times_ns:  Vec<u64> = Vec::with_capacity(total_cap);
+    let mut env_times_ns:    Vec<u64> = Vec::with_capacity(total_cap);
     // Per-actor episode tracking
     let mut ep_returns: Vec<Vec<f32>> = vec![Vec::new(); actor_count];
     let mut ep_lengths: Vec<Vec<u64>> = vec![Vec::new(); actor_count];
@@ -248,7 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for env in &envs { env.reset(); }
 
-    while total_steps < target_steps {
+    while total_steps < target_steps * actor_count as u64 {
         let round_start = Instant::now();
 
         for (i, env) in envs.iter().enumerate() {
@@ -289,9 +290,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         round_times_ns.push(round_start.elapsed().as_nanos() as u64);
 
-        if total_steps % 100_000 == 0 {
+        if total_steps % (100_000 * actor_count as u64) == 0 {
             let sps = total_steps as f64 / t_start.elapsed().as_secs_f64();
-            println!("  [{:>7} steps] {:.0} steps/sec", total_steps, sps);
+            let steps_per_actor = total_steps / actor_count as u64;
+            println!("  [{:>7} steps/actor  {:>8} total] {:.0} steps/sec", steps_per_actor, total_steps, sps);
         }
     }
 
@@ -407,7 +409,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  steps/sec per actor          : {:>10.1}",   steps_per_actor);
     println!("  steps/sec per logical core   : {:>10.1}",   steps_per_core);
     println!("  episodes/sec                 : {:>10.3}",   eps_per_sec);
-    println!("  total steps                  : {:>10}",     total_steps);
+    println!("  total steps (all actors)     : {:>10}",     total_steps);
+    println!("  steps per actor              : {:>10}",     total_steps / actor_count as u64);
     println!("  total episodes               : {:>10}",     all_returns.len());
     println!("  wall time                    : {:>10.2}s",  elapsed_sec);
     println!("  logical cores                : {:>10}",     num_cores);
