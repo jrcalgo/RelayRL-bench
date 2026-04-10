@@ -195,8 +195,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args    = Args::parse();
     let n            = args.actor_count;
     let calls        = args.target_calls;
-    let gs           = args.grid_size;
     let router_scale = args.router_scale.unwrap_or(n as u32);
+
+    // Auto-scale grid: need at least n+1 cells (actors + goal), so gs >= ceil(sqrt(n+1)).
+    let min_gs = ((n + 1) as f64).sqrt().ceil() as usize;
+    let gs = args.grid_size.max(min_gs);
     let obs_dim = gs * gs;
 
     let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
@@ -212,14 +215,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════════\n");
 
     // ── GridWorld env with N actors ──────────────────────────────────────────
+    // Spread actors left-to-right, top-to-bottom (row = i/gs, col = i%gs).
     let actor_positions: Vec<(isize, isize)> = (0..n)
-        .map(|i| (0isize, i as isize))
+        .map(|i| ((i / gs) as isize, (i % gs) as isize))
         .collect();
-    let walls = vec![
-        (2,1),(2,2),(2,3),(2,4),
-        (3,4),(4,4),(5,4),(6,4),(7,4),
-        (2,6),(2,7),(2,8),
-    ];
+    let actor_set: std::collections::HashSet<(isize, isize)> =
+        actor_positions.iter().copied().collect();
+    // Only use the default wall layout on an unmodified 10×10 grid; filter
+    // out any wall cells already occupied by an actor.
+    let walls: Vec<(isize, isize)> = if gs == 10 {
+        vec![
+            (2,1),(2,2),(2,3),(2,4),
+            (3,4),(4,4),(5,4),(6,4),(7,4),
+            (2,6),(2,7),(2,8),
+        ]
+        .into_iter()
+        .filter(|w| !actor_set.contains(w))
+        .collect()
+    } else {
+        vec![]
+    };
     let env = GridWorldEnv::<B>::new(
         true, gs, gs, walls, (gs as isize - 1, gs as isize - 1),
         actor_positions, Some(RewardConfig::default()),
