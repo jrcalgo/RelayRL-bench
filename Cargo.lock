@@ -6047,6 +6047,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rlox"
+version = "0.1.0"
+dependencies = [
+ "burn-autodiff",
+ "burn-core",
+ "burn-ndarray",
+ "burn-nn",
+ "burn-optim",
+ "burn-tensor",
+]
+
+[[package]]
 name = "rmp"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
