@@ -9,7 +9,7 @@
   },
   "input_shape": [
     1,
-    8
+    100
   ],
   "output_shape": [
     1,
