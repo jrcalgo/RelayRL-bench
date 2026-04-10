@@ -1225,86 +1225,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(feature = "metrics")]
                 let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
-                // Fast path: Local + Offline — do inference directly in the coordinator,
-                // bypassing the mpsc→actor→oneshot round-trip entirely.
-                if Self::is_offline_local_fast_path(&self.client_modes) {
-                    let actor_data: Vec<_> = {
-                        let state = params.shared_state.read().await;
-                        ids.iter()
-                            .filter_map(|id| {
-                                let handle = state.actor_model_handles.get(id)?.clone();
-                                let tx = state.global_dispatcher_tx.clone();
-                                Some((*id, handle, tx))
-                            })
-                            .collect()
-                    };
-
-                    let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
-                        Vec::with_capacity(actor_data.len());
-                    for (id, model_handle, dispatcher_tx) in actor_data {
-                        let r4sa = {
-                            let guard = model_handle.read().await;
-                            let model = guard.as_ref().ok_or_else(|| {
-                                CoordinatorError::ScaleManagerError(
-                                    ScaleManagerError::GetRouterRuntimeParamsError(format!(
-                                        "[Coordinator] Model not loaded for actor {id}"
-                                    )),
-                                )
-                            })?;
-                            Arc::new(
-                                model
-                                    .forward::<D_IN, D_OUT>(
-                                        observation.clone(),
-                                        mask.clone(),
-                                        reward,
-                                        id,
-                                    )
-                                    .map_err(|e| {
-                                        CoordinatorError::ScaleManagerError(
-                                            ScaleManagerError::GetRouterRuntimeParamsError(
-                                                e.to_string(),
-                                            ),
-                                        )
-                                    })?,
-                            )
-                        };
-
-                        // Fire-and-forget via the same FIFO dispatcher channel so RecordAction
-                        // is always ordered before any subsequent FlagLastInference.
-                        dispatcher_tx
-                            .send(RoutedMessage {
-                                actor_id: id,
-                                protocol: RoutingProtocol::RecordAction,
-                                payload: RoutedPayload::RecordAction(r4sa.clone()),
-                            })
-                            .await
-                            .map_err(|e| {
-                                CoordinatorError::ScaleManagerError(
-                                    ScaleManagerError::SendActionRequestError(e.to_string()),
-                                )
-                            })?;
-
-                        actions.push((id, r4sa));
-                    }
-
-                    #[cfg(feature = "metrics")]
-                    {
-                        let duration: f64 = start_time.elapsed().as_secs_f64();
-                        params
-                            .metrics
-                            .record_histogram("action_request_latency", duration, &[])
-                            .await;
-                        params
-                            .metrics
-                            .record_counter("action_requests", num_ids, &[])
-                            .await;
-                    }
-
-                    return Ok(actions);
-                }
-
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(ids.len());
-
                 // Extract router runtime params with clear error messages
                 let _router_runtime_params: &dashmap::DashMap<
                     RouterNamespace,
@@ -1332,29 +1252,28 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 };
 
                 // Get the global dispatcher sender
-                let global_dispatcher_tx = params
-                    .shared_state
-                    .read()
-                    .await
-                    .global_dispatcher_tx
-                    .clone();
+                let (global_dispatcher_tx, valid_ids) = {
+                    let shared_state = params.shared_state.read().await;
+                    let global_dispatcher_tx = shared_state.global_dispatcher_tx.clone();
+                    let valid_ids = ids
+                        .into_iter()
+                        .filter(|id| {
+                            shared_state
+                                .shared_router_state
+                                .actor_router_addresses
+                                .contains_key(id)
+                        })
+                        .collect::<Vec<_>>();
+                    (global_dispatcher_tx, valid_ids)
+                };
 
-                for id in ids {
-                    let has_router = params
-                        .shared_state
-                        .read()
-                        .await
-                        .shared_router_state
-                        .actor_router_addresses
-                        .contains_key(&id);
-                    if !has_router {
-                        continue;
-                    }
+                let mut pending = Vec::with_capacity(valid_ids.len());
 
+                for id in &valid_ids {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
 
                     let action_request_message = RoutedMessage {
-                        actor_id: id,
+                        actor_id: id.clone(),
                         protocol: RoutingProtocol::RequestInference,
                         payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
                             observation: Box::new(observation.clone()),
@@ -1374,6 +1293,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         ));
                     }
 
+                    pending.push((*id, resp_rx));
+                }
+
+                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
+                    Vec::with_capacity(valid_ids.len());
+
+                for (id, resp_rx) in pending {
                     match resp_rx.await.map_err(|e| e.to_string()) {
                         Ok(action) => actions.push((id, action)),
                         Err(e) => {
