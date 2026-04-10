@@ -11,9 +11,16 @@ path = "src/main.rs"
 
 [workspace]
 
+[[bin]]
+name = "lunar"
+path = "src/bin/lunar.rs"
+
 [dependencies]
-rlox-core = "0.1.0"
-rlox-nn   = "0.1.0"
+rlox-core  = "0.1.0"
+rlox-nn    = "0.1.0"
 rlox-burn  = "0.1.0"
 # Must match rlox-burn's burn version (0.16) — not the workspace burn 0.20.1
 burn = { version = "0.16", features = ["autodiff", "ndarray"] }
+# Physics deps for the ported LunarLander env (avoids burn 0.16/0.20 tch conflict)
+glam = "0.25"
+rand = "0.9"
