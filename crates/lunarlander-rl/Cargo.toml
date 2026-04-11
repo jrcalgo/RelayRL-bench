@@ -10,3 +10,4 @@ relayrl_types = { workspace = true }
 burn-tensor = "0.20.1"
 glam = "0.25"
 rand = "0.9"
+rayon = "1"

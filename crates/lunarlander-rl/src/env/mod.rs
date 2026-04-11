@@ -4,6 +4,8 @@
 //! and constraints use an impulse-based pin joint (sequential impulse method)
 //! instead of a spring, which is stable for low-mass leg bodies.
 
+pub mod vec;
+
 use std::any::Any;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};

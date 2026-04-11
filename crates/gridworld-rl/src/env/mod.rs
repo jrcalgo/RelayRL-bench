@@ -1,3 +1,5 @@
+pub mod vec;
+
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 use relayrl_types::prelude::tensor::burn::{Float, Tensor, TensorData};
 use relayrl_env_trait::environment_traits::{EnvironmentTrait, TrainingPerformanceReturnFn, EnvironmentError};

@@ -3092,6 +3092,7 @@ name = "gridworld-rl"
 version = "0.1.2"
 dependencies = [
  "iced",
+ "rayon",
  "relayrl_env_trait",
  "relayrl_types",
 ]
@@ -4143,6 +4144,7 @@ dependencies = [
  "burn-tensor",
  "glam",
  "rand 0.9.2",
+ "rayon",
  "relayrl_env_trait",
  "relayrl_types",
 ]
