@@ -392,7 +392,98 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
 
         let _worker_handle = tokio::spawn(async move {
             const BATCH_SIZE: usize = 10;
+            /// Flush the priority queue immediately once it holds this many items,
+            /// without waiting for the timer tick.
+            const FLUSH_THRESHOLD: usize = BATCH_SIZE;
             let mut worker_tick = tokio::time::interval(Duration::from_millis(100));
+
+            /// Drain up to BATCH_SIZE jobs from the priority queue and dispatch each
+            /// to the configured sinks (transport and/or local file).  All I/O is
+            /// fire-and-forget via `tokio::spawn` so the caller never blocks.
+            macro_rules! dispatch_batch {
+                ($queue:expr) => {{
+                    let mut jobs_to_process = Vec::with_capacity(BATCH_SIZE);
+                    for _ in 0..BATCH_SIZE {
+                        if let Some(job) = $queue.pop() {
+                            jobs_to_process.push(job);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Dispatch each job to enabled sinks
+                    for job in jobs_to_process {
+                        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode &&
+                            let (Some(dispatcher), Some(transport_addresses)) =
+                                (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
+                            {
+                                let transport_job = job.clone();
+                                let transport_codec = worker_codec.clone();
+                                let transport_addrs = transport_addresses.clone();
+                                let transport_actor_last = worker_actor_last_processed.clone();
+                                let transport_namespace = worker_namespace.clone();
+
+                                tokio::spawn(async move {
+                                    let encoded = match transport_job
+                                        .traj_for_processing
+                                        .encode(&transport_codec)
+                                    {
+                                        Ok(enc) => enc,
+                                        Err(e) => {
+                                            log::error!(
+                                                "[TrajectoryBuffer] Encode error: {:?}",
+                                                e
+                                            );
+                                            return;
+                                        }
+                                    };
+
+                                    if let Err(e) = Self::send_trajectory(
+                                        &transport_namespace,
+                                        &transport_job.actor_id,
+                                        &transport_job.priority,
+                                        &encoded,
+                                        &Some(dispatcher),
+                                        &transport_addrs,
+                                        &transport_actor_last,
+                                    )
+                                    .await
+                                    {
+                                        log::error!(
+                                            "[TrajectoryBuffer] Transport send error: {:?}",
+                                            e
+                                        );
+                                    }
+                                });
+                            }
+
+                        if uses_local_file_writing(&worker_modes.actor_training_data_mode) &&
+                            let Some(ref traj_output) = worker_trajectory_file_output {
+                                let local_job = job.clone();
+                                let local_actor_last = worker_actor_last_processed.clone();
+                                let traj_output_clone = traj_output.clone();
+
+                                tokio::spawn(async move {
+                                    let params = traj_output_clone.read().await;
+
+                                    if let Err(e) = Self::write_local_trajectory(
+                                        &local_job,
+                                        &params,
+                                        &local_actor_last,
+                                    )
+                                    .await
+                                    {
+                                        log::error!(
+                                            "[TrajectoryBuffer] Local write error: {:?}",
+                                            e
+                                        );
+                                    }
+                                });
+                        }
+                    }
+                }};
+            }
 
             loop {
                 tokio::select! {
@@ -412,6 +503,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                         match job_opt {
                             Some(job) => {
                                 worker_queue.push(job);
+                                // Event-driven flush: don't wait for the timer when a
+                                // full batch is already queued.
+                                if worker_queue.len() >= FLUSH_THRESHOLD {
+                                    dispatch_batch!(worker_queue);
+                                }
                             }
                             None => {
                                 break;
@@ -425,92 +521,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrajectoryBufferTrait<B>
                                 break;
                             }
 
-
-                        let mut jobs_to_process = Vec::with_capacity(BATCH_SIZE);
-                        {
-                            for _ in 0..BATCH_SIZE {
-                                if let Some(job) = worker_queue.pop() {
-                                    jobs_to_process.push(job);
-                                } else {
-                                    break;
-                                }
-                            }
+                        // Skip the tick entirely when nothing is queued.
+                        if worker_queue.is_empty() {
+                            continue;
                         }
 
-                        // Dispatch each job to enabled sinks
-                        for job in jobs_to_process {
-                            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-                            if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) = &worker_modes.actor_training_data_mode &&
-                                let (Some(dispatcher), Some(transport_addresses)) =
-                                    (worker_training_dispatcher.clone(), worker_transport_addresses.clone())
-                                {
-                                    let transport_job = job.clone();
-                                    let transport_codec = worker_codec.clone();
-                                    let transport_addrs = transport_addresses.clone();
-                                    let transport_actor_last = worker_actor_last_processed.clone();
-                                    let transport_namespace = worker_namespace.clone();
-
-                                    tokio::spawn(async move {
-                                        // Encode trajectory for transport
-                                        let encoded = match transport_job
-                                            .traj_for_processing
-                                            .encode(&transport_codec)
-                                        {
-                                            Ok(enc) => enc,
-                                            Err(e) => {
-                                                log::error!(
-                                                    "[TrajectoryBuffer] Encode error: {:?}",
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        };
-
-                                        if let Err(e) = Self::send_trajectory(
-                                            &transport_namespace,
-                                            &transport_job.actor_id,
-                                            &transport_job.priority,
-                                            &encoded,
-                                            &Some(dispatcher),
-                                            &transport_addrs,
-                                            &transport_actor_last,
-                                        )
-                                        .await
-                                        {
-                                            log::error!(
-                                                "[TrajectoryBuffer] Transport send error: {:?}",
-                                                e
-                                            );
-                                        }
-                                    });
-                                }
-
-
-                            if uses_local_file_writing(&worker_modes.actor_training_data_mode) &&
-                                let Some(ref traj_output) = worker_trajectory_file_output {
-                                    let local_job = job.clone();
-                                    let local_actor_last = worker_actor_last_processed.clone();
-                                    let traj_output_clone = traj_output.clone();
-
-                                    tokio::spawn(async move {
-                                        let params = traj_output_clone.read().await;
-
-                                        if let Err(e) = Self::write_local_trajectory(
-                                            &local_job,
-                                            &params,
-                                            &local_actor_last,
-                                        )
-                                        .await
-                                        {
-                                            log::error!(
-                                                "[TrajectoryBuffer] Local write error: {:?}",
-                                                e
-                                            );
-                                        }
-                                    });
-
-                            }
-                        }
+                        dispatch_batch!(worker_queue);
                     }
                 }
             }

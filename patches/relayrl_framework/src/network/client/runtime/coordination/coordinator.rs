@@ -62,6 +62,8 @@ use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::serialize_model_module;
 use relayrl_types::prelude::tensor::relayrl::DeviceType;
 
+use futures::future::try_join_all;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -1296,19 +1298,17 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     pending.push((*id, resp_rx));
                 }
 
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
-                    Vec::with_capacity(valid_ids.len());
-
-                for (id, resp_rx) in pending {
-                    match resp_rx.await.map_err(|e| e.to_string()) {
-                        Ok(action) => actions.push((id, action)),
-                        Err(e) => {
-                            return Err(CoordinatorError::ScaleManagerError(
-                                ScaleManagerError::ReceiveActionResponseError(e),
-                            ));
-                        }
-                    }
-                }
+                let actions: Vec<(Uuid, Arc<RelayRLAction>)> = try_join_all(
+                    pending.into_iter().map(|(id, rx)| async move {
+                        let action = rx.await.map_err(|e| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::ReceiveActionResponseError(e.to_string()),
+                            )
+                        })?;
+                        Ok::<(Uuid, Arc<RelayRLAction>), CoordinatorError>((id, action))
+                    }),
+                )
+                .await?;
 
                 #[cfg(feature = "metrics")]
                 {

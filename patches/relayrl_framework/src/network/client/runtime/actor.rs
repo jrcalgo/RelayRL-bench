@@ -26,6 +26,8 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use arc_swap::ArcSwapOption;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -40,12 +42,16 @@ use thiserror::Error;
 
 /// Shared handle to a hot-reloadable model.
 ///
-/// The outer `Arc<RwLock<Option<...>>>` enables two ownership modes:
-/// - **Independent**: each actor holds its own `Arc`, wrapping its own model.
+/// The outer `Arc<ArcSwapOption<...>>` enables two ownership modes with lock-free reads:
+/// - **Independent**: each actor holds its own `Arc`, wrapping its own model slot.
 /// - **Shared**: all actors on the same device hold a clone of the *same* `Arc`, so
-///   a write through any one actor (handshake / model update) is immediately visible
+///   a store through any one actor (handshake / model update) is immediately visible
 ///   to every other actor that shares it.
-pub(crate) type LocalModelHandle<B> = Arc<RwLock<Option<HotReloadableModel<B>>>>;
+///
+/// The `ArcSwapOption` provides wait-free loads for inference while `HotReloadableModel`
+/// internally uses its own `ArcSwap<ModelModule<B>>` for atomic weight swaps, so neither
+/// inference nor model reload ever blocks.
+pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
 
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
@@ -185,15 +191,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let actor_id = self.actor_id;
 
         let result = async {
-            // HotReloadableModel::forward() is lock-free (ArcSwap internally), so we can
-            // call it inline after a single async read of the outer Option guard.
+            // Both the outer ArcSwapOption load and HotReloadableModel::forward() are
+            // lock-free, so inference never blocks on model reloads.
             let r4sa = {
-                let guard = self.reloadable_model.read().await;
-                let reloadable_model = guard.as_ref().ok_or_else(|| {
-                    ActorError::SystemError(
+                let guard = self.reloadable_model.load();
+                let reloadable_model = match &*guard {
+                    Some(m) => m,
+                    None => return Err(ActorError::SystemError(
                         "Model not loaded/available for actor inference".to_string(),
-                    )
-                })?;
+                    )),
+                };
                 reloadable_model
                     .forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
                     .map_err(ActorError::from)?
@@ -378,7 +385,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     {
         let max_traj_length: usize = *shared_max_traj_length.read().await;
 
-        let model_init_flag = model_handle.read().await.is_none();
+        let model_init_flag = model_handle.load().is_none();
         if model_init_flag {
             log::warn!(
                 "[ActorEntity] Startup model is None, initial model handshake necessitated..."
@@ -443,15 +450,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelHandshake = msg.payload {
             // Fast path: skip the handshake when a model is already available locally.
-            {
-                let model_guard = self.reloadable_model.read().await;
-                if model_guard.is_some() {
-                    log::warn!(
-                        "[Actor {:?}] Model already available, handshake not needed",
-                        self.actor_id
-                    );
-                    return Ok(());
-                }
+            if self.reloadable_model.load().is_some() {
+                log::warn!(
+                    "[Actor {:?}] Model already available, handshake not needed",
+                    self.actor_id
+                );
+                return Ok(());
             }
 
             #[cfg(feature = "metrics")]
@@ -504,35 +508,33 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 let model_device = self.model_device.clone();
                                 let actor_id = self.actor_id;
 
-                                let mut model_guard = self.reloadable_model.write().await;
-                                match model_guard.as_ref() {
-                                    Some(existing_model) => {
-                                        let version = existing_model.version() + 1;
-                                        existing_model
-                                            .reload_from_path(
-                                                model_path.read().await.clone(),
-                                                version,
-                                            )
-                                            .await
-                                            .map_err(|e| {
-                                                log::error!(
-                                                    "[Actor {:?}] Failed to reload model: {:?}",
-                                                    actor_id,
-                                                    e
-                                                );
-                                                ActorError::from(e)
-                                            })?;
-                                    }
-                                    None => {
-                                        *model_guard = Some(
-                                            HotReloadableModel::<B>::new_from_module(
-                                                model,
-                                                model_device,
-                                            )
-                                            .await
-                                            .map_err(ActorError::from)?,
-                                        );
-                                    }
+                                let guard = self.reloadable_model.load();
+                                if let Some(existing_model) = &*guard {
+                                    let version = existing_model.version() + 1;
+                                    existing_model
+                                        .reload_from_path(
+                                            model_path.read().await.clone(),
+                                            version,
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            log::error!(
+                                                "[Actor {:?}] Failed to reload model: {:?}",
+                                                actor_id,
+                                                e
+                                            );
+                                            ActorError::from(e)
+                                        })?;
+                                } else {
+                                    drop(guard);
+                                    let new_model =
+                                        HotReloadableModel::<B>::new_from_module(
+                                            model,
+                                            model_device,
+                                        )
+                                        .await
+                                        .map_err(ActorError::from)?;
+                                    self.reloadable_model.store(Some(Arc::new(new_model)));
                                 }
 
                                 Ok(true)
@@ -592,8 +594,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelVersion { reply_to } = msg.payload {
             let version = {
-                let model_guard = self.reloadable_model.read().await;
-                match model_guard.as_ref() {
+                let guard = self.reloadable_model.load();
+                match &*guard {
                     Some(model) => model.version(),
                     None => -1,
                 }
@@ -639,25 +641,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         return Err(e);
                     }
 
-                    // Acquire the outer write lock; in Shared mode this also blocks other actors
-                    // from running inference until the swap is complete.
+                    // Load the outer ArcSwapOption (lock-free). In Shared mode other actors
+                    // continue inference unblocked while this swap is in progress.
                     let model_device = self.model_device.clone();
-                    let mut model_guard = self.reloadable_model.write().await;
-                    match model_guard.as_ref() {
-                        Some(existing_model) => {
-                            existing_model
-                                .reload_from_module(ok_model, version)
+                    let guard = self.reloadable_model.load();
+                    if let Some(existing_model) = &*guard {
+                        // reload_from_module is already lock-free inside HotReloadableModel.
+                        existing_model
+                            .reload_from_module(ok_model, version)
+                            .await
+                            .map_err(ActorError::from)?;
+                    } else {
+                        // Model handle is empty; initialise it now so the actor can run.
+                        drop(guard);
+                        let new_model =
+                            HotReloadableModel::<B>::new_from_module(ok_model, model_device)
                                 .await
                                 .map_err(ActorError::from)?;
-                        }
-                        None => {
-                            // Model handle is empty; initialise it now so the actor can run.
-                            *model_guard = Some(
-                                HotReloadableModel::<B>::new_from_module(ok_model, model_device)
-                                    .await
-                                    .map_err(ActorError::from)?,
-                            );
-                        }
+                        self.reloadable_model.store(Some(Arc::new(new_model)));
                     }
 
                     Ok(true)
@@ -749,6 +750,8 @@ mod unit_tests {
     use relayrl_types::prelude::tensor::relayrl::DType;
     use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
+    use arc_swap::ArcSwapOption;
+
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
@@ -770,7 +773,7 @@ mod unit_tests {
     }
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
-        Arc::new(RwLock::new(None))
+        Arc::new(ArcSwapOption::new(None))
     }
 
     async fn create_ndarray_actor(

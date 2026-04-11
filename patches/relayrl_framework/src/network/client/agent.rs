@@ -571,7 +571,7 @@ impl<
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             algorithm_args: self.algorithm_args.unwrap_or_default(),
             actor_count: self.actor_count.unwrap_or(1),
-            router_scale: self.router_scale.unwrap_or(1),
+            router_scale: self.router_scale.unwrap_or_else(|| self.actor_count.unwrap_or(1)),
             default_device: self.default_device.unwrap_or_default(),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             default_model: self.default_model,

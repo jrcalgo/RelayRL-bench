@@ -29,6 +29,7 @@ use relayrl_types::model::{HotReloadableModel, ModelModule};
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use arc_swap::ArcSwapOption;
 use burn_tensor::backend::Backend;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -219,7 +220,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     /// Returns a `(LocalModelHandle<B>, needs_handshake)` pair for a new actor on `device`.
     ///
-    /// - **Independent** mode: always creates a fresh `Arc<RwLock<Option<...>>>`.
+    /// - **Independent** mode: always creates a fresh `Arc<ArcSwapOption<...>>`.
     ///   `needs_handshake` is `true` when no model could be pre-loaded.
     /// - **Shared** mode: looks up the per-device pool.  The *first* actor on a given device
     ///   creates the slot (and triggers a handshake if no model is available); every subsequent
@@ -248,7 +249,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
+                let handle: LocalModelHandle<B> = Arc::new(ArcSwapOption::new(reloadable.map(Arc::new)));
                 self.shared_local_models.push((device, handle.clone()));
                 Ok((handle, needs_handshake))
             }
@@ -259,7 +260,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
+                let handle: LocalModelHandle<B> = Arc::new(ArcSwapOption::new(reloadable.map(Arc::new)));
                 Ok((handle, needs_handshake))
             }
         }
