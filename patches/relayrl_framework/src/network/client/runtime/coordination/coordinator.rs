@@ -1269,14 +1269,35 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 let mut pending = Vec::with_capacity(valid_ids.len());
 
-                for id in &valid_ids {
+                // When multiple actor IDs are provided with a single stacked observation
+                // tensor, split the batch (dim 0) evenly across actors.  Each actor
+                // receives ceil(batch / num_actors) rows; the last actor gets the
+                // remainder (which may be smaller if batch is not divisible).
+                let num_actors = valid_ids.len();
+                let batch_size = observation.batch_size();
+                let chunk = (batch_size + num_actors - 1) / num_actors; // ceil division
+
+                for (i, id) in valid_ids.iter().enumerate() {
                     let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
+
+                    let obs_slice: Arc<AnyBurnTensor<B, D_IN>> = if num_actors == 1 {
+                        // Single actor — no copy, share the original Arc.
+                        observation.clone()
+                    } else {
+                        let start = i * chunk;
+                        if start >= batch_size {
+                            // No rows left for this actor; skip it.
+                            continue;
+                        }
+                        let len = chunk.min(batch_size - start);
+                        Arc::new(observation.narrow_batch(start, len))
+                    };
 
                     let action_request_message = RoutedMessage {
                         actor_id: id.clone(),
                         protocol: RoutingProtocol::RequestInference,
                         payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
-                            observation: Box::new(observation.clone()),
+                            observation: Box::new(obs_slice),
                             mask: Box::new(mask.clone()),
                             reward,
                             reply_to: resp_tx,

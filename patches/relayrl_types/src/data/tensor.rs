@@ -229,6 +229,36 @@ impl<B: Backend + 'static, const D: usize> Clone for AnyBurnTensor<B, D> {
 }
 
 impl<B: Backend + 'static, const D: usize> AnyBurnTensor<B, D> {
+    /// Returns the size of the batch (dim 0).
+    pub fn batch_size(&self) -> usize {
+        match self {
+            AnyBurnTensor::Float(ft) => ft.tensor.shape().dims[0],
+            AnyBurnTensor::Int(it) => it.tensor.shape().dims[0],
+            AnyBurnTensor::Bool(bt) => bt.tensor.shape().dims[0],
+        }
+    }
+
+    /// Returns a view of rows `start .. start + len` along dim 0 (batch axis).
+    ///
+    /// Uses burn's `narrow` so no data is copied — the returned tensor shares the
+    /// underlying buffer with the source.
+    pub fn narrow_batch(&self, start: usize, len: usize) -> Self {
+        match self {
+            AnyBurnTensor::Float(ft) => AnyBurnTensor::Float(FloatBurnTensor {
+                tensor: Arc::new(ft.tensor.as_ref().clone().narrow(0, start, len)),
+                dtype: ft.dtype.clone(),
+            }),
+            AnyBurnTensor::Int(it) => AnyBurnTensor::Int(IntBurnTensor {
+                tensor: Arc::new(it.tensor.as_ref().clone().narrow(0, start, len)),
+                dtype: it.dtype.clone(),
+            }),
+            AnyBurnTensor::Bool(bt) => AnyBurnTensor::Bool(BoolBurnTensor {
+                tensor: Arc::new(bt.tensor.as_ref().clone().narrow(0, start, len)),
+                dtype: bt.dtype.clone(),
+            }),
+        }
+    }
+
     /// Helper function to extract tensor and determine backend from dtype for Float conversions
     fn extract_tensor_and_backend_float(
         self: Arc<Self>,

@@ -1,12 +1,15 @@
-//! bench_lunar_dual_actor — two RelayRL actors each managing half of a 1024-env VecEnv.
+//! bench_lunar_dual_actor — two RelayRL actors share one model over a 1024-env VecEnv.
 //!
 //! Architecture:
 //!   - 1 SyncLunarVectorEnv containing 1024 independent sub-environments
-//!   - 2 RelayRL actors (ModelMode::Independent)
-//!   - Actor 0 owns sub-envs [0,   512) → dispatches a [512, 8] observation batch
-//!   - Actor 1 owns sub-envs [512, 1024) → dispatches a [512, 8] observation batch
-//!   - Requests are issued sequentially; the coordinator pipelines them internally
-//!   - All 1024 env.step() calls execute in parallel via rayon (SyncLunarVectorEnv)
+//!   - 2 RelayRL actors (ModelMode::Shared — single ONNX session, shared model)
+//!   - The caller passes the full [1024, 8] observation tensor and both actor IDs
+//!     in a single request_action call.
+//!   - The coordinator splits the batch evenly (ceil(1024/2) = 512 rows each) and
+//!     dispatches each slice to the corresponding actor without any caller-side
+//!     concurrency primitives.
+//!   - Both actors' responses are collected and decoded back into 1024 actions.
+//!   - All 1024 env.step() calls execute in parallel via rayon.
 //!
 //! Build:
 //!   cargo build --release -p relayrl-e2e --bin bench_lunar_dual_actor
@@ -40,7 +43,8 @@ use lunarlander_rl::env::vec::SyncLunarVectorEnv;
 #[derive(Parser, Debug)]
 #[command(
     name = "bench_lunar_dual_actor",
-    about = "RelayRL LunarLander dual-actor benchmark — 2 actors split a 1024-env VecEnv in half"
+    about = "RelayRL LunarLander dual-actor shared-model benchmark \
+             — coordinator splits [1024,8] batch across 2 actors internally"
 )]
 struct Args {
     /// Total sub-environments (must be even; split equally between the two actors)
@@ -151,6 +155,9 @@ impl Reservoir {
 // ─────────────────────────── Bootstrap model ────────────────────────────────
 
 /// Build an ONNX MLP for `batch` observations: [batch, OBS_DIM] → [batch, ACT_DIM].
+///
+/// With ModelMode::Shared, both actors use this single session.  The coordinator
+/// feeds each actor its half-slice ([512, 8]), so the model is built for batch=half.
 fn bootstrap_model<B>(batch: usize)
     -> Result<ModelModule<B>, Box<dyn std::error::Error>>
 where B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>
@@ -164,7 +171,7 @@ where B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>
     ];
     let bytes = build_onnx_mlp_bytes(&specs);
     let meta = ModelMetadata {
-        model_file:     "bootstrap_dual_actor.onnx".into(),
+        model_file:     "bootstrap_dual_actor_shared.onnx".into(),
         model_type:     ModelFileType::Onnx,
         input_dtype:    DType::NdArray(NdArrayDType::F32),
         output_dtype:   DType::NdArray(NdArrayDType::F32),
@@ -213,18 +220,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_steps = args.max_steps;
 
     assert!(n % 2 == 0, "--num-envs must be even (got {})", n);
-    let half = n / 2;  // 512 sub-envs per actor
+    let half = n / 2;  // rows per actor after coordinator split
 
     let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
     let device_type = DeviceType::Cpu;
     let num_cores = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
 
     println!("═══════════════════════════════════════════════════════════════════════");
-    println!("  RelayRL LunarLander — dual-actor VecEnv benchmark");
-    println!("  2 actors · {} sub-envs total · {}/{} split · {} calls · {} cores",
-             n, half, half, calls, num_cores);
-    println!("  Actor 0 → sub-envs [0, {})   batch [{}×{}]", half, half, OBS_DIM);
-    println!("  Actor 1 → sub-envs [{}, {}) batch [{}×{}]", half, n, half, OBS_DIM);
+    println!("  RelayRL LunarLander — dual-actor shared-model VecEnv benchmark");
+    println!("  2 actors (Shared) · {} total envs · {}/{} coordinator split · {} cores",
+             n, half, half, num_cores);
+    println!("  Caller passes [{}×{}] tensor + [id0, id1] → coordinator splits internally",
+             n, OBS_DIM);
     println!("  Total env steps = {} × {} = {}", n, calls, n as u64 * calls);
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
@@ -232,17 +239,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vec_env = SyncLunarVectorEnv::<B>::new(n, max_steps, device.clone())?;
     vec_env.reset_all();
 
-    // ── Agent: 2 actors, each independently processing half the batch ─────────
-    // Each actor's model expects [half, OBS_DIM] input.
-    let model = bootstrap_model::<B>(half)?;
-    let cfgpath = std::path::PathBuf::from("./config.json");
+    // ── Agent: 2 actors, ModelMode::Shared, model sized for half-batch ────────
+    // The coordinator slices the [n, OBS_DIM] tensor into [half, OBS_DIM] per
+    // actor, so the shared ONNX session is built for input_shape=[half, OBS_DIM].
+    let model    = bootstrap_model::<B>(half)?;
+    let cfgpath  = std::path::PathBuf::from("./config.json");
 
-    println!("Initialising agent (2 actors, ModelMode::Independent, batch={})…", half);
+    println!("Initialising agent (2 actors, ModelMode::Shared, batch={})…", half);
     let init_start = Instant::now();
     let mut bld = AgentBuilder::<B, 2, 2, Float, Float>::builder()
         .actor_count(2)
         .default_device(device_type)
-        .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
+        .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Shared))
         .actor_training_data_mode(ActorTrainingDataMode::Disabled)
         .default_model(model)
         .router_scale(1);
@@ -257,21 +265,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id0 = actor_ids[0];
     let id1 = actor_ids[1];
 
-    println!("  init time : {} ms  (2 actors, each batch [{},{}])", init_ms, half, OBS_DIM);
+    println!("  init time : {} ms  (shared model batch [{},{}])", init_ms, half, OBS_DIM);
     println!("  actor[0]  : {}", id0);
     println!("  actor[1]  : {}", id1);
     println!();
 
     // ── Timing / metric structures ─────────────────────────────────────────────
-    // Per-call (one full round = actor0 request + actor1 request + step_all)
-    let mut call_res   = Reservoir::new(RESERVOIR, calls);
-    let mut env_res    = Reservoir::new(RESERVOIR, calls);
-    let mut a0_res     = Reservoir::new(RESERVOIR, calls);
-    let mut a1_res     = Reservoir::new(RESERVOIR, calls);
-    let mut call_wf    = Welford::new();
-    let mut env_wf     = Welford::new();
-    let mut a0_wf      = Welford::new();
-    let mut a1_wf      = Welford::new();
+    let mut call_res  = Reservoir::new(RESERVOIR, calls);
+    let mut env_res   = Reservoir::new(RESERVOIR, calls);
+    let mut infer_res = Reservoir::new(RESERVOIR, calls);
+    let mut call_wf   = Welford::new();
+    let mut env_wf    = Welford::new();
+    let mut infer_wf  = Welford::new();
 
     // Episode tracking across all sub-envs
     let mut ep_returns:  Vec<f32> = Vec::new();
@@ -297,27 +302,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Warming up (200 calls)…");
     vec_env.reset_all();
     for _ in 0..200 {
-        let flat = vec_env.get_stacked_obs();
-        let obs_t0 = Tensor::<B, 2, Float>::from_data(
-            TensorData::new(flat[..half * OBS_DIM].to_vec(), [half, OBS_DIM]), &device);
-        let obs_t1 = Tensor::<B, 2, Float>::from_data(
-            TensorData::new(flat[half * OBS_DIM..].to_vec(), [half, OBS_DIM]), &device);
+        let flat  = vec_env.get_stacked_obs();
+        let obs_t = Tensor::<B, 2, Float>::from_data(
+            TensorData::new(flat, [n, OBS_DIM]), &device);
 
-        // Both actors dispatch simultaneously
-        let (r0, r1) = tokio::join!(
-            agent.request_action(vec![id0], obs_t0, None, 0.0),
-            agent.request_action(vec![id1], obs_t1, None, 0.0)
-        );
+        // Single call — coordinator splits [n,8] → [half,8] per actor internally
+        let results = agent.request_action(vec![id0, id1], obs_t, None, 0.0).await;
 
         let mut acts = vec![0u8; n];
-        if let Ok(v) = r0 {
-            if let Some((_, a)) = v.first() {
-                acts[..half].copy_from_slice(&decode_batch_actions(a, half));
-            }
-        }
-        if let Ok(v) = r1 {
-            if let Some((_, a)) = v.first() {
-                acts[half..].copy_from_slice(&decode_batch_actions(a, half));
+        if let Ok(ref v) = results {
+            for (i, (_, a)) in v.iter().enumerate() {
+                let start = i * half;
+                let end   = (start + half).min(n);
+                acts[start..end].copy_from_slice(&decode_batch_actions(a, end - start));
             }
         }
         let _ = vec_env.step_all(&acts);
@@ -333,40 +330,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while calls_done < calls {
         let call_start = Instant::now();
 
-        let flat = vec_env.get_stacked_obs();
+        let flat  = vec_env.get_stacked_obs();
+        let obs_t = Tensor::<B, 2, Float>::from_data(
+            TensorData::new(flat, [n, OBS_DIM]), &device);
 
-        // ── Actors 0 & 1 dispatch simultaneously ─────────────────────────────
-        let obs_t0 = Tensor::<B, 2, Float>::from_data(
-            TensorData::new(flat[..half * OBS_DIM].to_vec(), [half, OBS_DIM]), &device);
-        let obs_t1 = Tensor::<B, 2, Float>::from_data(
-            TensorData::new(flat[half * OBS_DIM..].to_vec(), [half, OBS_DIM]), &device);
+        // ── Single request_action — coordinator splits obs internally ─────────
+        let infer_start = Instant::now();
+        let results = agent.request_action(vec![id0, id1], obs_t, None, 0.0).await;
+        let infer_ns = infer_start.elapsed().as_nanos() as u64;
+        infer_wf.update(infer_ns as f64);
+        infer_res.push(infer_ns);
 
-        let ((res0, a0_ns), (res1, a1_ns)) = tokio::join!(
-            async {
-                let t = Instant::now();
-                let r = agent.request_action(vec![id0], obs_t0, None, 0.0).await;
-                (r, t.elapsed().as_nanos() as u64)
-            },
-            async {
-                let t = Instant::now();
-                let r = agent.request_action(vec![id1], obs_t1, None, 0.0).await;
-                (r, t.elapsed().as_nanos() as u64)
-            }
-        );
-
-        a0_wf.update(a0_ns as f64);  a0_res.push(a0_ns);
-        a1_wf.update(a1_ns as f64);  a1_res.push(a1_ns);
-
-        // ── Decode and combine 1024 actions ───────────────────────────────────
+        // ── Decode combined 1024 actions (actor0 → [0,512), actor1 → [512,1024)) ─
         let mut acts = vec![0u8; n];
-        if let Ok(v) = res0 {
-            if let Some((_, a)) = v.first() {
-                acts[..half].copy_from_slice(&decode_batch_actions(a, half));
-            }
-        }
-        if let Ok(v) = res1 {
-            if let Some((_, a)) = v.first() {
-                acts[half..].copy_from_slice(&decode_batch_actions(a, half));
+        if let Ok(ref v) = results {
+            for (i, (_, a)) in v.iter().enumerate() {
+                let start = i * half;
+                let end   = (start + half).min(n);
+                acts[start..end].copy_from_slice(&decode_batch_actions(a, end - start));
             }
         }
 
@@ -408,14 +389,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Compute metrics ───────────────────────────────────────────────────────
 
-    let call_mean_us = call_wf.mean   / 1_000.0;
-    let call_std_us  = call_wf.std_dev() / 1_000.0;
-    let env_mean_us  = env_wf.mean    / 1_000.0;
-    let env_std_us   = env_wf.std_dev() / 1_000.0;
-    let a0_mean_us   = a0_wf.mean     / 1_000.0;
-    let a0_std_us    = a0_wf.std_dev() / 1_000.0;
-    let a1_mean_us   = a1_wf.mean     / 1_000.0;
-    let a1_std_us    = a1_wf.std_dev() / 1_000.0;
+    let call_mean_us  = call_wf.mean      / 1_000.0;
+    let call_std_us   = call_wf.std_dev() / 1_000.0;
+    let env_mean_us   = env_wf.mean       / 1_000.0;
+    let env_std_us    = env_wf.std_dev()  / 1_000.0;
+    let infer_mean_us = infer_wf.mean     / 1_000.0;
+    let infer_std_us  = infer_wf.std_dev()/ 1_000.0;
 
     let call_p50  = call_res.percentile(50.0);
     let call_p95  = call_res.percentile(95.0);
@@ -423,20 +402,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let call_p999 = call_res.percentile(99.9);
     let env_p50   = env_res.percentile(50.0);
     let env_p99   = env_res.percentile(99.0);
-    let a0_p50    = a0_res.percentile(50.0);
-    let a0_p99    = a0_res.percentile(99.0);
-    let a1_p50    = a1_res.percentile(50.0);
-    let a1_p99    = a1_res.percentile(99.0);
+    let infer_p50 = infer_res.percentile(50.0);
+    let infer_p95 = infer_res.percentile(95.0);
+    let infer_p99 = infer_res.percentile(99.0);
     let jitter_us = (call_p99.saturating_sub(call_p50)) as f64 / 1_000.0;
 
-    // Overhead = call time minus both actor requests and env step
-    let overhead_us    = (call_mean_us - a0_mean_us - a1_mean_us - env_mean_us).max(0.0);
+    let overhead_us    = (call_mean_us - infer_mean_us - env_mean_us).max(0.0);
     let overhead_ratio = overhead_us / call_mean_us.max(1e-9);
 
-    let env_sps        = total_env_steps as f64 / elapsed;
-    let calls_per_sec  = calls_done as f64 / elapsed;
-    let per_core_sps   = env_sps / num_cores as f64;
-    let per_actor_sps  = env_sps / 2.0;
+    let env_sps       = total_env_steps as f64 / elapsed;
+    let calls_per_sec = calls_done as f64 / elapsed;
+    let per_core_sps  = env_sps / num_cores as f64;
+    let per_actor_sps = env_sps / 2.0;
 
     let total_eps  = ep_returns.len() as f64;
     let eps_per_s  = total_eps / elapsed;
@@ -474,16 +451,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rss_mean_gb  = rss_mean as f64 / (1_024.0 * 1_024.0);
     let sps_per_gb   = if rss_mean_gb > 0.0 { env_sps / rss_mean_gb } else { 0.0 };
 
-    // S(n) vs single-actor 1-env baseline (bench_lunar ≈ 19 443 env-steps/sec)
     const BASELINE_1ENV: f64 = 19_443.0;
     let scalability = env_sps / BASELINE_1ENV;
 
     // ── Report ────────────────────────────────────────────────────────────────
     println!();
     println!("═══════════════════════════════════════════════════════════════════════");
-    println!("  RelayRL LunarLander — DUAL-ACTOR FINAL RESULTS");
-    println!("  2 actors  |  {} sub-envs ({}/{} split)  |  {} calls  |  batched ONNX + rayon",
+    println!("  RelayRL LunarLander — DUAL-ACTOR SHARED FINAL RESULTS");
+    println!("  2 actors (Shared)  |  {} total envs ({}/{} split)  |  {} calls",
              n, half, half, calls_done);
+    println!("  Batch path: caller → [{}×{}] → coordinator splits → 2×[{}×{}] → shared ONNX",
+             n, OBS_DIM, half, OBS_DIM);
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
     println!("─── Throughput ──────────────────────────────────────────────────────────");
@@ -492,13 +470,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  env-steps/sec per actor        : {:>12.1}   ({} envs × {:.0} calls/s)",
              per_actor_sps, half, calls_per_sec);
     println!("  env-steps/sec per logical core : {:>12.1}", per_core_sps);
-    println!("  calls/sec (per full round)     : {:>12.1}", calls_per_sec);
+    println!("  calls/sec (single request)     : {:>12.1}", calls_per_sec);
     println!("  episodes/sec (all sub-envs)    : {:>12.3}", eps_per_s);
     println!("  total calls                    : {:>12}", calls_done);
     println!("  total env steps                : {:>12}", total_env_steps);
     println!("  wall time                      : {:>12.2} s", elapsed);
     println!("  logical cores                  : {:>12}", num_cores);
-    println!("  VecEnv batch (total)           : {:>12}   ({} per actor)", n, half);
+    println!("  VecEnv batch (total)           : {:>12}   ({} per actor, coordinator-split)",
+             n, half);
     println!("  max steps / episode            : {:>12}", max_steps);
     println!();
 
@@ -509,20 +488,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  total episodes (all sub-envs)  : {:>12}", ep_returns.len());
     println!();
 
-    println!("─── Per-Actor Inference Timing (µs) ─────────────────────────────────────");
-    println!("  actor 0  mean  (batch={:>4})     : {:>12.3} µs  ± {:.3} µs",
-             half, a0_mean_us, a0_std_us);
-    println!("  actor 0  P50                   : {:>12.3} µs", a0_p50 as f64 / 1_000.0);
-    println!("  actor 0  P99                   : {:>12.3} µs", a0_p99 as f64 / 1_000.0);
-    println!("  actor 1  mean  (batch={:>4})     : {:>12.3} µs  ± {:.3} µs",
-             half, a1_mean_us, a1_std_us);
-    println!("  actor 1  P50                   : {:>12.3} µs", a1_p50 as f64 / 1_000.0);
-    println!("  actor 1  P99                   : {:>12.3} µs", a1_p99 as f64 / 1_000.0);
-    println!("  actor imbalance (|a0−a1| mean) : {:>12.3} µs",
-             (a0_mean_us - a1_mean_us).abs());
+    println!("─── Coordinator Inference Timing (µs) — single call, 2-actor split ──────");
+    println!("  request_action mean            : {:>12.3} µs  (both actors, [{}×{}] split internally)",
+             infer_mean_us, n, OBS_DIM);
+    println!("  request_action std dev         : {:>12.3} µs", infer_std_us);
+    println!("  request_action P50             : {:>12.3} µs", infer_p50 as f64 / 1_000.0);
+    println!("  request_action P95             : {:>12.3} µs", infer_p95 as f64 / 1_000.0);
+    println!("  request_action P99             : {:>12.3} µs", infer_p99 as f64 / 1_000.0);
+    println!("  model batch per actor          : {:>12}   (coordinator ceil({}/2))",
+             half, n);
+    println!("  model mode                     :   Shared (single ONNX session, 2 actors)");
     println!();
 
-    println!("─── Full Round Timing (µs) — actor0 + actor1 request + step_all ─────────");
+    println!("─── Full Round Timing (µs) — request_action + decode + step_all ─────────");
     println!("  round mean                     : {:>12.3} µs", call_mean_us);
     println!("  round std dev                  : {:>12.3} µs", call_std_us);
     println!("  round P50                      : {:>12.3} µs", call_p50  as f64 / 1_000.0);
@@ -544,18 +522,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("─── Scheduling / Overhead ───────────────────────────────────────────────");
-    println!("  overhead per round             : {:>12.3} µs  (round − a0 − a1 − env)",
+    println!("  overhead per round             : {:>12.3} µs  (round − infer − env)",
              overhead_us);
     println!("  overhead ratio                 : {:>12.4}", overhead_ratio);
-    println!("  actor serialization overhead   :   a0 + a1 = {:.3} + {:.3} = {:.3} µs",
-             a0_mean_us, a1_mean_us, a0_mean_us + a1_mean_us);
     println!("  dropped/late updates           : {:>12}", 0u32);
     println!();
 
     println!("─── Memory ──────────────────────────────────────────────────────────────");
     println!("  RSS init                       : {:>9.1} MB", rss_init  as f64 / 1_024.0);
     println!("  RSS peak                       : {:>9.1} MB", rss_peak  as f64 / 1_024.0);
-    println!("  RSS mean                       : {:>9.1} MB  ({:.3} GB)", rss_mean as f64 / 1_024.0, rss_mean_gb);
+    println!("  RSS mean                       : {:>9.1} MB  ({:.3} GB)",
+             rss_mean as f64 / 1_024.0, rss_mean_gb);
     println!("  RSS final                      : {:>9.1} MB", rss_final as f64 / 1_024.0);
     println!("  allocation rate (RSS Δ/s)      : {:>9.3} KB/s", alloc_rate);
     println!("  /proc samples                  : {:>9}", rss.len());
@@ -581,15 +558,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("─── Notes ───────────────────────────────────────────────────────────────");
-    println!("  cache misses / IPC             :   perf stat -e cache-misses,LLC-load-misses,cycles,instructions");
-    println!("  actor balance                  :   actor imbalance = |actor0_mean − actor1_mean|");
-    println!("  actor requests                 :   sequential (coordinator pipelines internally)");
+    println!("  coordinator split              :   ceil({}/{}) = {} rows per actor",
+             n, 2, half);
+    println!("  model sharing                  :   Shared — single ONNX session, 2 actors");
+    println!("  caller concurrency             :   none — single request_action call");
     println!("  env stepping                   :   rayon work-stealing over {} sub-envs", n);
     println!();
 
     println!("═══════════════════════════════════════════════════════════════════════");
-    println!("  SUMMARY: {} ms init · 2 actors · {} total envs ({} each) · batch [{},{}]",
-             init_ms, n, half, half, OBS_DIM);
+    println!("  SUMMARY: {} ms init · 2 actors (Shared) · {} total envs · batch [{},{}] each",
+             init_ms, n, half, OBS_DIM);
     println!("═══════════════════════════════════════════════════════════════════════");
 
     agent.shutdown().await?;
