@@ -298,29 +298,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     vec_env.reset_all();
     for _ in 0..200 {
         let flat = vec_env.get_stacked_obs();
-
-        // Actor 0: first half
         let obs_t0 = Tensor::<B, 2, Float>::from_data(
             TensorData::new(flat[..half * OBS_DIM].to_vec(), [half, OBS_DIM]), &device);
-        let r0 = agent.request_action(vec![id0], obs_t0, None, 0.0).await;
-
-        // Actor 1: second half
         let obs_t1 = Tensor::<B, 2, Float>::from_data(
             TensorData::new(flat[half * OBS_DIM..].to_vec(), [half, OBS_DIM]), &device);
-        let r1 = agent.request_action(vec![id1], obs_t1, None, 0.0).await;
 
-        // Combine actions and step
+        // Both actors dispatch simultaneously
+        let (r0, r1) = tokio::join!(
+            agent.request_action(vec![id0], obs_t0, None, 0.0),
+            agent.request_action(vec![id1], obs_t1, None, 0.0)
+        );
+
         let mut acts = vec![0u8; n];
         if let Ok(v) = r0 {
             if let Some((_, a)) = v.first() {
-                let decoded = decode_batch_actions(a, half);
-                acts[..half].copy_from_slice(&decoded);
+                acts[..half].copy_from_slice(&decode_batch_actions(a, half));
             }
         }
         if let Ok(v) = r1 {
             if let Some((_, a)) = v.first() {
-                let decoded = decode_batch_actions(a, half);
-                acts[half..].copy_from_slice(&decoded);
+                acts[half..].copy_from_slice(&decode_batch_actions(a, half));
             }
         }
         let _ = vec_env.step_all(&acts);
@@ -338,36 +335,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let flat = vec_env.get_stacked_obs();
 
-        // ── Actor 0: obs [0, half) ────────────────────────────────────────────
+        // ── Actors 0 & 1 dispatch simultaneously ─────────────────────────────
         let obs_t0 = Tensor::<B, 2, Float>::from_data(
             TensorData::new(flat[..half * OBS_DIM].to_vec(), [half, OBS_DIM]), &device);
-        let a0_start = Instant::now();
-        let res0 = agent.request_action(vec![id0], obs_t0, None, 0.0).await;
-        let a0_ns = a0_start.elapsed().as_nanos() as u64;
-        a0_wf.update(a0_ns as f64);
-        a0_res.push(a0_ns);
-
-        // ── Actor 1: obs [half, n) ────────────────────────────────────────────
         let obs_t1 = Tensor::<B, 2, Float>::from_data(
             TensorData::new(flat[half * OBS_DIM..].to_vec(), [half, OBS_DIM]), &device);
-        let a1_start = Instant::now();
-        let res1 = agent.request_action(vec![id1], obs_t1, None, 0.0).await;
-        let a1_ns = a1_start.elapsed().as_nanos() as u64;
-        a1_wf.update(a1_ns as f64);
-        a1_res.push(a1_ns);
+
+        let ((res0, a0_ns), (res1, a1_ns)) = tokio::join!(
+            async {
+                let t = Instant::now();
+                let r = agent.request_action(vec![id0], obs_t0, None, 0.0).await;
+                (r, t.elapsed().as_nanos() as u64)
+            },
+            async {
+                let t = Instant::now();
+                let r = agent.request_action(vec![id1], obs_t1, None, 0.0).await;
+                (r, t.elapsed().as_nanos() as u64)
+            }
+        );
+
+        a0_wf.update(a0_ns as f64);  a0_res.push(a0_ns);
+        a1_wf.update(a1_ns as f64);  a1_res.push(a1_ns);
 
         // ── Decode and combine 1024 actions ───────────────────────────────────
         let mut acts = vec![0u8; n];
         if let Ok(v) = res0 {
             if let Some((_, a)) = v.first() {
-                let decoded = decode_batch_actions(a, half);
-                acts[..half].copy_from_slice(&decoded);
+                acts[..half].copy_from_slice(&decode_batch_actions(a, half));
             }
         }
         if let Ok(v) = res1 {
             if let Some((_, a)) = v.first() {
-                let decoded = decode_batch_actions(a, half);
-                acts[half..].copy_from_slice(&decoded);
+                acts[half..].copy_from_slice(&decode_batch_actions(a, half));
             }
         }
 
