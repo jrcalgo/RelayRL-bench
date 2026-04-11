@@ -5,7 +5,7 @@
 
 use crate::network::client::agent::{ActorInferenceMode, ClientModes, ModelMode};
 use crate::network::client::runtime::actor::LocalModelHandle;
-use crate::network::client::runtime::actor::{Actor, ActorEntity};
+use crate::network::client::runtime::actor::{Actor, ActorEntity, InferenceWorkerHandle};
 use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 use crate::network::client::runtime::coordination::lifecycle_manager::LifecycleManagerError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
+use arc_swap::ArcSwapOption;
 use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 
@@ -96,6 +97,7 @@ pub(crate) struct StateManager<
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     default_model: Option<ModelModule<B>>,
     shared_local_models: Vec<(DeviceType, LocalModelHandle<B>)>,
+    shared_local_workers: Vec<(DeviceType, InferenceWorkerHandle<B, D_IN, D_OUT>)>,
     #[cfg(feature = "metrics")]
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
@@ -142,6 +144,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 shared_local_model_path,
                 default_model,
                 shared_local_models: Vec::new(),
+                shared_local_workers: Vec::new(),
                 #[cfg(feature = "metrics")]
                 metrics,
                 global_dispatcher_tx,
@@ -217,19 +220,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         Ok(None)
     }
 
-    /// Returns a `(LocalModelHandle<B>, needs_handshake)` pair for a new actor on `device`.
+    /// Returns a `(LocalModelHandle<B>, InferenceWorkerHandle<B, D_IN, D_OUT>, needs_handshake)`
+    /// triple for a new actor on `device`.
     ///
-    /// - **Independent** mode: always creates a fresh `Arc<RwLock<Option<...>>>`.
+    /// - **Independent** mode: always creates a fresh handle+worker per actor.
     ///   `needs_handshake` is `true` when no model could be pre-loaded.
     /// - **Shared** mode: looks up the per-device pool.  The *first* actor on a given device
     ///   creates the slot (and triggers a handshake if no model is available); every subsequent
-    ///   actor on the same device reuses the existing handle with `needs_handshake = false`,
+    ///   actor on the same device reuses the existing handle/worker with `needs_handshake = false`,
     ///   ensuring only one network round-trip happens per device.
     async fn get_or_init_model_handle(
         &mut self,
         default_model: Option<ModelModule<B>>,
         device: DeviceType,
-    ) -> Result<(LocalModelHandle<B>, bool), StateManagerError> {
+    ) -> Result<(LocalModelHandle<B>, InferenceWorkerHandle<B, D_IN, D_OUT>, bool), StateManagerError>
+    where
+        B: Send + Sync + 'static,
+    {
         match &self.shared_client_modes.actor_inference_mode {
             ActorInferenceMode::Local(ModelMode::Shared) => {
                 // Reuse existing slot for this device (if any).
@@ -239,8 +246,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .position(|(d, _)| d == &device)
                 {
                     let handle = self.shared_local_models[idx].1.clone();
+                    let worker = self.shared_local_workers[idx].1.clone();
                     // Subsequent actors never trigger an additional handshake.
-                    return Ok((handle, false));
+                    return Ok((handle, worker, false));
                 }
 
                 // First actor for this device: create the slot.
@@ -248,19 +256,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
-                self.shared_local_models.push((device, handle.clone()));
-                Ok((handle, needs_handshake))
+                let handle: LocalModelHandle<B> =
+                    Arc::new(ArcSwapOption::new(reloadable.map(Arc::new)));
+                let worker = InferenceWorkerHandle::<B, D_IN, D_OUT>::new(handle.clone());
+                self.shared_local_models.push((device.clone(), handle.clone()));
+                self.shared_local_workers.push((device, worker.clone()));
+                Ok((handle, worker, needs_handshake))
             }
 
-            // Independent or Server-inference: every actor gets its own fresh handle.
+            // Independent or Server-inference: every actor gets its own fresh handle+worker.
             _ => {
                 let reloadable = self
                     .load_reloadable_model(default_model, device.clone())
                     .await?;
                 let needs_handshake = reloadable.is_none();
-                let handle: LocalModelHandle<B> = Arc::new(RwLock::new(reloadable));
-                Ok((handle, needs_handshake))
+                let handle: LocalModelHandle<B> =
+                    Arc::new(ArcSwapOption::new(reloadable.map(Arc::new)));
+                let worker = InferenceWorkerHandle::<B, D_IN, D_OUT>::new(handle.clone());
+                Ok((handle, worker, needs_handshake))
             }
         }
     }
@@ -301,7 +314,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         let client_namespace = self.client_namespace.clone();
 
-        let (model_handle, model_handshake_flag) = self
+        let (model_handle, worker_handle, model_handshake_flag) = self
             .get_or_init_model_handle(default_model, device.clone())
             .await?;
         self.actor_devices.insert(actor_id, device.clone());
@@ -313,6 +326,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 actor_id,
                 device.clone(),
                 model_handle,
+                worker_handle,
                 shared_local_model_path,
                 shared_max_traj_length,
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -433,6 +447,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.actor_model_handles.clear();
         self.shared_router_state.actor_router_addresses.clear();
         self.shared_local_models.clear();
+        self.shared_local_workers.clear();
 
         Ok(())
     }

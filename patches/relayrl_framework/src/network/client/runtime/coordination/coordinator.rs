@@ -6,7 +6,7 @@
 
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
-use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes};
+use crate::network::client::agent::{ActorInferenceMode, ActorTrainingDataMode, ClientModes, ModelMode};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::agent::{AlgorithmArgs, InferenceAddressesArgs, TrainingAddressesArgs};
 use crate::network::client::runtime::coordination::lifecycle_manager::{
@@ -1267,37 +1267,26 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     (global_dispatcher_tx, valid_ids)
                 };
 
-                let mut pending = Vec::with_capacity(valid_ids.len());
-
-                // When multiple actor IDs are provided with a single stacked observation
-                // tensor, split the batch (dim 0) evenly across actors.  Each actor
-                // receives ceil(batch / num_actors) rows; the last actor gets the
-                // remainder (which may be smaller if batch is not divisible).
-                let num_actors = valid_ids.len();
-                let batch_size = observation.batch_size();
-                let chunk = (batch_size + num_actors - 1) / num_actors; // ceil division
-
-                for (i, id) in valid_ids.iter().enumerate() {
-                    let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
-
-                    let obs_slice: Arc<AnyBurnTensor<B, D_IN>> = if num_actors == 1 {
-                        // Single actor — no copy, share the original Arc.
-                        observation.clone()
-                    } else {
-                        let start = i * chunk;
-                        if start >= batch_size {
-                            // No rows left for this actor; skip it.
-                            continue;
+                // In Shared mode, only the first actor performs inference (single ONNX session).
+                // In Independent mode, all actors receive the request.
+                let dispatch_ids: Vec<ActorUuid> =
+                    match &self.client_modes.actor_inference_mode {
+                        ActorInferenceMode::Local(ModelMode::Shared) => {
+                            valid_ids.into_iter().take(1).collect()
                         }
-                        let len = chunk.min(batch_size - start);
-                        Arc::new(observation.narrow_batch(start, len))
+                        _ => valid_ids,
                     };
 
+                let mut pending = Vec::with_capacity(dispatch_ids.len());
+
+                for id in dispatch_ids.iter() {
+                    let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
+
                     let action_request_message = RoutedMessage {
-                        actor_id: id.clone(),
+                        actor_id: *id,
                         protocol: RoutingProtocol::RequestInference,
                         payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
-                            observation: Box::new(obs_slice),
+                            observation: Box::new(observation.clone()),
                             mask: Box::new(mask.clone()),
                             reward,
                             reply_to: resp_tx,
@@ -1318,7 +1307,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 }
 
                 let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
-                    Vec::with_capacity(valid_ids.len());
+                    Vec::with_capacity(dispatch_ids.len());
 
                 for (id, resp_rx) in pending {
                     match resp_rx.await.map_err(|e| e.to_string()) {

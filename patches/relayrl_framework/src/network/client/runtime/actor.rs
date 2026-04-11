@@ -4,6 +4,7 @@
 //! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
 
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
+use crate::network::client::runtime::coordination::coordinator::CHANNEL_THROUGHPUT;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
@@ -19,6 +20,7 @@ use crate::network::client::runtime::router::{
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
+use arc_swap::ArcSwapOption;
 use relayrl_types::data::action::RelayRLAction;
 use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
@@ -28,6 +30,7 @@ use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
 #[cfg(feature = "metrics")]
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,12 +43,88 @@ use thiserror::Error;
 
 /// Shared handle to a hot-reloadable model.
 ///
-/// The outer `Arc<RwLock<Option<...>>>` enables two ownership modes:
+/// The outer `Arc<ArcSwapOption<...>>` enables two ownership modes:
 /// - **Independent**: each actor holds its own `Arc`, wrapping its own model.
 /// - **Shared**: all actors on the same device hold a clone of the *same* `Arc`, so
-///   a write through any one actor (handshake / model update) is immediately visible
+///   a snapshot swap through any one actor (handshake / model update) is immediately visible
 ///   to every other actor that shares it.
-pub(crate) type LocalModelHandle<B> = Arc<RwLock<Option<HotReloadableModel<B>>>>;
+pub(crate) type LocalModelHandle<B> = Arc<ArcSwapOption<HotReloadableModel<B>>>;
+
+struct InferenceJob<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
+{
+    observation: Arc<AnyBurnTensor<B, D_IN>>,
+    mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
+    reward: f32,
+    actor_id: ActorUuid,
+    response: oneshot::Sender<Result<RelayRLAction, ModelError>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct InferenceWorkerHandle<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
+    tx: Sender<InferenceJob<B, D_IN, D_OUT>>,
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+> InferenceWorkerHandle<B, D_IN, D_OUT>
+{
+    pub(crate) fn new(model_handle: LocalModelHandle<B>) -> Self {
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<InferenceJob<B, D_IN, D_OUT>>(CHANNEL_THROUGHPUT);
+
+        thread::spawn(move || {
+            let mut rx = rx;
+            while let Some(job) = rx.blocking_recv() {
+                let result = match model_handle.load_full() {
+                    Some(model) => model.forward::<D_IN, D_OUT>(
+                        job.observation,
+                        job.mask,
+                        job.reward,
+                        job.actor_id,
+                    ),
+                    None => Err(ModelError::IoError(
+                        "Model not loaded/available for actor inference".to_string(),
+                    )),
+                };
+                let _ = job.response.send(result);
+            }
+        });
+
+        Self { tx }
+    }
+
+    async fn infer(
+        &self,
+        observation: Arc<AnyBurnTensor<B, D_IN>>,
+        mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
+        reward: f32,
+        actor_id: ActorUuid,
+    ) -> Result<RelayRLAction, ActorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        self.tx
+            .send(InferenceJob {
+                observation,
+                mask,
+                reward,
+                actor_id,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| ActorError::SystemError("inference worker closed".to_string()))?;
+
+        response_rx
+            .await
+            .map_err(|_| ActorError::SystemError("inference worker response dropped".to_string()))?
+            .map_err(ActorError::from)
+    }
+}
 
 #[derive(Debug, Error)]
 #[allow(clippy::enum_variant_names)]
@@ -70,13 +149,19 @@ pub enum ActorError {
     TransportError(#[from] TransportError),
 }
 
-pub trait ActorEntity<B: Backend + BackendMatcher<Backend = B>>: Send + Sync + 'static {
+pub trait ActorEntity<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+>: Send + Sync + 'static
+{
     #[allow(clippy::too_many_arguments)]
     async fn new(
         client_namespace: Arc<str>,
         actor_id: ActorUuid,
         device: DeviceType,
         model_handle: LocalModelHandle<B>,
+        local_inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -109,6 +194,7 @@ pub(crate) struct Actor<
     client_namespace: Arc<str>,
     actor_id: ActorUuid,
     reloadable_model: LocalModelHandle<B>,
+    local_inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
     shared_local_model_path: Arc<RwLock<PathBuf>>,
     shared_max_traj_length: Arc<RwLock<usize>>,
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -126,8 +212,11 @@ pub(crate) struct Actor<
     metrics: MetricsManager,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    Actor<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+> Actor<B, D_IN, D_OUT>
 {
     #[inline(always)]
     #[allow(clippy::type_complexity)]
@@ -182,22 +271,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let start_time = Instant::now();
 
         let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
-        let actor_id = self.actor_id;
 
         let result = async {
-            // HotReloadableModel::forward() is lock-free (ArcSwap internally), so we can
-            // call it inline after a single async read of the outer Option guard.
-            let r4sa = {
-                let guard = self.reloadable_model.read().await;
-                let reloadable_model = guard.as_ref().ok_or_else(|| {
-                    ActorError::SystemError(
-                        "Model not loaded/available for actor inference".to_string(),
-                    )
-                })?;
-                reloadable_model
-                    .forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
-                    .map_err(ActorError::from)?
-            };
+            let r4sa = self
+                .local_inference_worker
+                .infer(obs, mask, reward, self.actor_id)
+                .await?;
 
             self.current_traj.add_action(r4sa.clone());
             reply_to.send(Arc::new(r4sa)).map_err(|e| {
@@ -235,12 +314,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     /// This path is still experimental in `0.5.0-beta`.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     async fn request_server_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        // Both the inference_kind and inference_dispatcher initializations are based on
-        // the client_capabilities.server_inference flag. Thus, if server_inference is true, the inference_dispatcher will be Some
-        // and inference_kind will be InferenceKind::Server. The opposite is true: see request_local_inference for the opposite case.
-        // If the inference_dispatcher is None, we will use the local model.
         if let Some(inference_dispatcher) = &self.shared_inference_dispatcher {
-            // we assume that the transport_addresses are available if the inference_dispatcher is Some
             let shared_transport_addresses = self
                 .shared_transport_addresses
                 .as_ref()
@@ -250,7 +324,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             let (obs, _mask, _reward, reply_to) = Self::extract_inference_request(msg)?;
 
             let obs_bytes: Vec<u8> = Vec::new();
-            let _ = obs; // Experimental server inference serialization is not implemented yet.
+            let _ = obs;
 
             let actor_entry = (
                 self.client_namespace.to_string(),
@@ -266,17 +340,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
             })?;
         } else {
-            // Fall back to local inference if a server dispatcher is not available.
             return self.perform_local_inference(msg).await;
         }
 
-        Ok(())
-    }
-
-    async fn handle_record_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        if let RoutedPayload::RecordAction(action) = msg.payload {
-            self.current_traj.add_action(action.as_ref().clone());
-        }
         Ok(())
     }
 
@@ -352,14 +418,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize> ActorEntity<B>
-    for Actor<B, D_IN, D_OUT>
+impl<
+    B: Backend + BackendMatcher<Backend = B> + Send + Sync + 'static,
+    const D_IN: usize,
+    const D_OUT: usize,
+> ActorEntity<B, D_IN, D_OUT> for Actor<B, D_IN, D_OUT>
 {
     async fn new(
         client_namespace: Arc<str>,
         actor_id: ActorUuid,
         device: DeviceType,
         model_handle: LocalModelHandle<B>,
+        local_inference_worker: InferenceWorkerHandle<B, D_IN, D_OUT>,
         shared_local_model_path: Arc<RwLock<PathBuf>>,
         shared_max_traj_length: Arc<RwLock<usize>>,
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -378,17 +448,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     {
         let max_traj_length: usize = *shared_max_traj_length.read().await;
 
-        let model_init_flag = model_handle.read().await.is_none();
+        let model_init_flag = model_handle.load_full().is_none();
         if model_init_flag {
             log::warn!(
                 "[ActorEntity] Startup model is None, initial model handshake necessitated..."
             );
         }
 
-        let actor: Actor<B, D_IN, D_OUT> = Self {
+        Actor::<B, D_IN, D_OUT> {
             client_namespace,
             actor_id,
             reloadable_model: model_handle,
+            local_inference_worker,
             shared_local_model_path,
             shared_max_traj_length,
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -404,9 +475,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             shared_client_modes,
             #[cfg(feature = "metrics")]
             metrics,
-        };
-
-        actor
+        }
     }
 
     async fn spawn_loop(&mut self) -> Result<(), ActorError> {
@@ -427,9 +496,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 RoutingProtocol::ModelUpdate => {
                     self.refresh_model(msg).await?;
                 }
-                RoutingProtocol::RecordAction => {
-                    self.handle_record_action(msg).await?;
-                }
                 RoutingProtocol::Shutdown => {
                     self.handle_shutdown(msg).await?;
                     break;
@@ -442,16 +508,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn initial_model_handshake(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelHandshake = msg.payload {
-            // Fast path: skip the handshake when a model is already available locally.
-            {
-                let model_guard = self.reloadable_model.read().await;
-                if model_guard.is_some() {
-                    log::warn!(
-                        "[Actor {:?}] Model already available, handshake not needed",
-                        self.actor_id
-                    );
-                    return Ok(());
-                }
+            if self.reloadable_model.load_full().is_some() {
+                log::warn!(
+                    "[Actor {:?}] Model already available, handshake not needed",
+                    self.actor_id
+                );
+                return Ok(());
             }
 
             #[cfg(feature = "metrics")]
@@ -504,8 +566,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 let model_device = self.model_device.clone();
                                 let actor_id = self.actor_id;
 
-                                let mut model_guard = self.reloadable_model.write().await;
-                                match model_guard.as_ref() {
+                                match self.reloadable_model.load_full() {
                                     Some(existing_model) => {
                                         let version = existing_model.version() + 1;
                                         existing_model
@@ -524,7 +585,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                             })?;
                                     }
                                     None => {
-                                        *model_guard = Some(
+                                        let reloadable_model = Arc::new(
                                             HotReloadableModel::<B>::new_from_module(
                                                 model,
                                                 model_device,
@@ -532,6 +593,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                             .await
                                             .map_err(ActorError::from)?,
                                         );
+                                        self.reloadable_model.store(Some(reloadable_model));
                                     }
                                 }
 
@@ -591,13 +653,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     async fn get_model_version(&self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::ModelVersion { reply_to } = msg.payload {
-            let version = {
-                let model_guard = self.reloadable_model.read().await;
-                match model_guard.as_ref() {
-                    Some(model) => model.version(),
-                    None => -1,
-                }
-            };
+            let version = self
+                .reloadable_model
+                .load_full()
+                .map(|model| model.version())
+                .unwrap_or(-1);
             reply_to
                 .send(version)
                 .map_err(|e| ActorError::MessageHandlingError(format!("{:?}", e)))?;
@@ -639,11 +699,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         return Err(e);
                     }
 
-                    // Acquire the outer write lock; in Shared mode this also blocks other actors
-                    // from running inference until the swap is complete.
                     let model_device = self.model_device.clone();
-                    let mut model_guard = self.reloadable_model.write().await;
-                    match model_guard.as_ref() {
+                    match self.reloadable_model.load_full() {
                         Some(existing_model) => {
                             existing_model
                                 .reload_from_module(ok_model, version)
@@ -651,12 +708,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 .map_err(ActorError::from)?;
                         }
                         None => {
-                            // Model handle is empty; initialise it now so the actor can run.
-                            *model_guard = Some(
+                            let reloadable_model = Arc::new(
                                 HotReloadableModel::<B>::new_from_module(ok_model, model_device)
                                     .await
                                     .map_err(ActorError::from)?,
                             );
+                            self.reloadable_model.store(Some(reloadable_model));
                         }
                     }
 
@@ -745,17 +802,12 @@ mod unit_tests {
 
     use active_uuid_registry::registry_uuid::Uuid;
     use relayrl_types::data::tensor::DeviceType;
-    use relayrl_types::data::tensor::NdArrayDType;
-    use relayrl_types::prelude::tensor::relayrl::DType;
-    use relayrl_types::prelude::tensor::relayrl::FloatBurnTensor;
 
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{RwLock, mpsc, oneshot};
 
     use burn_ndarray::NdArray;
-    use burn_ndarray::NdArrayDevice;
-    use burn_tensor::Tensor;
 
     type NdArrayBackend = NdArray<f32>;
 
@@ -770,7 +822,7 @@ mod unit_tests {
     }
 
     fn empty_onnx_model_handle() -> LocalModelHandle<NdArrayBackend> {
-        Arc::new(RwLock::new(None))
+        Arc::new(ArcSwapOption::new(None))
     }
 
     async fn create_ndarray_actor(
@@ -784,12 +836,15 @@ mod unit_tests {
         let actor_id = Uuid::new_v4();
         let (tx_to_actor, rx_from_router) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
         let (tx_to_buffer, rx_from_buffer) = mpsc::channel::<RoutedMessage>(CHANNEL_THROUGHPUT);
+        let model_handle = empty_onnx_model_handle();
+        let local_inference_worker = InferenceWorkerHandle::new(model_handle.clone());
 
         let actor = Actor::<NdArrayBackend, D_IN, D_OUT>::new(
             Arc::from("test-actor-namespace"),
             actor_id,
             device,
-            empty_onnx_model_handle(),
+            model_handle,
+            local_inference_worker,
             Arc::new(RwLock::new(PathBuf::new())),
             Arc::new(RwLock::new(max_traj_length)),
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -835,7 +890,7 @@ mod unit_tests {
         let (mut actor, tx, _rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
-        drop(tx); // closed channel, loop exits
+        drop(tx);
 
         let result = tokio::time::timeout(tokio::time::Duration::from_millis(300), handle)
             .await
@@ -901,7 +956,6 @@ mod unit_tests {
 
         assert_eq!(version, -1, "Unloaded model should report version -1");
 
-        // Shutdown the actor
         tx.send(build_msg(
             actor_id,
             RoutingProtocol::Shutdown,
@@ -918,7 +972,6 @@ mod unit_tests {
         let actor_id = actor.actor_id;
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
-        // Build trajectory via FlagLastInference (adds a terminal action)
         tx.send(build_msg(
             actor_id,
             RoutingProtocol::FlagLastInference,
@@ -927,7 +980,6 @@ mod unit_tests {
         .await
         .unwrap();
 
-        // Wait for the FlagLastInference to produce a SendTrajectory
         let traj_msg = tokio::time::timeout(tokio::time::Duration::from_millis(200), rx_buf.recv())
             .await
             .expect("timeout waiting for trajectory after FlagLastInference")
@@ -938,7 +990,6 @@ mod unit_tests {
             RoutedPayload::SendTrajectory { .. }
         ));
 
-        // Now send Shutdown
         tx.send(build_msg(
             actor_id,
             RoutingProtocol::Shutdown,
@@ -955,7 +1006,6 @@ mod unit_tests {
         let actor_id = actor.actor_id;
         let handle = tokio::spawn(async move { actor.spawn_loop().await });
 
-        // Send Shutdown immediately without adding any actions
         tx.send(build_msg(
             actor_id,
             RoutingProtocol::Shutdown,
@@ -965,7 +1015,6 @@ mod unit_tests {
         .unwrap();
         let _ = handle.await;
 
-        // Buffer should be empty
         assert!(
             rx_buf.try_recv().is_err(),
             "Buffer should be empty after shutdown with no trajectory"
@@ -1011,7 +1060,6 @@ mod unit_tests {
             )
             .unwrap();
             let h = tokio::spawn(async move { actor.spawn_loop().await });
-            // Immediately shut each actor down
             tx.send(build_msg(
                 actor_id,
                 RoutingProtocol::Shutdown,
@@ -1036,7 +1084,6 @@ mod unit_tests {
         let (mut actor, tx, rx_buf) = create_ndarray_actor(10, DeviceType::Cpu).await;
         let actor_id = actor.actor_id;
 
-        // Drop buffer receiver so send() fails
         drop(rx_buf);
 
         let result = actor
@@ -1061,7 +1108,6 @@ mod unit_tests {
         let actor_id = actor.actor_id;
 
         let (reply_tx, reply_rx) = oneshot::channel::<i64>();
-        // Drop the receiver side before the actor replies
         drop(reply_rx);
 
         let result = actor

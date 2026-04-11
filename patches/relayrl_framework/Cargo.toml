@@ -103,6 +103,9 @@ path = "src/lib.rs"
 name = "local_client_smoke"
 path = "tests/local_client_smoke.rs"
 
+[dependencies.arc-swap]
+version = "1.7"
+
 [dependencies.active-uuid-registry]
 version = "0.7.1"
 features = ["concurrent-map"]
