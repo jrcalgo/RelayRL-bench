@@ -21,6 +21,7 @@ pub(crate) mod runtime {
         pub(crate) mod scale_manager;
         pub(crate) mod state_manager;
     }
+    pub(crate) mod inference;
     pub(crate) mod router;
 
     pub(crate) mod data {

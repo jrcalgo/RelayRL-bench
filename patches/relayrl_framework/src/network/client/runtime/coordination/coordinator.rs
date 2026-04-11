@@ -30,9 +30,8 @@ use crate::network::client::runtime::data::transport_sink::transport_dispatcher:
 use crate::network::client::runtime::data::transport_sink::{
     ClientTransportInterface, TransportError, client_transport_factory,
 };
-use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
-};
+use crate::network::client::runtime::inference::engine::InferenceEngine;
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::TransportConfigParams;
 use crate::utilities::configuration::{ClientConfigLoader, DEFAULT_CLIENT_CONFIG_PATH};
@@ -246,6 +245,7 @@ pub struct CoordinatorParams<
     pub(crate) lifecycle: LifecycleManager,
     pub(crate) shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
     pub(crate) scaling: ScaleManager<B, D_IN, D_OUT>,
+    pub(crate) inference_engine: Arc<InferenceEngine<B, D_IN, D_OUT>>,
 }
 
 pub struct ClientCoordinator<
@@ -825,6 +825,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 lifecycle,
                 shared_state,
                 scaling,
+                inference_engine: Arc::new(InferenceEngine::new()),
             });
         }
 
@@ -1060,6 +1061,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     )
                     .await?;
 
+                // Register the actor's model handle with the inference engine so the
+                // coordinator can execute forward passes directly without routing.
+                if let Some(handle) = params
+                    .shared_state
+                    .read()
+                    .await
+                    .actor_model_handles
+                    .get(&actor_id)
+                {
+                    params
+                        .inference_engine
+                        .register(actor_id, handle.value().clone());
+                }
+
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 {
                     if send_id {
@@ -1125,6 +1140,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .await
                     .remove_actor(id)
                     .map_err(CoordinatorError::from)?;
+
+                params.inference_engine.deregister(&id);
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if send_ids {
@@ -1225,88 +1242,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(feature = "metrics")]
                 let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
-                // Extract router runtime params with clear error messages
-                let _router_runtime_params: &dashmap::DashMap<
-                    RouterNamespace,
-                    super::scale_manager::RouterRuntimeParams,
-                > = {
-                    let runtime_params = self.runtime_params.as_ref().ok_or_else(|| {
-                        CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::GetRouterRuntimeParamsError(
-                                "[Coordinator] No runtime params".to_string(),
-                            ),
-                        )
-                    })?;
-
-                    runtime_params
-                        .scaling
-                        .runtime_params
-                        .as_ref()
-                        .ok_or_else(|| {
-                            CoordinatorError::ScaleManagerError(
-                                ScaleManagerError::GetRouterRuntimeParamsError(
-                                    "[Coordinator] No scaling runtime params".to_string(),
-                                ),
-                            )
-                        })?
-                };
-
-                // Get the global dispatcher sender
-                let (global_dispatcher_tx, valid_ids) = {
+                // Filter to only known actor IDs.
+                let valid_ids = {
                     let shared_state = params.shared_state.read().await;
-                    let global_dispatcher_tx = shared_state.global_dispatcher_tx.clone();
-                    let valid_ids = ids
-                        .into_iter()
+                    ids.into_iter()
                         .filter(|id| {
                             shared_state
                                 .shared_router_state
                                 .actor_router_addresses
                                 .contains_key(id)
                         })
-                        .collect::<Vec<_>>();
-                    (global_dispatcher_tx, valid_ids)
+                        .collect::<Vec<_>>()
                 };
 
-                let mut pending = Vec::with_capacity(valid_ids.len());
-
-                for id in &valid_ids {
-                    let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
-
-                    let action_request_message = RoutedMessage {
-                        actor_id: id.clone(),
-                        protocol: RoutingProtocol::RequestInference,
-                        payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
-                            observation: Box::new(observation.clone()),
-                            mask: Box::new(mask.clone()),
-                            reward,
-                            reply_to: resp_tx,
-                        })),
-                    };
-
-                    if let Err(e) = global_dispatcher_tx
-                        .send(action_request_message)
-                        .await
-                        .map_err(|e| e.to_string())
-                    {
-                        return Err(CoordinatorError::ScaleManagerError(
-                            ScaleManagerError::SendActionRequestError(e),
-                        ));
-                    }
-
-                    pending.push((*id, resp_rx));
-                }
-
-                let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> =
+                // Execute inference directly in the coordinator's async task — no channel
+                // dispatch, no per-actor message round-trip, no oneshot allocation.
+                let mut actions: Vec<(ActorUuid, Arc<RelayRLAction>)> =
                     Vec::with_capacity(valid_ids.len());
 
-                for (id, resp_rx) in pending {
-                    match resp_rx.await.map_err(|e| e.to_string()) {
-                        Ok(action) => actions.push((id, action)),
-                        Err(e) => {
-                            return Err(CoordinatorError::ScaleManagerError(
-                                ScaleManagerError::ReceiveActionResponseError(e),
-                            ));
-                        }
+                for id in &valid_ids {
+                    if let Some(action) = params
+                        .inference_engine
+                        .forward(*id, observation.clone(), mask.clone(), reward)
+                        .await
+                    {
+                        actions.push((*id, Arc::new(action)));
                     }
                 }
 

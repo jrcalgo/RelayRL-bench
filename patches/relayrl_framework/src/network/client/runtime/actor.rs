@@ -3,7 +3,7 @@
 //! Actors own local inference state, trajectory assembly, and the message-handling loop for the
 //! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
 
-use crate::network::client::agent::{ActorInferenceMode, ClientModes};
+use crate::network::client::agent::ClientModes;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
@@ -13,9 +13,7 @@ use crate::network::client::runtime::data::transport_sink::TransportError;
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
 };
-use crate::network::client::runtime::router::{
-    InferenceRequest, RoutedMessage, RoutedPayload, RoutingProtocol,
-};
+use crate::network::client::runtime::router::{RoutedMessage, RoutedPayload, RoutingProtocol};
 #[cfg(feature = "metrics")]
 use crate::utilities::observability::metrics::MetricsManager;
 
@@ -24,8 +22,6 @@ use relayrl_types::data::tensor::{BackendMatcher, DeviceType};
 use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
-use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "metrics")]
@@ -33,7 +29,6 @@ use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::oneshot;
 
 use burn_tensor::backend::Backend;
 use thiserror::Error;
@@ -129,149 +124,6 @@ pub(crate) struct Actor<
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
     Actor<B, D_IN, D_OUT>
 {
-    #[inline(always)]
-    #[allow(clippy::type_complexity)]
-    fn extract_inference_request(
-        msg: RoutedMessage,
-    ) -> Result<
-        (
-            Arc<AnyBurnTensor<B, D_IN>>,
-            Option<Arc<AnyBurnTensor<B, D_OUT>>>,
-            f32,
-            oneshot::Sender<Arc<RelayRLAction>>,
-        ),
-        ActorError,
-    > {
-        let RoutedPayload::RequestInference(req) = msg.payload else {
-            return Err(ActorError::MessageHandlingError(
-                "Expected RequestInference payload".to_string(),
-            ));
-        };
-
-        let InferenceRequest {
-            observation,
-            mask,
-            reward,
-            reply_to,
-        } = *req;
-
-        let obs: Arc<AnyBurnTensor<B, D_IN>> = *observation
-            .downcast::<Arc<AnyBurnTensor<B, D_IN>>>()
-            .map_err(|_| {
-                ActorError::TypeConversionError("Failed to downcast observation".into())
-            })?;
-
-        let mask: Option<Arc<AnyBurnTensor<B, D_OUT>>> = *mask
-            .downcast::<Option<Arc<AnyBurnTensor<B, D_OUT>>>>()
-            .map_err(|_| ActorError::TypeConversionError("Failed to downcast mask".into()))?;
-
-        Ok((obs, mask, reward, reply_to))
-    }
-
-    #[inline(always)]
-    async fn handle_inference_kind(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        match self.shared_client_modes.actor_inference_mode {
-            ActorInferenceMode::Local(_) => self.perform_local_inference(msg).await,
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            ActorInferenceMode::Server(_) => self.request_server_inference(msg).await,
-        }
-    }
-
-    async fn perform_local_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        #[cfg(feature = "metrics")]
-        let start_time = Instant::now();
-
-        let (obs, mask, reward, reply_to) = Self::extract_inference_request(msg)?;
-        let actor_id = self.actor_id;
-
-        let result = async {
-            // HotReloadableModel::forward() is lock-free (ArcSwap internally), so we can
-            // call it inline after a single async read of the outer Option guard.
-            let r4sa = {
-                let guard = self.reloadable_model.read().await;
-                let reloadable_model = guard.as_ref().ok_or_else(|| {
-                    ActorError::SystemError(
-                        "Model not loaded/available for actor inference".to_string(),
-                    )
-                })?;
-                reloadable_model
-                    .forward::<D_IN, D_OUT>(obs, mask, reward, actor_id)
-                    .map_err(ActorError::from)?
-            };
-
-            self.current_traj.add_action(r4sa.clone());
-            reply_to.send(Arc::new(r4sa)).map_err(|e| {
-                ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
-            })?;
-
-            Ok(())
-        }
-        .await;
-
-        #[cfg(feature = "metrics")]
-        match &result {
-            Ok(()) => {
-                let duration = start_time.elapsed().as_secs_f64();
-                self.metrics
-                    .record_histogram("actor_local_inference_latency", duration, &[])
-                    .await;
-                self.metrics
-                    .record_counter("actor_local_inferences", 1, &[])
-                    .await;
-            }
-            Err(_) => {
-                self.metrics
-                    .record_counter("actor_local_inference_failures", 1, &[])
-                    .await;
-            }
-        }
-
-        result
-    }
-
-    /// Server inference: serialize observation (and optionally mask) and send to server.
-    /// Note: if obs/mask live on GPU, you will pay a device->host copy during serialization.
-    ///
-    /// This path is still experimental in `0.5.0-beta`.
-    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-    async fn request_server_inference(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
-        // Both the inference_kind and inference_dispatcher initializations are based on
-        // the client_capabilities.server_inference flag. Thus, if server_inference is true, the inference_dispatcher will be Some
-        // and inference_kind will be InferenceKind::Server. The opposite is true: see request_local_inference for the opposite case.
-        // If the inference_dispatcher is None, we will use the local model.
-        if let Some(inference_dispatcher) = &self.shared_inference_dispatcher {
-            // we assume that the transport_addresses are available if the inference_dispatcher is Some
-            let shared_transport_addresses = self
-                .shared_transport_addresses
-                .as_ref()
-                .ok_or_else(|| ActorError::SystemError("Server addresses not available".into()))?
-                .clone();
-
-            let (obs, _mask, _reward, reply_to) = Self::extract_inference_request(msg)?;
-
-            let obs_bytes: Vec<u8> = Vec::new();
-            let _ = obs; // Experimental server inference serialization is not implemented yet.
-
-            let actor_entry = (
-                self.client_namespace.to_string(),
-                crate::network::ACTOR_CONTEXT.to_string(),
-                self.actor_id,
-            );
-            let r4sa = inference_dispatcher
-                .send_inference_request(actor_entry, obs_bytes, shared_transport_addresses)
-                .await?;
-
-            self.current_traj.add_action(r4sa.clone());
-            reply_to.send(Arc::new(r4sa)).map_err(|e| {
-                ActorError::MessageHandlingError(format!("reply_to send failed: {e:?}"))
-            })?;
-        } else {
-            // Fall back to local inference if a server dispatcher is not available.
-            return self.perform_local_inference(msg).await;
-        }
-
-        Ok(())
-    }
 
     async fn handle_record_action(&mut self, msg: RoutedMessage) -> Result<(), ActorError> {
         if let RoutedPayload::RecordAction(action) = msg.payload {
@@ -414,9 +266,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             match msg.protocol {
                 RoutingProtocol::ModelHandshake => {
                     self.initial_model_handshake(msg).await?;
-                }
-                RoutingProtocol::RequestInference => {
-                    self.handle_inference_kind(msg).await?;
                 }
                 RoutingProtocol::FlagLastInference => {
                     self.perform_flag_last_action(msg).await?;

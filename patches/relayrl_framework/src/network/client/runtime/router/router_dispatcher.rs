@@ -143,13 +143,11 @@ impl RouterDispatcher {
 
     fn get_timeout_for_message_protocol(protocol: &RoutingProtocol) -> Duration {
         match protocol {
-            RoutingProtocol::RequestInference => Duration::from_secs(10),
             RoutingProtocol::ModelVersion => Duration::from_secs(15),
             RoutingProtocol::FlagLastInference => Duration::from_secs(20),
             RoutingProtocol::ModelHandshake | RoutingProtocol::SendTrajectory => {
                 Duration::from_secs(30)
             }
-
             RoutingProtocol::ModelUpdate | RoutingProtocol::Shutdown => Duration::from_secs(60),
             RoutingProtocol::RecordAction => Duration::from_secs(10),
         }
