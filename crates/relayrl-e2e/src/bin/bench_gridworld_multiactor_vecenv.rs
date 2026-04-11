@@ -1,15 +1,15 @@
-//! bench_gridworld_multiactor_vecenv — 2 actors × 2 policies × 512 sub-envs each.
+//! bench_gridworld_multiactor_vecenv — 2 actors × 2 policies, full 1024-env batch.
 //!
 //! Architecture:
-//!   - 2 RelayRL actors, ModelMode::Independent  (one ONNX model handle per actor = 2 policies)
-//!   - Each actor owns a SyncVectorEnv<B> with 512 sub-envs
-//!   - Every step issues two concurrent request_action calls via tokio::join! —
-//!     each call passes a [512, obs_dim] batched observation tensor
-//!   - Both VecEnvs are stepped in parallel immediately after (rayon inside step_all)
-//!   - Total env steps per call-pair = 1 024
-//!
-//! With the InferenceEngine refactor the coordinator executes model.forward() directly
-//! (no channel round-trip), so tokio::join! overlaps both forward passes on NdArray.
+//!   - 1 SyncVectorEnv with 1024 sub-envs
+//!   - 2 RelayRL actors, ModelMode::Independent (one ONNX handle per actor = 2 policies)
+//!   - Every step: request_action([id0, id1], obs_1024, None, reward)
+//!     → coordinator calls inference_engine.forward(id, obs, …) for EACH actor ID
+//!     → returns Vec<(ActorUuid, Arc<RelayRLAction>)> with 2 entries
+//!     → each entry is a [1024, act_dim] policy output
+//!   - Actor-0's actions are used to step the 1024 envs (actor-1 runs in parallel
+//!     as a second policy over the same observation batch)
+//!   - rayon parallel step_all inside SyncVectorEnv
 
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, Ordering as AOrdering};
@@ -36,25 +36,25 @@ use gridworld_rl::env::vec::SyncVectorEnv;
 #[derive(Parser, Debug)]
 #[command(
     name  = "bench_gridworld_multiactor_vecenv",
-    about = "2-actor / 2-policy GridWorld VecEnv benchmark  (512 sub-envs per actor, 1024 total)"
+    about = "2-actor / 2-policy GridWorld: request_action(all_ids, obs_1024, …)"
 )]
 struct Args {
-    /// Sub-environments per actor (total env steps per call-pair = 2 × this)
-    #[arg(long, default_value_t = 512)]
-    envs_per_actor: usize,
+    /// Total number of sub-environments (shared across both policies)
+    #[arg(long, default_value_t = 1024)]
+    num_envs: usize,
 
-    /// Number of call-pair iterations (total env steps = 2 × envs_per_actor × this)
+    /// Number of request_action calls
     #[arg(long, default_value_t = 50_000u64)]
     target_calls: u64,
 
-    /// GridWorld grid size (auto-expanded if needed)
+    /// GridWorld grid size
     #[arg(long, default_value_t = 10)]
     grid_size: usize,
 }
 
 // ─────────────────────────── Constants ───────────────────────────────────────
 
-const ACT_DIM:  usize = 4;
+const ACT_DIM:   usize = 4;
 const RESERVOIR: usize = 100_000;
 
 // ─────────────────────────── /proc helpers ───────────────────────────────────
@@ -158,7 +158,7 @@ where B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>
     Ok(ModelModule::<B>::from_onnx_bytes(bytes, meta)?)
 }
 
-/// Argmax-decode a batched [n, ACT_DIM] relay action output into `n` action indices.
+/// Argmax-decode a batched [n, ACT_DIM] relay action output into n action indices.
 fn decode_batch(relay: &relayrl_types::data::action::RelayRLAction, n: usize) -> Vec<u8> {
     let bpe = ACT_DIM * 4;
     relay.get_act()
@@ -182,12 +182,11 @@ fn decode_batch(relay: &relayrl_types::data::action::RelayRLAction, n: usize) ->
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     type B = NdArray;
 
-    let args     = Args::parse();
-    let n        = args.envs_per_actor;       // sub-envs per actor (512 default)
-    let calls    = args.target_calls;
-    let gs       = args.grid_size.max(3);
-    let obs_dim  = gs * gs;
-    let total_n  = 2 * n;                     // total sub-envs across both actors
+    let args    = Args::parse();
+    let n       = args.num_envs;
+    let calls   = args.target_calls;
+    let gs      = args.grid_size.max(3);
+    let obs_dim = gs * gs;
 
     let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
     let device_type = DeviceType::Cpu;
@@ -195,24 +194,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("═══════════════════════════════════════════════════════════════════════");
     println!("  RelayRL GridWorld Multi-Actor VecEnv benchmark");
-    println!("  2 actors  ·  2 policies (ModelMode::Independent)");
-    println!("  {} sub-envs/actor  ·  {} total sub-envs  ·  {} calls  ·  {}×{} grid",
-             n, total_n, calls, gs, gs);
-    println!("  Inference:  InferenceEngine (direct forward, no channel dispatch)");
-    println!("  Concurrency: tokio::join! overlaps both forward passes");
-    println!("  Env step:   rayon parallel step_all inside SyncVectorEnv");
-    println!("  Total env steps = {} × {} = {}", total_n, calls, total_n as u64 * calls);
+    println!("  2 actors · 2 policies (ModelMode::Independent) · {} sub-envs · {}×{} grid",
+             n, gs, gs);
+    println!("  request_action([id0, id1], obs_[{},{}], …)", n, obs_dim);
+    println!("  → coordinator calls forward(id0, obs) then forward(id1, obs) in sequence");
+    println!("  → returns 2 × [N, act_dim] policy outputs per call");
+    println!("  Total env steps = {} × {} = {}", n, calls, n as u64 * calls);
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
-    // ── Two independent VecEnvs (one per actor) ───────────────────────────────
-    let mut vec_env_0 = SyncVectorEnv::<B>::new(n, gs, device.clone())?;
-    let mut vec_env_1 = SyncVectorEnv::<B>::new(n, gs, device.clone())?;
-    vec_env_0.reset_all();
-    vec_env_1.reset_all();
+    // ── Single VecEnv (both policies see the full batch) ──────────────────────
+    let mut vec_env = SyncVectorEnv::<B>::new(n, gs, device.clone())?;
+    vec_env.reset_all();
 
     // ── Agent: 2 actors, ModelMode::Independent, 1 router ─────────────────────
-    let model    = bootstrap_model::<B>(n, obs_dim)?;
-    let cfgpath  = std::path::PathBuf::from("./config.json");
+    let model   = bootstrap_model::<B>(n, obs_dim)?;
+    let cfgpath = std::path::PathBuf::from("./config.json");
 
     println!("Initialising agent (2 actors, ModelMode::Independent)…");
     let init_start = Instant::now();
@@ -241,20 +237,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // ── Timing structures ─────────────────────────────────────────────────────
-    let mut pair_res  = Reservoir::new(RESERVOIR, calls);
-    let mut env_res   = Reservoir::new(RESERVOIR, calls);
-    let mut pair_wf   = Welford::new();   // wall time for the join! pair
-    let mut a0_wf     = Welford::new();   // individual actor-0 call
-    let mut a1_wf     = Welford::new();   // individual actor-1 call
-    let mut env_wf    = Welford::new();   // combined rayon env step time
+    let mut call_res = Reservoir::new(RESERVOIR, calls);
+    let mut env_res  = Reservoir::new(RESERVOIR, calls);
+    let mut call_wf  = Welford::new();  // full request_action([id0,id1], …) wall time
+    let mut env_wf   = Welford::new();  // rayon step_all wall time
 
-    // Episode tracking (per sub-env, flattened)
+    // Per-sub-env episode tracking
     let mut ep_returns: Vec<f32> = Vec::new();
     let mut ep_lengths: Vec<u64> = Vec::new();
-    let mut cur_ret0: Vec<f32> = vec![0.0; n];
-    let mut cur_len0: Vec<u64> = vec![0u64; n];
-    let mut cur_ret1: Vec<f32> = vec![0.0; n];
-    let mut cur_len1: Vec<u64> = vec![0u64; n];
+    let mut cur_ret: Vec<f32> = vec![0.0; n];
+    let mut cur_len: Vec<u64> = vec![0u64; n];
 
     // ── Background /proc sampler ──────────────────────────────────────────────
     let done_flag  = Arc::new(AtomicBool::new(false));
@@ -270,110 +262,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ── Warm-up: 200 call-pairs ───────────────────────────────────────────────
-    println!("Warming up (200 call-pairs)…");
-    vec_env_0.reset_all();
-    vec_env_1.reset_all();
+    // ── Warm-up: 200 calls ────────────────────────────────────────────────────
+    println!("Warming up (200 calls)…");
+    vec_env.reset_all();
     for _ in 0..200 {
-        let flat0 = vec_env_0.get_stacked_obs();
-        let flat1 = vec_env_1.get_stacked_obs();
-        let obs0  = Tensor::<B, 2, Float>::from_data(TensorData::new(flat0, [n, obs_dim]), &device);
-        let obs1  = Tensor::<B, 2, Float>::from_data(TensorData::new(flat1, [n, obs_dim]), &device);
-        let (r0, r1) = tokio::join!(
-            agent.request_action(vec![id0], obs0, None, 0.0),
-            agent.request_action(vec![id1], obs1, None, 0.0),
-        );
-        if let Ok(ref a) = r0 { if let Some((_, act)) = a.first() { let acts = decode_batch(act, n); let _ = vec_env_0.step_all(&acts); } }
-        if let Ok(ref a) = r1 { if let Some((_, act)) = a.first() { let acts = decode_batch(act, n); let _ = vec_env_1.step_all(&acts); } }
+        let flat  = vec_env.get_stacked_obs();
+        let obs_t = Tensor::<B, 2, Float>::from_data(TensorData::new(flat, [n, obs_dim]), &device);
+        let results = agent.request_action(actor_ids.clone(), obs_t, None, 0.0).await;
+        if let Ok(ref r) = results {
+            // Use actor-0's actions to step the envs
+            if let Some((_, act)) = r.iter().find(|(id, _)| *id == id0) {
+                let acts = decode_batch(act, n);
+                let _ = vec_env.step_all(&acts);
+            }
+        }
     }
     println!("Warm-up done. Starting benchmark…\n");
 
     // ── Main loop ─────────────────────────────────────────────────────────────
-    vec_env_0.reset_all();
-    vec_env_1.reset_all();
+    vec_env.reset_all();
     let t_start = Instant::now();
-    let mut calls_done: u64    = 0;
-    let mut total_steps: u64   = 0;
+    let mut calls_done: u64  = 0;
+    let mut total_steps: u64 = 0;
 
     while calls_done < calls {
-        // ── Collect stacked observations ─────────────────────────────────────
-        let flat0 = vec_env_0.get_stacked_obs();
-        let flat1 = vec_env_1.get_stacked_obs();
-        let obs0  = Tensor::<B, 2, Float>::from_data(TensorData::new(flat0, [n, obs_dim]), &device);
-        let obs1  = Tensor::<B, 2, Float>::from_data(TensorData::new(flat1, [n, obs_dim]), &device);
+        // Collect stacked [N, obs_dim] observation (same tensor fed to BOTH actors)
+        let flat  = vec_env.get_stacked_obs();
+        let obs_t = Tensor::<B, 2, Float>::from_data(TensorData::new(flat, [n, obs_dim]), &device);
 
-        // ── Concurrent inference on both policies ─────────────────────────────
-        //    tokio::join! drives both futures in the same task.
-        //    InferenceEngine.forward() holds an RwLock read guard during the ONNX
-        //    call; ModelMode::Independent gives each actor a distinct Arc, so both
-        //    read-locks are independent and never contend.
-        let pair_start = Instant::now();
+        // Single request_action call with BOTH actor IDs and the FULL observation batch.
+        // The coordinator's InferenceEngine iterates [id0, id1] and calls
+        //   forward(id0, obs_t) → policy-0 output [N, act_dim]
+        //   forward(id1, obs_t) → policy-1 output [N, act_dim]
+        // returning both results in one Vec.
+        let call_start = Instant::now();
+        let results = agent.request_action(actor_ids.clone(), obs_t, None, 0.0).await;
+        let call_ns = call_start.elapsed().as_nanos() as u64;
+        call_wf.update(call_ns as f64);
+        call_res.push(call_ns);
 
-        let a0_t0 = Instant::now();
-        let (res0, res1) = tokio::join!(
-            agent.request_action(vec![id0], obs0, None, 0.0),
-            agent.request_action(vec![id1], obs1, None, 0.0),
-        );
-        let a0_ns = a0_t0.elapsed().as_nanos() as u64;
-        let pair_ns = pair_start.elapsed().as_nanos() as u64;
-
-        // Individual actor timing approximation: first completes at ~a0_ns/2 each
-        // (they're sequential under NdArray; joint time ≈ sum, not max).
-        // We time the full join! wall-clock and estimate per-actor from the result.
-        let a1_ns = pair_ns.saturating_sub(a0_ns / 2);  // rough split
-        a0_wf.update(a0_ns as f64 / 2.0);
-        a1_wf.update(a1_ns as f64);
-        pair_wf.update(pair_ns as f64);
-        pair_res.push(pair_ns);
-
-        // ── Decode + parallel env step ────────────────────────────────────────
+        // Decode & step using actor-0's policy output
         let env_start = Instant::now();
-
-        let acts0 = res0.as_ref().ok()
-            .and_then(|v| v.first())
-            .map(|(_, a)| decode_batch(a, n))
-            .unwrap_or_else(|| vec![0u8; n]);
-        let acts1 = res1.as_ref().ok()
-            .and_then(|v| v.first())
-            .map(|(_, a)| decode_batch(a, n))
-            .unwrap_or_else(|| vec![0u8; n]);
-
-        let step0 = vec_env_0.step_all(&acts0);
-        let step1 = vec_env_1.step_all(&acts1);
-
+        let step_results: Vec<(f32, bool)> = match results {
+            Ok(ref r) => {
+                if let Some((_, act)) = r.iter().find(|(id, _)| *id == id0) {
+                    let acts = decode_batch(act, n);
+                    vec_env.step_all(&acts)
+                } else {
+                    vec_env.step_all(&vec![0u8; n])
+                }
+            }
+            Err(_) => vec_env.step_all(&vec![0u8; n]),
+        };
         let env_ns = env_start.elapsed().as_nanos() as u64;
         env_wf.update(env_ns as f64);
         env_res.push(env_ns);
 
-        // ── Episode accounting ────────────────────────────────────────────────
-        for (i, (r, done)) in step0.iter().enumerate() {
-            cur_ret0[i] += r;
-            cur_len0[i] += 1;
+        // Episode accounting
+        for (i, (r, done)) in step_results.iter().enumerate() {
+            cur_ret[i] += r;
+            cur_len[i] += 1;
             if *done {
-                ep_returns.push(cur_ret0[i]);
-                ep_lengths.push(cur_len0[i]);
-                cur_ret0[i] = 0.0;
-                cur_len0[i] = 0;
-            }
-        }
-        for (i, (r, done)) in step1.iter().enumerate() {
-            cur_ret1[i] += r;
-            cur_len1[i] += 1;
-            if *done {
-                ep_returns.push(cur_ret1[i]);
-                ep_lengths.push(cur_len1[i]);
-                cur_ret1[i] = 0.0;
-                cur_len1[i] = 0;
+                ep_returns.push(cur_ret[i]);
+                ep_lengths.push(cur_len[i]);
+                cur_ret[i] = 0.0;
+                cur_len[i] = 0;
             }
         }
 
         calls_done  += 1;
-        total_steps += total_n as u64;
+        total_steps += n as u64;
 
         if calls_done % 10_000 == 0 {
             let sps = total_steps as f64 / t_start.elapsed().as_secs_f64();
-            println!("  [{:>7} calls  {:>11} env-steps]  {:.0} env-steps/sec  ({:.0} pairs/sec)",
-                     calls_done, total_steps, sps, sps / total_n as f64);
+            println!("  [{:>7} calls  {:>11} env-steps]  {:.0} env-steps/sec  ({:.0} calls/sec)",
+                     calls_done, total_steps, sps, sps / n as f64);
         }
     }
 
@@ -381,29 +344,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     done_flag.store(true, AOrdering::Relaxed);
 
     // ── Metrics ───────────────────────────────────────────────────────────────
+    let call_mean_us = call_wf.mean    / 1_000.0;
+    let call_std_us  = call_wf.std_dev() / 1_000.0;
+    let env_mean_us  = env_wf.mean     / 1_000.0;
+    let env_std_us   = env_wf.std_dev()  / 1_000.0;
 
-    let pair_mean_us  = pair_wf.mean   / 1_000.0;
-    let pair_std_us   = pair_wf.std_dev() / 1_000.0;
-    let a0_mean_us    = a0_wf.mean     / 1_000.0;
-    let a1_mean_us    = a1_wf.mean     / 1_000.0;
-    let env_mean_us   = env_wf.mean    / 1_000.0;
-    let env_std_us    = env_wf.std_dev() / 1_000.0;
-    let overhead_us   = (pair_mean_us - a0_mean_us - a1_mean_us - env_mean_us).max(0.0);
-    let step_mean_us  = pair_mean_us + env_mean_us;
-    let overhead_ratio = overhead_us / step_mean_us.max(1e-9);
+    // Each request_action([id0,id1], …) runs 2 sequential forwards; estimate per-policy:
+    let per_policy_us = call_mean_us / 2.0;
 
-    let pair_p50  = pair_res.percentile(50.0);
-    let pair_p95  = pair_res.percentile(95.0);
-    let pair_p99  = pair_res.percentile(99.0);
-    let pair_p999 = pair_res.percentile(99.9);
+    let call_p50  = call_res.percentile(50.0);
+    let call_p95  = call_res.percentile(95.0);
+    let call_p99  = call_res.percentile(99.0);
+    let call_p999 = call_res.percentile(99.9);
     let env_p50   = env_res.percentile(50.0);
     let env_p99   = env_res.percentile(99.0);
-    let jitter_us = (pair_p99.saturating_sub(pair_p50)) as f64 / 1_000.0;
+    let jitter_us = (call_p99.saturating_sub(call_p50)) as f64 / 1_000.0;
 
-    let env_sps         = total_steps as f64 / elapsed;
-    let pairs_per_sec   = calls_done  as f64 / elapsed;
-    let per_actor_sps   = env_sps / 2.0;
-    let per_core_sps    = env_sps / num_cores as f64;
+    let step_mean_us   = call_mean_us + env_mean_us;
+    let overhead_us    = (call_mean_us - 2.0 * per_policy_us - env_mean_us).max(0.0);
+    let overhead_ratio = overhead_us / step_mean_us.max(1e-9);
+
+    let env_sps        = total_steps as f64 / elapsed;
+    let calls_per_sec  = calls_done  as f64 / elapsed;
+    let per_core_sps   = env_sps / num_cores as f64;
 
     let total_eps  = ep_returns.len() as f64;
     let eps_per_s  = total_eps / elapsed;
@@ -441,7 +404,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rss_mean_gb = rss_mean as f64 / (1_024.0 * 1_024.0);
     let sps_per_gb  = if rss_mean_gb > 0.0 { env_sps / rss_mean_gb } else { 0.0 };
 
-    // S(n) vs 1-actor 1-env baseline (bench_gridworld Independent mode)
     const BASELINE_1A: f64 = 19_443.0;
     let scalability = env_sps / BASELINE_1A;
 
@@ -449,102 +411,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("═══════════════════════════════════════════════════════════════════════");
     println!("  RelayRL GridWorld Multi-Actor VecEnv — FINAL RESULTS");
-    println!("  2 actors (Independent)  |  {} sub-envs/actor  |  {} total  |  {} calls",
-             n, total_n, calls_done);
+    println!("  request_action([id0, id1], obs_[{},{}], …)  |  2 policies  |  {} calls",
+             n, obs_dim, calls_done);
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
     println!("─── Throughput ──────────────────────────────────────────────────────────");
-    println!("  env-steps/sec  (global)        : {:>12.1}   (2 actors × {} sub-envs)", env_sps, n);
-    println!("  env-steps/sec  per actor        : {:>12.1}   ({} sub-envs × {:.0} pairs/sec)",
-             per_actor_sps, n, pairs_per_sec);
-    println!("  env-steps/sec  per logical core : {:>12.1}", per_core_sps);
-    println!("  call-pairs/sec  (tokio::join!)  : {:>12.1}", pairs_per_sec);
-    println!("  episodes/sec   (all sub-envs)   : {:>12.3}", eps_per_s);
-    println!("  total call-pairs                : {:>12}", calls_done);
-    println!("  total env steps                 : {:>12}", total_steps);
-    println!("  wall time                       : {:>12.2} s", elapsed);
-    println!("  logical cores                   : {:>12}", num_cores);
-    println!("  VecEnv batch per actor          : {:>12}   (total = {})", n, total_n);
+    println!("  env-steps/sec  (global)         : {:>12.1}   ({} sub-envs × {:.0} calls/sec)",
+             env_sps, n, calls_per_sec);
+    println!("  env-steps/sec  per logical core  : {:>12.1}", per_core_sps);
+    println!("  calls/sec  (request_action)      : {:>12.1}", calls_per_sec);
+    println!("  policy evaluations/sec           : {:>12.1}   (2 policies × {:.0} calls/sec)",
+             2.0 * calls_per_sec, calls_per_sec);
+    println!("  episodes/sec   (all sub-envs)    : {:>12.3}", eps_per_s);
+    println!("  total calls                      : {:>12}", calls_done);
+    println!("  total env steps                  : {:>12}", total_steps);
+    println!("  wall time                        : {:>12.2} s", elapsed);
+    println!("  logical cores                    : {:>12}", num_cores);
+    println!("  VecEnv batch (N)                 : {:>12}", n);
     println!();
 
     println!("─── Episode Statistics ──────────────────────────────────────────────────");
-    println!("  avg steps per episode          : {:>12.1}   (per sub-env)", avg_ep_len);
-    println!("  episode return mean            : {:>12.3}", ep_mean);
-    println!("  episode completion variance    : {:>12.3}", ep_var);
-    println!("  total episodes (all sub-envs)  : {:>12}", ep_returns.len());
+    println!("  avg steps per episode            : {:>12.1}   (per sub-env)", avg_ep_len);
+    println!("  episode return mean              : {:>12.3}", ep_mean);
+    println!("  episode completion variance      : {:>12.3}", ep_var);
+    println!("  total episodes (all sub-envs)    : {:>12}", ep_returns.len());
     println!();
 
-    println!("─── Policy / Inference Timing (µs) ─────────────────────────────────────");
-    println!("  tokio::join! pair wall time    : {:>12.3} µs  (both forwards sequential on NdArray)", pair_mean_us);
-    println!("  pair std dev                   : {:>12.3} µs", pair_std_us);
-    println!("  actor-0 forward estimate       : {:>12.3} µs  (≈ half of join!)", a0_mean_us);
-    println!("  actor-1 forward estimate       : {:>12.3} µs", a1_mean_us);
-    println!("  inference / total step ratio   : {:>12.3}",
-             pair_mean_us / step_mean_us.max(1e-9));
-    println!("  state update / buffer write    :   disabled (trajectories off)");
+    println!("─── Inference Timing (µs) — 2 policies over [N={}] obs batch ────────────", n);
+    println!("  call mean  (both policies)       : {:>12.3} µs  (forward×2 + coord overhead)", call_mean_us);
+    println!("  call std dev                     : {:>12.3} µs", call_std_us);
+    println!("  per-policy forward estimate      : {:>12.3} µs  (call_mean / 2)", per_policy_us);
+    println!("  inference / total step ratio     : {:>12.3}",
+             call_mean_us / step_mean_us.max(1e-9));
     println!();
 
-    println!("─── Call-Pair Timing (µs) — tokio::join!(actor-0, actor-1) ─────────────");
-    println!("  pair mean                      : {:>12.3} µs", pair_mean_us);
-    println!("  pair std dev                   : {:>12.3} µs", pair_std_us);
-    println!("  P50 pair latency               : {:>12.3} µs", pair_p50  as f64 / 1_000.0);
-    println!("  P95 pair latency               : {:>12.3} µs", pair_p95  as f64 / 1_000.0);
-    println!("  P99 pair latency               : {:>12.3} µs", pair_p99  as f64 / 1_000.0);
-    println!("  P99.9 pair latency             : {:>12.3} µs", pair_p999 as f64 / 1_000.0);
-    println!("  jitter (P99 − P50)             : {:>12.3} µs", jitter_us);
+    println!("─── Call Timing (µs) — request_action([id0,id1], obs_[{},{}], …) ──────────", n, obs_dim);
+    println!("  call mean                        : {:>12.3} µs", call_mean_us);
+    println!("  call std dev                     : {:>12.3} µs", call_std_us);
+    println!("  P50 latency                      : {:>12.3} µs", call_p50  as f64 / 1_000.0);
+    println!("  P95 latency                      : {:>12.3} µs", call_p95  as f64 / 1_000.0);
+    println!("  P99 latency                      : {:>12.3} µs", call_p99  as f64 / 1_000.0);
+    println!("  P99.9 latency                    : {:>12.3} µs", call_p999 as f64 / 1_000.0);
+    println!("  jitter (P99 − P50)               : {:>12.3} µs", jitter_us);
     println!();
 
-    println!("─── Env Step Timing (µs) — rayon (2 × {} sub-envs) ─────────────────────", n);
-    println!("  env step mean  (both VecEnvs)  : {:>12.3} µs", env_mean_us);
-    println!("  env step std dev               : {:>12.3} µs", env_std_us);
-    println!("  env step P50                   : {:>12.3} µs", env_p50 as f64 / 1_000.0);
-    println!("  env step P99                   : {:>12.3} µs", env_p99 as f64 / 1_000.0);
-    println!("  env step / step ratio          : {:>12.3}",
+    println!("─── Env Step Timing (µs) — rayon ({} sub-envs) ────────────────────────────", n);
+    println!("  env step mean  (rayon step_all)  : {:>12.3} µs", env_mean_us);
+    println!("  env step std dev                 : {:>12.3} µs", env_std_us);
+    println!("  env step P50                     : {:>12.3} µs", env_p50 as f64 / 1_000.0);
+    println!("  env step P99                     : {:>12.3} µs", env_p99 as f64 / 1_000.0);
+    println!("  env step / call ratio            : {:>12.3}",
              env_mean_us / step_mean_us.max(1e-9));
-    println!("  env step / sub-env             : {:>12.3} µs  (mean/{})", env_mean_us / total_n as f64, total_n);
+    println!("  env step / sub-env               : {:>12.3} µs  (mean/{})", env_mean_us / n as f64, n);
     println!();
 
     println!("─── Scheduling / Overhead ───────────────────────────────────────────────");
-    println!("  step mean (pair + env)         : {:>12.3} µs", step_mean_us);
-    println!("  scheduling overhead            : {:>12.3} µs  (pair − a0 − a1 − env)", overhead_us);
-    println!("  overhead ratio                 : {:>12.4}", overhead_ratio);
-    println!("  deadtime per sub-env           : {:>12.6}  (overhead_ratio / {})", overhead_ratio / total_n as f64, total_n);
-    println!("  dropped/late updates           : {:>12}", 0u32);
+    println!("  step mean (call + env)           : {:>12.3} µs", step_mean_us);
+    println!("  scheduling overhead              : {:>12.3} µs", overhead_us);
+    println!("  overhead ratio                   : {:>12.4}", overhead_ratio);
+    println!("  deadtime per sub-env             : {:>12.6}  (overhead / {})", overhead_ratio / n as f64, n);
     println!();
 
     println!("─── Memory ──────────────────────────────────────────────────────────────");
-    println!("  RSS init                       : {:>9.1} MB", rss_init  as f64 / 1_024.0);
-    println!("  RSS peak                       : {:>9.1} MB", rss_peak  as f64 / 1_024.0);
-    println!("  RSS mean                       : {:>9.1} MB  ({:.3} GB)", rss_mean as f64 / 1_024.0, rss_mean_gb);
-    println!("  RSS final                      : {:>9.1} MB", rss_final as f64 / 1_024.0);
-    println!("  allocation rate (RSS Δ/s)      : {:>9.3} KB/s", alloc_rate);
-    println!("  /proc samples                  : {:>9}", rss.len());
+    println!("  RSS init                         : {:>9.1} MB", rss_init  as f64 / 1_024.0);
+    println!("  RSS peak                         : {:>9.1} MB", rss_peak  as f64 / 1_024.0);
+    println!("  RSS mean                         : {:>9.1} MB  ({:.3} GB)", rss_mean as f64 / 1_024.0, rss_mean_gb);
+    println!("  RSS final                        : {:>9.1} MB", rss_final as f64 / 1_024.0);
+    println!("  allocation rate (RSS Δ/s)        : {:>9.3} KB/s", alloc_rate);
+    println!("  /proc samples                    : {:>9}", rss.len());
     println!();
 
     println!("─── CPU / OS ────────────────────────────────────────────────────────────");
-    println!("  CPU utilisation (summed cores) : {:>9.2} %", cpu_util);
-    println!("  CPU util / logical core        : {:>9.2} %", cpu_per_core);
-    println!("  mean threads                   : {:>9.1}   (rayon pool + tokio)", thread_mean);
-    println!("  run queue length (1-min avg)   : {:>9.3}", runq_mean);
-    println!("  context switches total         : {:>9}", ctx_total);
-    println!("  context switches/sec           : {:>9.1}", ctx_per_s);
-    println!("  context switches/call-pair     : {:>9.6}", ctx_total as f64 / calls_done as f64);
-    println!("  context switches/env-step      : {:>9.6}", ctx_total as f64 / total_steps as f64);
+    println!("  CPU utilisation (summed cores)   : {:>9.2} %", cpu_util);
+    println!("  CPU util / logical core          : {:>9.2} %", cpu_per_core);
+    println!("  mean threads                     : {:>9.1}   (rayon pool + tokio)", thread_mean);
+    println!("  run queue length (1-min avg)     : {:>9.3}", runq_mean);
+    println!("  context switches total           : {:>9}", ctx_total);
+    println!("  context switches/sec             : {:>9.1}", ctx_per_s);
+    println!("  context switches/call            : {:>9.6}", ctx_total as f64 / calls_done as f64);
+    println!("  context switches/env-step        : {:>9.6}", ctx_total as f64 / total_steps as f64);
     println!();
 
     println!("─── Efficiency Ratios ───────────────────────────────────────────────────");
-    println!("  env-steps/sec / logical core   : {:>12.1}", per_core_sps);
-    println!("  env-steps/sec / GB RSS (proxy) : {:>12.1}", sps_per_gb);
-    println!("  S(n) vs 1-actor 1-env baseline : {:>12.3}×  ({:.1} sps / {:.1} baseline)",
+    println!("  env-steps/sec / logical core     : {:>12.1}", per_core_sps);
+    println!("  env-steps/sec / GB RSS (proxy)   : {:>12.1}", sps_per_gb);
+    println!("  S(n) vs 1-actor 1-env baseline   : {:>12.3}×  ({:.1} sps / {:.1} baseline)",
              scalability, env_sps, BASELINE_1A);
-    println!("  overhead ratio                 : {:>12.4}", overhead_ratio);
+    println!("  overhead ratio                   : {:>12.4}", overhead_ratio);
     println!();
 
     println!("═══════════════════════════════════════════════════════════════════════");
-    println!("  SUMMARY: {} ms init · 2 actors · 2 independent policies · {} sub-envs each",
+    println!("  SUMMARY: {} ms init · 2 actors · 2 independent policies · {} sub-envs",
              init_ms, n);
-    println!("  tokio::join! pair = {:.1} µs  |  rayon env step = {:.1} µs  |  {:.1} env-steps/sec",
-             pair_mean_us, env_mean_us, env_sps);
+    println!("  call mean = {:.1} µs  (2×forward [{}×{}])  |  rayon step = {:.1} µs",
+             call_mean_us, n, obs_dim, env_mean_us);
+    println!("  {:.1} env-steps/sec  |  {:.1}× baseline  |  {:.1} policy-evals/sec",
+             env_sps, scalability, 2.0 * calls_per_sec);
     println!("═══════════════════════════════════════════════════════════════════════");
 
     agent.shutdown().await?;
