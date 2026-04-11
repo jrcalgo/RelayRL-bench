@@ -56,6 +56,10 @@ struct Args {
     /// GridWorld size
     #[arg(long, default_value_t = 10)]
     grid_size: usize,
+
+    /// Use Shared model mode (all actors on the same device share one model handle)
+    #[arg(long, default_value_t = false)]
+    shared_model: bool,
 }
 
 // ─────────────────────────── Constants ──────────────────────────────────────
@@ -196,6 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n            = args.actor_count;
     let calls        = args.target_calls;
     let router_scale = args.router_scale.unwrap_or(n as u32);
+    let model_mode   = if args.shared_model { ModelMode::Shared } else { ModelMode::Independent };
 
     // Auto-scale grid: need at least n+1 cells (actors + goal), so gs >= ceil(sqrt(n+1)).
     let min_gs = ((n + 1) as f64).sqrt().ceil() as usize;
@@ -210,6 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  RelayRL GridWorld benchmark");
     println!("  {} actors · {} routers · {} calls · {}×{} grid · {} logical cores",
              n, router_scale, calls, gs, gs, num_cores);
+    println!("  model mode: {}", if args.shared_model { "Shared" } else { "Independent" });
     println!("  Total env steps = {} × {} = {}",
              n, calls, n as u64 * calls);
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -247,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bld = AgentBuilder::<B, 2, 2, Float, Float>::builder()
         .actor_count(n as u32)
         .default_device(device_type)
-        .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
+        .actor_inference_mode(ActorInferenceMode::Local(model_mode))
         .actor_training_data_mode(ActorTrainingDataMode::Disabled)
         .default_model(model)
         .router_scale(router_scale);
@@ -433,7 +439,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Report ────────────────────────────────────────────────────────────────
     println!();
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL GridWorld — FINAL RESULTS  ({} actors / {} routers)", n, router_scale);
+    println!("  RelayRL GridWorld — FINAL RESULTS  ({} actors / {} routers / {})",
+             n, router_scale, if args.shared_model { "Shared" } else { "Independent" });
     println!("═══════════════════════════════════════════════════════════════════\n");
 
     println!("─── Throughput ──────────────────────────────────────────────────────");
