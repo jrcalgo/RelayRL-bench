@@ -39,7 +39,11 @@ use gridworld_rl::env::vec::SyncVectorEnv;
     about = "2-actor / 2-policy GridWorld: request_action(all_ids, obs_1024, …)"
 )]
 struct Args {
-    /// Total number of sub-environments (shared across both policies)
+    /// Number of actors / policies
+    #[arg(long, default_value_t = 2)]
+    actor_count: usize,
+
+    /// Total number of sub-environments (each policy sees the full batch)
     #[arg(long, default_value_t = 1024)]
     num_envs: usize,
 
@@ -182,11 +186,12 @@ fn decode_batch(relay: &relayrl_types::data::action::RelayRLAction, n: usize) ->
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     type B = NdArray;
 
-    let args    = Args::parse();
-    let n       = args.num_envs;
-    let calls   = args.target_calls;
-    let gs      = args.grid_size.max(3);
-    let obs_dim = gs * gs;
+    let args       = Args::parse();
+    let actor_count = args.actor_count;
+    let n           = args.num_envs;
+    let calls       = args.target_calls;
+    let gs          = args.grid_size.max(3);
+    let obs_dim     = gs * gs;
 
     let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
     let device_type = DeviceType::Cpu;
@@ -194,11 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("═══════════════════════════════════════════════════════════════════════");
     println!("  RelayRL GridWorld Multi-Actor VecEnv benchmark");
-    println!("  2 actors · 2 policies (ModelMode::Independent) · {} sub-envs · {}×{} grid",
-             n, gs, gs);
-    println!("  request_action([id0, id1], obs_[{},{}], …)", n, obs_dim);
-    println!("  → coordinator calls forward(id0, obs) then forward(id1, obs) in sequence");
-    println!("  → returns 2 × [N, act_dim] policy outputs per call");
+    println!("  {} actors · {} policies (ModelMode::Independent) · {} sub-envs · {}×{} grid",
+             actor_count, actor_count, n, gs, gs);
+    println!("  request_action(all_{}_ids, obs_[{},{}], …)", actor_count, n, obs_dim);
+    println!("  → coordinator calls forward(id_i, obs) for each of {} actors in sequence", actor_count);
+    println!("  → returns {} × [N, act_dim] policy outputs per call", actor_count);
     println!("  Total env steps = {} × {} = {}", n, calls, n as u64 * calls);
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
@@ -210,11 +215,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model   = bootstrap_model::<B>(n, obs_dim)?;
     let cfgpath = std::path::PathBuf::from("./config.json");
 
-    println!("Initialising agent (2 actors, ModelMode::Independent)…");
+    println!("Initialising agent ({} actors, ModelMode::Independent)…", actor_count);
     let init_start = Instant::now();
 
     let mut bld = AgentBuilder::<B, 2, 2, Float, Float>::builder()
-        .actor_count(2)
+        .actor_count(actor_count as u32)
         .default_device(device_type)
         .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
         .actor_training_data_mode(ActorTrainingDataMode::Disabled)
@@ -227,13 +232,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let init_ms = init_start.elapsed().as_millis();
 
     let actor_ids = agent.get_actor_ids()?;
-    assert_eq!(actor_ids.len(), 2, "expected exactly 2 actors");
+    assert_eq!(actor_ids.len(), actor_count, "expected {} actors", actor_count);
     let id0 = actor_ids[0];
-    let id1 = actor_ids[1];
 
-    println!("  init time : {} ms  (2 actors, 2 independent model handles)", init_ms);
+    println!("  init time : {} ms  ({} actors, {} independent model handles)",
+             init_ms, actor_count, actor_count);
     println!("  actor[0]  : {}", id0);
-    println!("  actor[1]  : {}", id1);
+    if actor_count > 1 { println!("  actor[1]  : {}", actor_ids[1]); }
+    if actor_count > 2 { println!("  … ({} more)", actor_count - 2); }
     println!();
 
     // ── Timing structures ─────────────────────────────────────────────────────
@@ -349,8 +355,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_mean_us  = env_wf.mean     / 1_000.0;
     let env_std_us   = env_wf.std_dev()  / 1_000.0;
 
-    // Each request_action([id0,id1], …) runs 2 sequential forwards; estimate per-policy:
-    let per_policy_us = call_mean_us / 2.0;
+    // Each request_action runs actor_count sequential forwards; estimate per-policy:
+    let per_policy_us = call_mean_us / actor_count as f64;
 
     let call_p50  = call_res.percentile(50.0);
     let call_p95  = call_res.percentile(95.0);
@@ -361,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jitter_us = (call_p99.saturating_sub(call_p50)) as f64 / 1_000.0;
 
     let step_mean_us   = call_mean_us + env_mean_us;
-    let overhead_us    = (call_mean_us - 2.0 * per_policy_us - env_mean_us).max(0.0);
+    let overhead_us    = (call_mean_us - actor_count as f64 * per_policy_us - env_mean_us).max(0.0);
     let overhead_ratio = overhead_us / step_mean_us.max(1e-9);
 
     let env_sps        = total_steps as f64 / elapsed;
@@ -411,8 +417,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("═══════════════════════════════════════════════════════════════════════");
     println!("  RelayRL GridWorld Multi-Actor VecEnv — FINAL RESULTS");
-    println!("  request_action([id0, id1], obs_[{},{}], …)  |  2 policies  |  {} calls",
-             n, obs_dim, calls_done);
+    println!("  request_action(all_{}_ids, obs_[{},{}], …)  |  {} policies  |  {} calls",
+             actor_count, n, obs_dim, actor_count, calls_done);
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
     println!("─── Throughput ──────────────────────────────────────────────────────────");
@@ -420,8 +426,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              env_sps, n, calls_per_sec);
     println!("  env-steps/sec  per logical core  : {:>12.1}", per_core_sps);
     println!("  calls/sec  (request_action)      : {:>12.1}", calls_per_sec);
-    println!("  policy evaluations/sec           : {:>12.1}   (2 policies × {:.0} calls/sec)",
-             2.0 * calls_per_sec, calls_per_sec);
+    println!("  policy evaluations/sec           : {:>12.1}   ({} policies × {:.0} calls/sec)",
+             actor_count as f64 * calls_per_sec, actor_count, calls_per_sec);
     println!("  episodes/sec   (all sub-envs)    : {:>12.3}", eps_per_s);
     println!("  total calls                      : {:>12}", calls_done);
     println!("  total env steps                  : {:>12}", total_steps);
@@ -437,15 +443,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  total episodes (all sub-envs)    : {:>12}", ep_returns.len());
     println!();
 
-    println!("─── Inference Timing (µs) — 2 policies over [N={}] obs batch ────────────", n);
-    println!("  call mean  (both policies)       : {:>12.3} µs  (forward×2 + coord overhead)", call_mean_us);
+    println!("─── Inference Timing (µs) — {} policies over [N={}] obs batch ─────────────", actor_count, n);
+    println!("  call mean  ({} policies)          : {:>12.3} µs  (forward×{} + coord overhead)", actor_count, call_mean_us, actor_count);
     println!("  call std dev                     : {:>12.3} µs", call_std_us);
-    println!("  per-policy forward estimate      : {:>12.3} µs  (call_mean / 2)", per_policy_us);
+    println!("  per-policy forward estimate      : {:>12.3} µs  (call_mean / {})", per_policy_us, actor_count);
     println!("  inference / total step ratio     : {:>12.3}",
              call_mean_us / step_mean_us.max(1e-9));
     println!();
 
-    println!("─── Call Timing (µs) — request_action([id0,id1], obs_[{},{}], …) ──────────", n, obs_dim);
+    println!("─── Call Timing (µs) — request_action(all_{}_ids, obs_[{},{}], …) ──────────", actor_count, n, obs_dim);
     println!("  call mean                        : {:>12.3} µs", call_mean_us);
     println!("  call std dev                     : {:>12.3} µs", call_std_us);
     println!("  P50 latency                      : {:>12.3} µs", call_p50  as f64 / 1_000.0);
@@ -501,12 +507,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("═══════════════════════════════════════════════════════════════════════");
-    println!("  SUMMARY: {} ms init · 2 actors · 2 independent policies · {} sub-envs",
-             init_ms, n);
-    println!("  call mean = {:.1} µs  (2×forward [{}×{}])  |  rayon step = {:.1} µs",
-             call_mean_us, n, obs_dim, env_mean_us);
+    println!("  SUMMARY: {} ms init · {} actors · {} independent policies · {} sub-envs",
+             init_ms, actor_count, actor_count, n);
+    println!("  call mean = {:.1} µs  ({}×forward [{}×{}])  |  rayon step = {:.1} µs",
+             call_mean_us, actor_count, n, obs_dim, env_mean_us);
     println!("  {:.1} env-steps/sec  |  {:.1}× baseline  |  {:.1} policy-evals/sec",
-             env_sps, scalability, 2.0 * calls_per_sec);
+             env_sps, scalability, actor_count as f64 * calls_per_sec);
     println!("═══════════════════════════════════════════════════════════════════════");
 
     agent.shutdown().await?;
