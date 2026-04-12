@@ -56,6 +56,10 @@ struct Args {
     /// GridWorld size
     #[arg(long, default_value_t = 10)]
     grid_size: usize,
+
+    /// Actor model mode: "independent" (each actor owns its model) or "shared" (one shared model)
+    #[arg(long, default_value = "independent")]
+    model_mode: String,
 }
 
 // ─────────────────────────── Constants ──────────────────────────────────────
@@ -196,6 +200,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n            = args.actor_count;
     let calls        = args.target_calls;
     let router_scale = args.router_scale.unwrap_or(n as u32);
+    let model_mode_str = args.model_mode.to_lowercase();
+    let model_mode = match model_mode_str.as_str() {
+        "shared" => ModelMode::Shared,
+        _        => ModelMode::Independent,
+    };
 
     // Auto-scale grid: need at least n+1 cells (actors + goal), so gs >= ceil(sqrt(n+1)).
     let min_gs = ((n + 1) as f64).sqrt().ceil() as usize;
@@ -210,6 +219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  RelayRL GridWorld benchmark");
     println!("  {} actors · {} routers · {} calls · {}×{} grid · {} logical cores",
              n, router_scale, calls, gs, gs, num_cores);
+    println!("  model mode: {}",
+             if matches!(model_mode, ModelMode::Shared) { "Shared" } else { "Independent" });
     println!("  Total env steps = {} × {} = {}",
              n, calls, n as u64 * calls);
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -247,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bld = AgentBuilder::<B, 2, 2, Float, Float>::builder()
         .actor_count(n as u32)
         .default_device(device_type)
-        .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
+        .actor_inference_mode(ActorInferenceMode::Local(model_mode))
         .actor_training_data_mode(ActorTrainingDataMode::Disabled)
         .default_model(model)
         .router_scale(router_scale);
