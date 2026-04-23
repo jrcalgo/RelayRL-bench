@@ -647,7 +647,13 @@ impl<
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses,
             model_device: device,
-            current_traj: RelayRLTrajectory::new(max_traj_length),
+            current_traj: RelayRLTrajectory::new(
+                if matches!(shared_client_modes.actor_training_data_mode, ActorTrainingDataMode::Disabled) {
+                    0
+                } else {
+                    max_traj_length
+                }
+            ),
             current_episode: AtomicU64::new(0),
             per_env_trajs: HashMap::new(),
             per_env_episodes: HashMap::new(),

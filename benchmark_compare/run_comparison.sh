@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+export ORT_DYLIB_PATH="/usr/local/lib/python3.11/dist-packages/onnxruntime/capi/libonnxruntime.so.1.25.0"
+
 COMPARE_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="/home/user/RelayRL-end2end"
 RESULTS_DIR="$COMPARE_DIR/results"
@@ -57,12 +59,18 @@ run_bench() {
     local label="$1"   # e.g. "patched_1env"
     local bin="$2"
     local num_envs="$3"
+    local baseline_sps="$4"   # optional: 1-env sps for S(n); empty = skip
     local log="$RESULTS_DIR/${label}.log"
 
     echo "────────────────────────────────────────────────────────────────────────"
     echo "  RUN: $label  (num_envs=$num_envs)"
     echo "  bin: $bin"
     echo "────────────────────────────────────────────────────────────────────────"
+
+    local baseline_flag=()
+    if [[ -n "$baseline_sps" ]]; then
+        baseline_flag=(--baseline-sps "$baseline_sps")
+    fi
 
     {
         echo "# label=$label  num_envs=$num_envs  calls=$CALLS  grid=$GRID"
@@ -73,6 +81,7 @@ run_bench() {
                 --num-envs   "$num_envs" \
                 --target-calls "$CALLS" \
                 --grid-size  "$GRID" \
+                "${baseline_flag[@]}" \
             2>&1
     } | tee "$log"
 
@@ -81,17 +90,27 @@ run_bench() {
     echo ""
 }
 
+# Extract 1-env sps from a completed log file
+extract_1env_sps() {
+    local log="$1"
+    grep "env-steps/sec (global)" "$log" | grep -oP '[\d.]+' | head -1
+}
+
 # ── Patched 0.5.0-beta (workspace) ───────────────────────────────────────────
 
-run_bench "patched_beta_1env"   "$PATCHED_BIN"  1
-run_bench "patched_beta_32env"  "$PATCHED_BIN"  32
-run_bench "patched_beta_128env" "$PATCHED_BIN"  128
+run_bench "patched_beta_1env"   "$PATCHED_BIN"  1  ""
+PATCHED_BASE=$(extract_1env_sps "$RESULTS_DIR/patched_beta_1env.log")
+echo "  → patched 1-env baseline: $PATCHED_BASE sps"
+run_bench "patched_beta_32env"  "$PATCHED_BIN"  32   "$PATCHED_BASE"
+run_bench "patched_beta_128env" "$PATCHED_BIN"  128  "$PATCHED_BASE"
 
 # ── beta.2 + inference-engine patch ──────────────────────────────────────────
 
-run_bench "beta2_patched_1env"   "$BETA2_PATCHED_BIN"  1
-run_bench "beta2_patched_32env"  "$BETA2_PATCHED_BIN"  32
-run_bench "beta2_patched_128env" "$BETA2_PATCHED_BIN"  128
+run_bench "beta2_patched_1env"   "$BETA2_PATCHED_BIN"  1  ""
+BETA2_BASE=$(extract_1env_sps "$RESULTS_DIR/beta2_patched_1env.log")
+echo "  → beta2_patched 1-env baseline: $BETA2_BASE sps"
+run_bench "beta2_patched_32env"  "$BETA2_PATCHED_BIN"  32   "$BETA2_BASE"
+run_bench "beta2_patched_128env" "$BETA2_PATCHED_BIN"  128  "$BETA2_BASE"
 
 # ── Comparison summary ────────────────────────────────────────────────────────
 
