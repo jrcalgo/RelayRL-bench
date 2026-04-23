@@ -54,6 +54,10 @@ struct Args {
     /// GridWorld grid size (auto-expanded if needed)
     #[arg(long, default_value_t = 10)]
     grid_size: usize,
+
+    /// 1-env sps baseline for S(n) scaling factor (omit to skip S(n) output)
+    #[arg(long)]
+    baseline_sps: Option<f64>,
 }
 
 // ─────────────────────────── Constants ──────────────────────────────────────
@@ -419,9 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sps_per_gb   = if rss_mean_gb > 0.0 { env_sps / rss_mean_gb } else { 0.0 };
     let dispatch_lat = call_p50 as f64 / 1_000.0; // 1 actor, so P50 = dispatch latency
 
-    // S(n) baseline: 1 actor, 1 env, Independent mode ≈ 19,443 env-steps/sec
-    const BASELINE_1ENV: f64 = 19_443.0;
-    let scalability = env_sps / BASELINE_1ENV;
+    let scalability_opt = args.baseline_sps.map(|b| env_sps / b);
 
     // ── Report ────────────────────────────────────────────────────────────────
     println!();
@@ -516,8 +518,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  env-steps/sec / logical core   : {:>12.1}", per_core_sps);
     println!("  env-steps/sec / GB RSS (proxy) : {:>12.1}", sps_per_gb);
     println!("  env-steps/sec / watt           :   requires external power measurement");
-    println!("  S(n) vs 1-env baseline         : {:>12.3}×  ({:.1} sps / {:.1} baseline)",
-             scalability, env_sps, BASELINE_1ENV);
+    if let Some(scalability) = scalability_opt {
+        println!("  S(n) vs 1-env baseline         : {:>12.3}×  ({:.1} sps / {:.1} baseline)",
+                 scalability, env_sps, args.baseline_sps.unwrap());
+    } else {
+        println!("  S(n) vs 1-env baseline         :          N/A  (pass --baseline-sps <1-env-sps>)");
+    }
     println!("  overhead ratio                 : {:>12.4}", overhead_ratio);
     println!();
 

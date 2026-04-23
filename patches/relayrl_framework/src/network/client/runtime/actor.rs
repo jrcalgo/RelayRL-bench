@@ -3,7 +3,7 @@
 //! Actors own local inference state, trajectory assembly, and the message-handling loop for the
 //! client runtime. Transport-backed server inference paths remain experimental in `0.5.0-beta`.
 
-use crate::network::client::agent::ClientModes;
+use crate::network::client::agent::{ActorTrainingDataMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
@@ -250,7 +250,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
             shared_transport_addresses,
             model_device: device,
-            current_traj: RelayRLTrajectory::new(max_traj_length),
+            current_traj: RelayRLTrajectory::new(
+                if matches!(shared_client_modes.actor_training_data_mode, ActorTrainingDataMode::Disabled) {
+                    0
+                } else {
+                    max_traj_length
+                }
+            ),
             rx_from_router,
             shared_tx_to_buffer,
             shared_client_modes,
