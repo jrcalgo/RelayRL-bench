@@ -37,14 +37,20 @@ fn resolve_agent_key(trajectory: &RelayRLTrajectory) -> AgentKey {
 fn sample_buffer_blocking<RB: GenericReplayBuffer>(
     buffer: &RB,
 ) -> Result<Batch, ReplayBufferError> {
-    tokio::task::block_in_place(|| match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(buffer.sample_buffer()),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
+    // `block_in_place` yields the current thread to the Tokio scheduler while
+    // blocking, which is safe to call from within an async multi-thread runtime
+    // (unlike `Handle::block_on` which panics when called from async context).
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(buffer.sample_buffer())
+        })
+    } else {
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| ReplayBufferError::BufferSamplingError(e.to_string()))?
-            .block_on(buffer.sample_buffer()),
-    })
+            .block_on(buffer.sample_buffer())
+    }
 }
 
 #[derive(Default)]
@@ -298,42 +304,47 @@ where
         }
     }
 
-    /// Build a [`relayrl_types::model::ModelModule`] from the currently trained shared
-    /// actor policy weights, without any filesystem access.
+    /// No-op for multi-agent PPO; trajectory counts are managed internally.
+    pub fn reset_epoch(&mut self) {}
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B, InK, OutK> MultiagentPPOAlgorithm<B, InK, OutK>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    /// Export the shared policy as an in-memory ONNX model.
+    ///
+    /// Reads from the first actor in the shared `MultiagentPPOKernel`. Returns `None`
+    /// if no training has occurred yet.
     pub fn acquire_model_module(
         &self,
-    ) -> Option<relayrl_types::model::ModelModule<B>>
-    where
-        B: BackendMatcher<Backend = B>,
-    {
+    ) -> Option<relayrl_types::model::ModelModule<B>> {
         use crate::algorithms::onnx_builder::build_onnx_mlp_bytes;
+        use relayrl_types::data::tensor::{DType, NdArrayDType};
+        use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
+
         let layer_specs = self.runtime.components.kernel.get_pi_layer_specs()?;
+        if layer_specs.is_empty() {
+            return None;
+        }
+
         let obs_dim = self.runtime.args.obs_dim;
         let act_dim = self.runtime.args.act_dim;
 
         let onnx_bytes = build_onnx_mlp_bytes(&layer_specs);
-
-        #[cfg(feature = "ndarray-backend")]
-        {
-            use relayrl_types::data::tensor::{DeviceType, DType, NdArrayDType};
-            use relayrl_types::model::ModelFileType;
-            let metadata = relayrl_types::model::ModelMetadata {
-                model_file: "policy.onnx".to_string(),
-                model_type: ModelFileType::Onnx,
-                input_dtype: DType::NdArray(NdArrayDType::F32),
-                output_dtype: DType::NdArray(NdArrayDType::F32),
-                input_shape: vec![1, obs_dim],
-                output_shape: vec![1, act_dim],
-                default_device: Some(DeviceType::Cpu),
-            };
-            return relayrl_types::model::ModelModule::<B>::from_onnx_bytes(
-                onnx_bytes,
-                metadata,
-            )
-            .ok();
-        }
-        #[cfg(not(feature = "ndarray-backend"))]
-        None
+        let metadata = ModelMetadata {
+            model_file: "model.onnx".to_string(),
+            model_type: ModelFileType::Onnx,
+            input_dtype: DType::NdArray(NdArrayDType::F32),
+            output_dtype: DType::NdArray(NdArrayDType::F32),
+            input_shape: vec![1, obs_dim],
+            output_shape: vec![1, act_dim],
+            default_device: None,
+        };
+        ModelModule::from_onnx_bytes(onnx_bytes, metadata).ok()
     }
 }
 

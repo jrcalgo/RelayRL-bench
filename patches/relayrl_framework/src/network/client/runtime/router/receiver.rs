@@ -15,8 +15,6 @@ use active_uuid_registry::interface::get_context_entries;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{RwLock, broadcast};
@@ -64,7 +62,6 @@ pub(crate) struct ClientTransportModelReceiver<
     const D_OUT: usize,
 > {
     client_namespace: Arc<str>,
-    active: AtomicBool,
     global_dispatcher_tx: Sender<RoutedMessage>,
     training_dispatcher: Arc<TrainingDispatcher<B>>,
     shared_state: Arc<RwLock<StateManager<B, D_IN, D_OUT>>>,
@@ -84,7 +81,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     ) -> Self {
         Self {
             client_namespace,
-            active: AtomicBool::new(false),
             global_dispatcher_tx,
             training_dispatcher,
             shared_state,
@@ -99,8 +95,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) async fn spawn_loop(&mut self) -> Result<(), RouterError> {
-        self.active.store(true, Ordering::SeqCst);
-
         let entries = get_context_entries(
             self.client_namespace.as_ref(),
             crate::network::RECEIVER_CONTEXT,
@@ -145,7 +139,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         });
         let mut last_forwarded_model_versions: HashMap<ActorUuid, i64> = HashMap::new();
 
-        while self.active.load(Ordering::SeqCst) {
+        loop {
             tokio::select! {
                 biased;
 
@@ -167,7 +161,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         );
                     }
                     listener_handle.abort();
-                    self.active.store(false, Ordering::SeqCst);
+                    break;
                 }
 
                 msg = model_update_rx.recv() => {
@@ -192,7 +186,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         None => {
                             log::warn!("[ClientTransportModelReceiver] Model update channel closed, shutting down");
                             listener_handle.abort();
-                            self.active.store(false, Ordering::SeqCst);
+                            break;
                         }
                     }
                 }

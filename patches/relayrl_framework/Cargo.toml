@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "relayrl_framework"
-version = "0.5.0-beta"
+version = "0.5.0-beta.2"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 build = false
 autolib = false
@@ -64,8 +64,8 @@ rustc-args = [
 client = []
 default = [
     "client",
-    "metrics",
     "logging",
+    "metrics",
 ]
 inference-server = []
 logging = ["log4rs"]
@@ -107,6 +107,9 @@ path = "tests/local_client_smoke.rs"
 version = "0.7.1"
 features = ["concurrent-map"]
 
+[dependencies.arc-swap]
+version = "1.9.1"
+
 [dependencies.arrow]
 version = "57.3.0"
 features = [
@@ -143,6 +146,9 @@ version = "1.11.1"
 [dependencies.console-subscriber]
 version = "0.4.1"
 optional = true
+
+[dependencies.crossbeam-utils]
+version = "0.8.21"
 
 [dependencies.dashmap]
 version = "6.1.0"
@@ -191,17 +197,13 @@ optional = true
 version = "0.10.0"
 
 [dependencies.relayrl_algorithms]
-version = "0.1.0"
+version = "0.2.0"
 
 [dependencies.relayrl_env_trait]
-version = "1.0.0"
+version = "1.1.0"
 
 [dependencies.relayrl_types]
-version = "0.5.4"
-features = [
-    "ndarray-backend",
-    "onnx-model",
-]
+version = "0.7.0"
 
 [dependencies.serde]
 version = "1.0.228"

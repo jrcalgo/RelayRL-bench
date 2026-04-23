@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "relayrl_algorithms"
-version = "0.1.0"
+version = "0.2.0"
 build = false
 autolib = false
 autobins = false
@@ -41,9 +41,7 @@ repository = "https://github.com/jrcalgo/relayrl"
 resolver = "2"
 
 [features]
-default = [
-    "ndarray-backend",
-]
+default = ["ndarray-backend"]
 ndarray-backend = [
     "burn-ndarray",
     "relayrl_types/ndarray-backend",
@@ -99,7 +97,7 @@ version = "0.17.2"
 version = "0.10.0"
 
 [dependencies.relayrl_types]
-version = "0.5.4"
+version = "0.6.0"
 
 [dependencies.thiserror]
 version = "2.0.18"

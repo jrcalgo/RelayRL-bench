@@ -16,9 +16,10 @@ use crate::network::HyperparameterArgs;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::TransportType;
 use crate::network::client::runtime::coordination::coordinator::{
-    ClientCoordinator, ClientInterface, CoordinatorError,
+    ClientActors, ClientCoordinator, ClientEnvironments, ClientInterface, CoordinatorError,
 };
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
+use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 use crate::prelude::config::ClientConfigLoader;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::utilities::configuration::{Algorithm, NetworkParams};
@@ -27,6 +28,7 @@ use active_uuid_registry::UuidPoolError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use active_uuid_registry::interface::get_context_entries;
 use active_uuid_registry::interface::list_ids;
+use relayrl_env_trait::traits::Environment;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use relayrl_types::data::action::CodecConfig;
 use relayrl_types::data::action::RelayRLAction;
@@ -34,12 +36,14 @@ use relayrl_types::data::tensor::{
     AnyBurnTensor, BackendMatcher, BoolBurnTensor, DType, DeviceType, FloatBurnTensor,
     IntBurnTensor, SupportedTensorBackend,
 };
+use relayrl_types::data::trajectory::RelayRLTrajectory;
 use relayrl_types::model::ModelModule;
 use relayrl_types::model::utils::validate_module;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
-use burn_tensor::{Bool, Float, Int, Tensor, TensorKind, backend::Backend};
+use burn_tensor::{BasicOps, Bool, Float, Int, Tensor, TensorKind, backend::Backend};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "metrics", feature = "logging"))]
 use std::collections::HashMap;
@@ -73,6 +77,8 @@ pub enum ClientError {
     InvalidInferenceMode(String),
     #[error("Invalid trajectory file directory: {0}")]
     InvalidTrajectoryFileDirectory(String),
+    #[error("Invalid env count: {0}")]
+    InvalidEnvCount(String),
     #[error("Model validation failed: {0}")]
     ModelValidationFailed(String),
     #[error("Update model is not supported: {0}")]
@@ -264,6 +270,13 @@ pub enum ActorInferenceMode {
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
     Server(InferenceParams),
+    /// Experimental: inference occurs locally for one actor, remote inference for others.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
+    ServerOverflow(ModelMode, InferenceParams),
 }
 
 impl Default for ActorInferenceMode {
@@ -286,14 +299,32 @@ pub enum ActorTrainingDataMode {
     )]
     Online(TrainingParams),
     /// Training data is recorded to a local file.
-    Offline(Option<LocalTrajectoryFileParams>),
+    OfflineWithFiles(Option<LocalTrajectoryFileParams>),
+    /// Training data is recorded to a local memory buffer.
+    OfflineWithMemory,
+    /// Training data is recorded to a local file and memory buffer.
+    OfflineWithFilesAndMemory(Option<LocalTrajectoryFileParams>),
     /// Experimental: training data is sent to the server and also recorded locally.
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
     )]
-    Hybrid(TrainingParams, Option<LocalTrajectoryFileParams>),
+    OnlineWithFiles(TrainingParams, Option<LocalTrajectoryFileParams>),
+    /// Experimental: training data is sent to the server and also recorded in memory.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
+    OnlineWithMemory(TrainingParams),
+    /// Experimental: training data is sent to the server and also recorded in file and memory.
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "nats-transport", feature = "zmq-transport")))
+    )]
+    OnlineWithFilesAndMemory(TrainingParams, Option<LocalTrajectoryFileParams>),
     /// Training data collection and processing is disabled
     Disabled,
 }
@@ -303,7 +334,7 @@ impl Default for ActorTrainingDataMode {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
         return Self::Online(TrainingParams::default());
         #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-        return Self::Offline(None);
+        return Self::OfflineWithMemory;
     }
 }
 
@@ -311,10 +342,35 @@ pub(crate) fn uses_local_file_writing(training_data_mode: &ActorTrainingDataMode
     #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
     return matches!(
         training_data_mode,
-        ActorTrainingDataMode::Offline(_) | ActorTrainingDataMode::Hybrid(_, _)
+        ActorTrainingDataMode::OfflineWithFiles(_)
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+            | ActorTrainingDataMode::OnlineWithFiles(_, _)
+            | ActorTrainingDataMode::OnlineWithFilesAndMemory(_, _)
     );
     #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
-    return matches!(training_data_mode, ActorTrainingDataMode::Offline(_));
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::OfflineWithFiles(_)
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+    );
+}
+
+pub(crate) fn uses_in_memory_data(training_data_mode: &ActorTrainingDataMode) -> bool {
+    #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::OfflineWithMemory
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+            | ActorTrainingDataMode::OnlineWithMemory
+            | ActorTrainingDataMode::OnlineWithFilesAndMemory(_)
+    );
+
+    #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+    return matches!(
+        training_data_mode,
+        ActorTrainingDataMode::OfflineWithMemory
+            | ActorTrainingDataMode::OfflineWithFilesAndMemory(_)
+    );
 }
 
 /// Runtime modes consumed by the client to enable/disable functionality.
@@ -560,11 +616,12 @@ impl<
         ClientError,
     > {
         // Initialize agent object
-        let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> = RelayRLAgent::new(
-            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-            self.transport_type.unwrap_or_default(),
-            self.client_modes,
-        );
+        let agent: RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut> =
+            RelayRLAgent::<B, D_IN, D_OUT, KindIn, KindOut>::new(
+                #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+                self.transport_type.unwrap_or_default(),
+                self.client_modes,
+            );
 
         // Tuple parameters
         let startup_params: AgentStartParameters<B> = AgentStartParameters::<B> {
@@ -639,11 +696,10 @@ pub struct RelayRLAgent<
     KindIn: TensorKind<B>,
     KindOut: TensorKind<B>,
 > {
-    coordinator: ClientCoordinator<B, D_IN, D_OUT>,
+    coordinator: ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>,
     supported_backend: SupportedTensorBackend,
     input_dtype: Option<DType>,
     output_dtype: Option<DType>,
-    _phantom: PhantomData<(KindIn, KindOut)>,
 }
 
 impl<
@@ -680,7 +736,7 @@ impl<
         client_modes: ClientModes,
     ) -> Self {
         Self {
-            coordinator: ClientCoordinator::<B, D_IN, D_OUT>::new(
+            coordinator: ClientCoordinator::<B, D_IN, D_OUT, KindIn, KindOut>::new(
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 transport_type,
                 client_modes,
@@ -688,7 +744,6 @@ impl<
             supported_backend: B::get_supported_backend(),
             input_dtype: None,
             output_dtype: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -875,7 +930,9 @@ impl<
         actor_ids: Option<Vec<ActorUuid>>,
     ) -> Result<(), ClientError> {
         #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+        if let ActorTrainingDataMode::Online(_)
+        | ActorTrainingDataMode::OnlineWithFiles(_, _)
+        | ActorTrainingDataMode::OnlineWithMemory(_) =
             self.coordinator.client_modes.actor_training_data_mode
         {
             log::warn!(
@@ -902,6 +959,12 @@ impl<
         actor_ids: Vec<Uuid>,
     ) -> Result<Vec<(Uuid, i64)>, ClientError> {
         Ok(self.coordinator.get_model_version(actor_ids).await?)
+    }
+
+    pub async fn get_trajectory_memory(
+        &self,
+    ) -> Result<Arc<DashMap<Uuid, Vec<Arc<RelayRLTrajectory>>>>, ClientError> {
+        Ok(self.coordinator.get_trajectory_memory().await?)
     }
 
     /// Fetch the active client configuration.
@@ -1013,7 +1076,9 @@ impl<
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
-                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1037,7 +1102,9 @@ impl<
                         .send_client_ids_to_server(actor_entries.clone(), true)
                         .await?;
 
-                    if let ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _) =
+                    if let ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_) =
                         &self.coordinator.client_modes.actor_training_data_mode
                     {
                         self.coordinator
@@ -1102,7 +1169,9 @@ impl<
 
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
                 if let (
-                    ActorTrainingDataMode::Online(_) | ActorTrainingDataMode::Hybrid(_, _),
+                    ActorTrainingDataMode::Online(_)
+                    | ActorTrainingDataMode::OnlineWithFiles(_, _)
+                    | ActorTrainingDataMode::OnlineWithMemory(_),
                     ActorInferenceMode::Server(_),
                 ) = (
                     &self.coordinator.client_modes.actor_training_data_mode,
@@ -1161,6 +1230,73 @@ impl<
     }
 }
 
+#[allow(async_fn_in_trait)]
+pub trait RelayRLActorEnv<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B>,
+    KindOut: TensorKind<B>,
+>
+{
+    async fn run_env(&self, actor_id: ActorUuid, step_count: usize) -> Result<(), ClientError>;
+    async fn set_env(
+        &mut self,
+        actor_id: ActorUuid,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        count: u32,
+    ) -> Result<(), ClientError>;
+    async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError>;
+    async fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, ClientError>;
+    async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError>;
+}
+
+impl<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+    KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
+    KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
+> RelayRLActorEnv<B, D_IN, D_OUT, KindIn, KindOut>
+    for RelayRLAgent<B, D_IN, D_OUT, KindIn, KindOut>
+{
+    async fn run_env(&self, actor_id: ActorUuid, step_count: usize) -> Result<(), ClientError> {
+        Ok(self.coordinator.run_env(actor_id, step_count).await?)
+    }
+
+    async fn set_env(
+        &mut self,
+        actor_id: ActorUuid,
+        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        count: u32,
+    ) -> Result<(), ClientError> {
+        Ok(self.coordinator.set_env(actor_id, env, count).await?)
+    }
+
+    async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), ClientError> {
+        Ok(self.coordinator.remove_env(actor_id).await?)
+    }
+
+    async fn set_env_count(&mut self, actor_id: ActorUuid, count: u32) -> Result<(), ClientError> {
+        let current = self.coordinator.get_env_count(actor_id).await?;
+        match count.cmp(&current) {
+            std::cmp::Ordering::Greater => Ok(self
+                .coordinator
+                .increase_env_count(actor_id, count - current)
+                .await?),
+            std::cmp::Ordering::Less => Ok(self
+                .coordinator
+                .decrease_env_count(actor_id, current - count)
+                .await?),
+            std::cmp::Ordering::Equal => Ok(()),
+        }
+    }
+
+    async fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, ClientError> {
+        Ok(self.coordinator.get_env_count(actor_id).await?)
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -1212,9 +1348,9 @@ mod unit_tests {
 
     #[test]
     fn offline_returns_true() {
-        assert!(uses_local_file_writing(&ActorTrainingDataMode::Offline(
-            None
-        )));
+        assert!(uses_local_file_writing(
+            &ActorTrainingDataMode::OfflineWithFiles(None)
+        ));
     }
 
     #[test]

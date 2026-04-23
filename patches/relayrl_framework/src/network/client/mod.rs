@@ -21,12 +21,14 @@ pub(crate) mod runtime {
         pub(crate) mod scale_manager;
         pub(crate) mod state_manager;
     }
-    pub(crate) mod inference;
     pub(crate) mod router;
 
     pub(crate) mod data {
-        pub(crate) mod file_sink;
-        #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
-        pub(crate) mod transport_sink;
+        pub(crate) mod environments;
+        pub(crate) mod sinks {
+            pub(crate) mod file_sink;
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            pub(crate) mod transport_sink;
+        }
     }
 }

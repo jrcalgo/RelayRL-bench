@@ -1,0 +1,128 @@
+═══════════════════════════════════════════════════════════════════════
+  RelayRL GridWorld VecEnv benchmark
+  1 actor · 32 sub-envs (VecEnv batch) · 50000 calls · 10×10 grid · 4 cores
+  Options: batched ONNX inference [N,obs] + rayon parallel env step
+  Total env steps = 32 × 50000 = 1600000
+═══════════════════════════════════════════════════════════════════════
+
+Initialising agent (1 actor, ModelMode::Shared)…
+  init time : 0 ms  (1 actor, batched model [32,100])
+
+Warming up (200 calls)…
+Warm-up done. Starting benchmark…
+
+  [  10000 calls      320000 env-steps]  459797 env-steps/sec  (14369 calls/sec)
+  [  20000 calls      640000 env-steps]  352081 env-steps/sec  (11003 calls/sec)
+  [  30000 calls      960000 env-steps]  272106 env-steps/sec  (8503 calls/sec)
+  [  40000 calls     1280000 env-steps]  248634 env-steps/sec  (7770 calls/sec)
+  [  50000 calls     1600000 env-steps]  235589 env-steps/sec  (7362 calls/sec)
+
+═══════════════════════════════════════════════════════════════════════
+  RelayRL GridWorld VecEnv — FINAL RESULTS
+  1 actor  |  32 sub-envs  |  50000 calls  |  batched ONNX + rayon step
+═══════════════════════════════════════════════════════════════════════
+
+─── Throughput ──────────────────────────────────────────────────────────
+  env-steps/sec (global)         :     235587.0   (32 envs × 7362 calls/s)
+  env-steps/sec per sub-env      :       7362.1   (= calls/sec)
+  env-steps/sec per logical core :      58896.8
+  calls/sec (request_action)     :       7362.1
+  episodes/sec (all sub-envs)    :     1177.935
+  total calls                    :        50000
+  total env steps                :      1600000
+  wall time                      :         6.79 s
+  logical cores                  :            4
+  VecEnv batch size              :           32
+
+─── Episode Statistics ──────────────────────────────────────────────────
+  avg steps per episode          :        200.0   (per sub-env)
+  episode return mean            :     -191.093
+  episode completion variance    :        0.000
+  total episodes (all sub-envs)  :         8000
+
+─── Inference Timing (µs) — batched [32×100] ONNX forward ─────────────────
+  inference mean  (call − env)   :       42.021 µs  [1 forward pass, 32 obs]
+  inference / total call ratio   :        0.502
+  action ser/deser               :   included in call timing
+  state update / buffer write    :   disabled (trajectories off)
+
+─── Call Timing (µs) — request_action ([32×100] batch) ─────────────────────
+  call mean                      :       83.663 µs
+  call std dev                   :       77.163 µs
+  P50 step latency               :       70.549 µs
+  P95 step latency               :      183.757 µs
+  P99 step latency               :      283.642 µs
+  P99.9 step latency             :     1000.793 µs
+  jitter (P99 − P50)             :      213.093 µs
+  variance in step time (σ²)     :     5954.178 µs²
+
+─── Env Step Timing (µs) — rayon parallel step (32 sub-envs) ─────────────
+  env step mean  (rayon, 32 envs) :       50.114 µs
+  env step std dev               :       76.159 µs
+  env step P50                   :       34.932 µs
+  env step P99                   :      237.983 µs
+  env step / call ratio          :        0.375
+  env step / sub-env             :        1.566 µs  (mean/32)
+
+─── Scheduling / Overhead ───────────────────────────────────────────────
+  step mean (call + env)         :      133.778 µs
+  scheduling overhead            :        0.000 µs  (call − infer − env)
+  overhead ratio                 :       0.0000  (orchestration / total)
+  scheduler tick time            :   Tokio default (61 µs budget)
+  actor dispatch latency         :       70.549 µs  (call P50, 1 actor)
+  deadtime per sub-env           :     0.000000  (overhead_ratio / 32)
+  dropped/late updates           :            0
+
+─── Memory ──────────────────────────────────────────────────────────────
+  RSS init                       :      28.9 MB
+  RSS peak                       :     670.5 MB
+  RSS mean                       :     397.6 MB  (0.388 GB)
+  RSS final                      :     670.5 MB
+  allocation rate (RSS Δ/s)      : 96734.979 KB/s
+  /proc samples                  :        34
+
+─── CPU / OS ────────────────────────────────────────────────────────────
+  CPU utilisation (summed cores) :    138.55 %
+  CPU util / logical core        :     34.64 %
+  mean threads                   :      12.9   (rayon pool + tokio)
+  run queue length (1-min avg)   :     1.184
+  context switches total         :    126619
+  context switches/sec           :   18643.6
+  context switches/call          :  2.532380
+  context switches/env-step      :  0.079137
+  context switching rate         :   18643.6 ctx-sw/s
+
+─── Efficiency Ratios ───────────────────────────────────────────────────
+  env-steps/sec / logical core   :      58896.8
+  env-steps/sec / GB RSS (proxy) :     606728.9
+  env-steps/sec / watt           :   requires external power measurement
+  S(n) vs 1-env baseline         :       12.117×  (235587.0 sps / 19443.0 baseline)
+  overhead ratio                 :       0.0000
+
+─── Not Directly Observable (instrumentation notes) ─────────────────────
+  cache misses (L1/L2/L3)        :   perf stat -e L1-dcache-load-misses,LLC-load-misses
+  IPC (instr/cycle)              :   perf stat -e cycles,instructions
+  memory bandwidth               :   perf stat -e cache-references
+  queue backlog size             :   not exposed by framework API
+  buffer contention rate         :   n/a (trajectories disabled)
+  inter-thread msg latency       :  ~70.55 µs  (P50 = dispatch, 1 actor)
+  sync wait time                 :   included in call_mean (83.663 µs)
+  rayon Mutex contention         :   0.079137 ctx-sw/env-step (proxy)
+
+═══════════════════════════════════════════════════════════════════════
+  INIT SUMMARY: 0 ms init · 1 actor · 32 sub-envs · batch ONNX [32,100]
+═══════════════════════════════════════════════════════════════════════
+
+ Performance counter stats for './target/release/bench_gridworld_vecenv --num-envs 32 --target-calls 50000':
+
+           9510.18 msec task-clock                       #    1.193 CPUs utilized             
+           3107624      context-switches                 #  326.768 K/sec                     
+             30896      cpu-migrations                   #    3.249 K/sec                     
+            170374      page-faults                      #   17.915 K/sec                     
+
+       7.973547484 seconds time elapsed
+
+       4.692906000 seconds user
+       5.202743000 seconds sys
+
+

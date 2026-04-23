@@ -1,0 +1,29 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL GridWorld benchmark
+  1 actors · 1 routers · 200000 calls · 10×10 grid · 4 logical cores
+  Total env steps = 1 × 200000 = 200000
+═══════════════════════════════════════════════════════════════════
+
+
+thread 'main' (23197) panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ort-2.0.0-rc.11/src/lib.rs:191:41:
+Failed to load ONNX Runtime dylib: Error { code: GenericFailure, msg: "failed to load from `libonnxruntime.so`: dlopen failed" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::result::unwrap_failed
+   3: ort::setup_api
+   4: std::sync::once::Once::call_once_force::{{closure}}
+   5: std::sys::sync::once::futex::Once::call
+   6: ort::util::once_lock::OnceLock<T>::try_init_inner
+   7: ort::environment::EnvironmentBuilder::create_environment::{{closure}}
+   8: ort::environment::get_environment
+   9: ort::session::builder::SessionBuilder::new
+  10: ort::session::Session::builder
+  11: relayrl_types::model::ModelModule<B>::from_onnx_bytes
+  12: bench_gridworld::bootstrap_model
+  13: bench_gridworld::main::{{closure}}
+  14: tokio::runtime::park::CachedParkThread::block_on
+  15: tokio::runtime::context::runtime::enter_runtime
+  16: tokio::runtime::runtime::Runtime::block_on
+  17: bench_gridworld::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

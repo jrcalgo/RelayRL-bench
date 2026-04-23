@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-beta.2] - 2026-04-23
+
+### Added
+- **Actor environment control API** - `RelayRLActorEnv` adds `run_env`, `set_env`, `remove_env`, `get_env_count`, and `set_env_count` so local actors can manage scalar and vector environment lifecycles through the coordinator
+- **Batched local inference routing** - `RequestInferenceBatch` and `BatchedInferenceRequest` add batched observation dispatch for vectorized local environments
+  - `FlagLastInference` now carries optional `env_id` and `env_label` so finalized trajectories can preserve environment identity across batched runs
+
+### Changed
+- **Environment trait alignment** - `relayrl_framework` now inherits `relayrl_env_trait` from the workspace and targets the 1.1 environment API surface used by the new actor environment plumbing
+- **Runtime routing and vectorized environment handling** - Coordinator, state-manager, and router paths were reworked around shared router state, batched environment execution, and explicit routing timeouts for `RequestInferenceBatch` and `FlagLastInference`
+- **Hot-path runtime optimizations** - Cache padding and ordering refinements were applied across shared actor counts, router flags, backpressure permits, circuit-breaker counters, and shutdown state to reduce contention and improve responsiveness under load
+
+### Fixed
+- **Action request coordination** - `request_action()` now acquires shared dispatcher and valid-id state in one path and tightens the routing window to reduce actor reply races
+- **Runtime ordering and recovery behavior** - Actor distribution/removal ordering, backpressure wakeups, and circuit-breaker state transitions were tightened to behave more predictably under load
+
+### Breaking
+- **Environment integration surface** - Consumers integrating custom environments must adapt to the newer `relayrl_env_trait` 1.1 generics and method requirements now used by framework environment APIs
+  - Projects that pinned `relayrl_env_trait` `1.0.x` alongside `0.5.0-beta.1` need to align with the workspace-managed env-trait dependency before moving to `0.5.0-beta.2`
+
+## [0.5.0-beta.1] - 2026-04-13
+
+### Added
+- **In-memory trajectory retrieval** - `RelayRLAgent::get_trajectory_memory()` added for draining accumulated per-actor trajectory memory from the runtime coordinator
+  - Completed trajectories can now be retained in bounded in-memory buffers, and `flag_last_action` now stamps each emitted trajectory with an episode id before dispatch
+- **Overflow inference mode** - `ActorInferenceMode::ServerOverflow(ModelMode, InferenceParams)` added as an experimental transport-gated mode for mixing local model ownership with remote inference fallback
+
+### Changed
+- **Local model/runtime concurrency** - Local actor model handles now use `ArcSwapOption` instead of lock-based storage so inference and model swaps can proceed through snapshot-style loads rather than blocking reload paths
+
+### Fixed
+- **Action request handling** - `request_action()` follow-up fixes improved actor reply coordination and corrected id/reference handling in the runtime action path
+- **Trajectory-length defaults** - Generated config JSON and builder defaults now cap `max_traj_length` at `1000` instead of `100000000` to avoid runaway memory use in default configurations
+
+### Breaking
+- **Feature and codec surface** - Default features dropped `tch-backend`, `relayrl_framework` no longer forces `relayrl_types` `ndarray-backend` / `onnx-model` features in its dependency declaration, and `prelude::config::network_codec` now exists only when `nats-transport` or `zmq-transport` is enabled
+- **Training-data mode API redesign** - `ActorTrainingDataMode` was expanded from the older `Offline` / `Hybrid` shape into explicit file and memory variants such as `OfflineWithFiles`, `OfflineWithMemory`, `OnlineWithFiles`, and `OnlineWithMemory`; the non-transport default is now `OfflineWithMemory`
+
 ## [0.5.0-beta] - 2026-04-06
 
 ### Added

@@ -14,9 +14,7 @@ use glam::Vec2;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use relayrl_env_trait::environment_traits::{
-    EnvironmentError, EnvironmentTrait, TrainingPerformanceReturnFn,
-};
+use relayrl_env_trait::{EnvironmentError, TrainingPerformanceReturnFn};
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 use relayrl_types::prelude::tensor::burn::{Float, Tensor, TensorData};
 
@@ -648,25 +646,6 @@ where
 
 // ── EnvironmentTrait impls ────────────────────────────────────────────────────
 
-impl<B: Backend> EnvironmentTrait for LunarLanderEnv<B>
-where
-    B::Device: Clone,
-{
-    fn run_environment(&self) -> Result<(), EnvironmentError> {
-        self.running.store(true, Ordering::SeqCst);
-        self.reset();
-        Ok(())
-    }
-
-    fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
-        let obs = self.state.borrow().last_obs;
-        let tensor = Tensor::<B, 2, Float>::from_data(
-            TensorData::new(obs.to_vec(), [1usize, 8usize]),
-            &self.device,
-        );
-        Ok(Box::new(tensor))
-    }
-}
 
 impl<B: Backend> TrainingPerformanceReturnFn for LunarLanderEnv<B>
 where

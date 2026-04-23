@@ -1,0 +1,15 @@
+
+ Performance counter stats for './target/release/bench_gridworld --actor-count 1 --target-calls 200000':
+
+             71.81 msec task-clock                       #    0.832 CPUs utilized             
+                26      context-switches                 #  362.063 /sec                      
+                 1      cpu-migrations                   #   13.926 /sec                      
+              7972      page-faults                      #  111.014 K/sec                     
+              7971      minor-faults                     #  111.000 K/sec                     
+
+       0.086340542 seconds time elapsed
+
+       0.057118000 seconds user
+       0.020399000 seconds sys
+
+

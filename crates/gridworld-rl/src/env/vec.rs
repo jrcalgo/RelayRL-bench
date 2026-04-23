@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 
 use rayon::prelude::*;
 
-use relayrl_env_trait::environment_traits::EnvironmentError;
+use relayrl_env_trait::EnvironmentError;
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 
 use super::RewardConfig;

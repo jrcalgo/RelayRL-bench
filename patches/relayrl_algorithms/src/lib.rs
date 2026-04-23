@@ -70,7 +70,6 @@ pub mod templates;
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
-pub use templates::base_algorithm::WeightProvider;
 
 use std::path::PathBuf;
 
@@ -83,6 +82,7 @@ pub use algorithms::REINFORCE::{
 };
 pub use templates::base_algorithm::{
     AlgorithmError, AlgorithmTrait, StepKernelTrait, TrainableKernelTrait, TrajectoryData,
+    WeightProvider,
 };
 
 /// Shared filesystem and shape arguments for every trainer constructor in this module.
@@ -346,6 +346,37 @@ where
     ) -> Result<Self, AlgorithmError> {
         Self::new(PpoTrainerSpec::ippo(args, hyperparams), kernel)
     }
+
+    /// Reset per-actor trajectory counts.
+    ///
+    /// Prevents `receive_trajectory` from auto-triggering `train_model` when called
+    /// from an async context at the start of a new epoch.
+    pub fn reset_epoch(&mut self) {
+        match self {
+            Self::PPO(algorithm) => algorithm.reset_epoch(),
+            Self::IPPO(algorithm) => algorithm.reset_epoch(),
+        }
+    }
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B, InK, OutK, K> PpoTrainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: PPOKernelTrait<B, InK, OutK> + WeightProvider + Default,
+{
+    /// Export the trained policy as an in-memory ONNX model.
+    ///
+    /// Returns `None` before the first training epoch or when no actors have been
+    /// registered.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::PPO(algorithm) => algorithm.acquire_model_module(),
+            Self::IPPO(algorithm) => algorithm.acquire_model_module(),
+        }
+    }
 }
 
 /// Runtime wrapper for **independent** REINFORCE-family algorithms with kernel `K`.
@@ -387,9 +418,6 @@ where
     OutK: TensorKind<B>,
     K: StepKernelTrait<B, InK, OutK> + TrainableKernelTrait + Default,
 {
-    /// Reset per-agent counts; no-op for REINFORCE (counts are handled internally).
-    pub fn reset_epoch(&mut self) {}
-
     /// Constructs a trainer from a [`ReinforceTrainerSpec`] and a kernel instance.
     pub fn new(spec: ReinforceTrainerSpec, kernel: K) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
@@ -437,6 +465,17 @@ where
     ) -> Result<Self, AlgorithmError> {
         Self::new(ReinforceTrainerSpec::ireinforce(args, hyperparams), kernel)
     }
+
+    /// No-op for REINFORCE trainers; trajectory counts are managed internally.
+    pub fn reset_epoch(&mut self) {}
+
+    /// REINFORCE does not support in-memory ONNX export; always returns `None`.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>>
+    where
+        B: BackendMatcher<Backend = B>,
+    {
+        None
+    }
 }
 
 /// Runtime wrapper for **multi-agent** MAPPO and MAREINFORCE.
@@ -479,26 +518,6 @@ where
     InK: TensorKind<B>,
     OutK: TensorKind<B>,
 {
-    /// No-op for multi-agent trainers; per-actor count reset is handled internally.
-    pub fn reset_epoch(&mut self) {}
-
-    /// Build a [`relayrl_types::model::ModelModule`] from the trained shared policy
-    /// weights held in memory, bypassing any filesystem save/load cycle.
-    ///
-    /// Returns `None` if training has not yet produced any agent slots, or if the
-    /// variant is MAREINFORCE (which has no PPO policy network).
-    pub fn acquire_model_module(
-        &self,
-    ) -> Option<relayrl_types::model::ModelModule<B>>
-    where
-        B: BackendMatcher<Backend = B>,
-    {
-        match self {
-            Self::MAPPO { trainer } => trainer.acquire_model_module(),
-            Self::MAREINFORCE { .. } => None,
-        }
-    }
-
     /// Builds from a [`MultiagentTrainerSpec`] (MAPPO or MAREINFORCE).
     pub fn new(spec: MultiagentTrainerSpec) -> Result<Self, AlgorithmError> {
         let trainer = match spec {
@@ -541,6 +560,27 @@ where
         hyperparams: Option<MAREINFORCEParams>,
     ) -> Result<Self, AlgorithmError> {
         Self::new(MultiagentTrainerSpec::mareinforce(args, hyperparams))
+    }
+
+    /// No-op for multi-agent trainers; trajectory counts are managed internally.
+    pub fn reset_epoch(&mut self) {}
+}
+
+#[cfg(feature = "ndarray-backend")]
+impl<B, InK, OutK> MultiagentTrainer<B, InK, OutK>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+{
+    /// Export the trained MAPPO policy as an in-memory ONNX model.
+    ///
+    /// Returns `None` for MAREINFORCE or before any training has occurred.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::MAPPO { trainer } => trainer.acquire_model_module(),
+            Self::MAREINFORCE { .. } => None,
+        }
     }
 }
 
@@ -696,35 +736,6 @@ where
         match self {
             Self::PPO(algorithm) => AlgorithmTrait::<T>::log_epoch(algorithm),
             Self::IPPO(algorithm) => AlgorithmTrait::<T>::log_epoch(algorithm),
-        }
-    }
-}
-
-impl<B, InK, OutK, K> PpoTrainer<B, InK, OutK, K>
-where
-    B: Backend + BackendMatcher<Backend = B>,
-    InK: TensorKind<B>,
-    OutK: TensorKind<B>,
-    K: PPOKernelTrait<B, InK, OutK> + WeightProvider + Default,
-{
-    /// Reset per-agent trajectory counters after a manual train step so that the
-    /// algorithm's `all_agents_ready()` guard doesn't auto-trigger `train_model`
-    /// (with a nested `block_on`) from inside an async context.
-    pub fn reset_epoch(&mut self) {
-        match self {
-            Self::PPO(algorithm) => algorithm.reset_agent_counts(),
-            Self::IPPO(algorithm) => algorithm.reset_agent_counts(),
-        }
-    }
-
-    /// Build a [`relayrl_types::model::ModelModule`] from the trained policy weights
-    /// held in memory, bypassing any filesystem save/load cycle.
-    ///
-    /// Returns `None` if training has not yet produced any agent slots.
-    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
-        match self {
-            Self::PPO(algorithm) => algorithm.acquire_model_module(),
-            Self::IPPO(algorithm) => algorithm.acquire_model_module(),
         }
     }
 }

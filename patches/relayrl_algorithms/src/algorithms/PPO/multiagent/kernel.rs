@@ -149,43 +149,31 @@ impl MultiagentPPOKernel {
         &self.hidden_sizes
     }
 
-    /// Extract layer specs from the first trained actor network.
-    /// Returns `None` if no training has occurred yet.
+    /// Extract per-layer weight specs from the first actor in the shared policy.
+    ///
+    /// Returns `None` if no training has occurred yet (trainer or module absent) or if
+    /// no actors have been registered.
+    #[cfg(feature = "ndarray-backend")]
     pub fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
-        #[cfg(feature = "ndarray-backend")]
-        {
-            let trainer = self.trainer.as_ref()?;
-            let module = trainer.module.as_ref()?;
-            let actor = module.actors.first()?;
+        let trainer = self.trainer.as_ref()?;
+        let module = trainer.module.as_ref()?;
+        let actor = module.actors.first()?;
 
-            let specs = actor
-                .layers
-                .iter()
-                .map(|layer| {
-                    let w = layer.weight.val();
-                    let dims = w.dims();
-                    // Burn Linear stores weights as [in_features, out_features]
-                    let in_dim = dims[0];
-                    let out_dim = dims[1];
-                    let w_data: Vec<f32> =
-                        w.into_data().to_vec::<f32>().unwrap_or_default();
-
-                    let b_data = layer
-                        .bias
-                        .as_ref()
-                        .map(|b| {
-                            b.val().into_data().to_vec::<f32>().unwrap_or_default()
-                        })
-                        .unwrap_or_else(|| vec![0.0f32; out_dim]);
-
-                    (in_dim, out_dim, w_data, b_data)
-                })
-                .collect();
-
-            return Some(specs);
+        let mut specs = Vec::new();
+        for layer in &actor.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
         }
-        #[cfg(not(feature = "ndarray-backend"))]
-        None
+        Some(specs)
     }
 }
 

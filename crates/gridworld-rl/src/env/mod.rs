@@ -2,7 +2,7 @@ pub mod vec;
 
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 use relayrl_types::prelude::tensor::burn::{Float, Tensor, TensorData};
-use relayrl_env_trait::environment_traits::{EnvironmentTrait, TrainingPerformanceReturnFn, EnvironmentError};
+use relayrl_env_trait::{EnvironmentError, TrainingPerformanceReturnFn};
 use std::any::Any;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -403,29 +403,7 @@ where
     }
 }
 
-impl<B: Backend> EnvironmentTrait for GridWorldEnv<B>
-where
-    B::Device: Clone,
-{
-    fn run_environment(&self) -> Result<(), EnvironmentError> {
-        self.running.store(true, Ordering::SeqCst);
-        self.reset();
-        Ok(())
-    }
 
-    fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
-        self.update_observations();
-        let obs = self.last_observations.borrow();
-        let n = obs.len();
-        let cells = self.length * self.width;
-        let flat: Vec<f32> = obs.iter().flat_map(|row| row.iter().copied()).collect();
-        let tensor = Tensor::<B, 2, Float>::from_data(
-            TensorData::new(flat, [n, cells]),
-            &self.device,
-        );
-        Ok(Box::new(tensor))
-    }
-}
 
 impl<B: Backend> TrainingPerformanceReturnFn for GridWorldEnv<B> {
 	fn calculate_performance_return(&self) -> Result<Box<dyn Any>, EnvironmentError> {

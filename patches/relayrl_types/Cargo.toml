@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "relayrl_types"
-version = "0.5.4"
+version = "0.7.0"
 authors = ["jrcalgo <jacksonr121@outlook.com>"]
 build = false
 autolib = false
@@ -57,20 +57,26 @@ codec-secure = [
 compression = [
     "lz4_flex",
     "zstd",
+    "bincode",
 ]
 default = [
     "ndarray-backend",
-    "codec-full",
     "onnx-model",
 ]
-encryption = ["chacha20poly1305"]
+encryption = [
+    "chacha20poly1305",
+    "bincode",
+]
 inference-models = [
     "tch-model",
     "onnx-model",
 ]
 integrity = ["blake3"]
 metadata = ["bincode"]
-ndarray-backend = ["burn-ndarray"]
+ndarray-backend = [
+    "burn-ndarray",
+    "half",
+]
 onnx-model = [
     "ort",
     "tokio",
@@ -78,7 +84,10 @@ onnx-model = [
     "ndarray",
 ]
 quantization = ["half"]
-tch-backend = ["burn-tch"]
+tch-backend = [
+    "burn-tch",
+    "half",
+]
 tch-model = [
     "tch",
     "tokio",
@@ -91,7 +100,7 @@ name = "relayrl_types"
 path = "src/lib.rs"
 
 [dependencies.arc-swap]
-version = "1"
+version = "1.9.1"
 
 [dependencies.arrow]
 version = "57.3.0"

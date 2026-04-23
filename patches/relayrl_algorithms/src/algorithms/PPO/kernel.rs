@@ -3,7 +3,7 @@
 use crate::algorithms::REINFORCE::{
     ActivationKind, BaselineValueNetwork, ContinuousPolicyNetwork, DiscretePolicyNetwork,
 };
-use crate::templates::base_algorithm::{StepAction, StepKernelTrait, WeightProvider};
+use crate::templates::base_algorithm::{StepAction, StepKernelTrait};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,12 +51,12 @@ where
 pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>:
     StepKernelTrait<B, InK, OutK>
 {
-    /// Construct a new kernel instance with the given observation and action dimensions.
-    /// Called by `IndependentPPOAlgorithm` when registering actors beyond the first,
-    /// since the seed kernel can only be consumed once.
-    fn new_for_actor(obs_dim: usize, act_dim: usize) -> Self
-    where
-        Self: Sized;
+    /// Construct a correctly-shaped kernel for a new actor slot.
+    ///
+    /// Used instead of `Default::default()` when registering agents beyond the first,
+    /// so each actor is initialised with the right `obs_dim` / `act_dim` rather than
+    /// the placeholder dimensions that `Default` produces.
+    fn new_for_actor(obs_dim: usize, act_dim: usize) -> Self;
 
     fn ppo_pi_loss(
         &mut self,
@@ -268,11 +268,10 @@ mod training {
             };
 
             let obs_dim = net.obs_dim;
-            let obs_flat_data = obs_flat(&obs_tensors[..n]);
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
 
             let obs = Tensor::<TB, 2, Float>::from_data(
-                BurnTensorData::new(obs_flat_data, [n, obs_dim]),
+                BurnTensorData::new(obs_flat(&obs_tensors[..n]), [n, obs_dim]),
                 &device,
             );
             let v_pred = net.forward(obs).reshape([n]);
@@ -567,45 +566,35 @@ where
     }
 }
 
-impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>> WeightProvider
-    for PPOPolicyWithBaseline<B, InK, OutK>
+#[cfg(feature = "ndarray-backend")]
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    crate::templates::base_algorithm::WeightProvider for PPOPolicyWithBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
     OutK: BasicOps<B>,
 {
+    /// Extract per-layer weight specs from the discrete policy trainer network.
+    ///
+    /// Returns `None` if no training has happened yet (the trainer or its network is
+    /// absent) or if this kernel uses a continuous policy (not yet supported).
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
-        #[cfg(feature = "ndarray-backend")]
-        {
-            let trainer = self.pi_trainer.as_ref()?;
-            let network = trainer.network.as_ref()?;
+        let trainer = self.pi_trainer.as_ref()?;
+        let network = trainer.network.as_ref()?;
 
-            let specs = network
-                .layers
-                .iter()
-                .map(|layer| {
-                    let w = layer.weight.val();
-                    let dims = w.dims();
-                    // Burn Linear stores weights as [in_features, out_features]
-                    let in_dim = dims[0];
-                    let out_dim = dims[1];
-                    let w_data: Vec<f32> =
-                        w.into_data().to_vec::<f32>().unwrap_or_default();
-
-                    let b_data = layer
-                        .bias
-                        .as_ref()
-                        .map(|b| {
-                            b.val().into_data().to_vec::<f32>().unwrap_or_default()
-                        })
-                        .unwrap_or_else(|| vec![0.0f32; out_dim]);
-
-                    (in_dim, out_dim, w_data, b_data)
-                })
-                .collect();
-
-            return Some(specs);
+        let mut specs = Vec::new();
+        for layer in &network.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
         }
-        #[cfg(not(feature = "ndarray-backend"))]
-        None
+        Some(specs)
     }
 }

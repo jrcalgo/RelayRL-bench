@@ -1,7 +1,7 @@
 use burn_tensor::backend::Backend;
 use gridworld_rl::env::{GridWorldEnv, RewardConfig};
 use lunarlander_rl::env::LunarLanderEnv;
-use relayrl_env_trait::environment_traits::EnvironmentError;
+use relayrl_env_trait::EnvironmentError;
 
 /// Minimal environment interface used by the training loop.
 /// Both GridWorldEnv and LunarLanderEnv satisfy this via blanket delegates.

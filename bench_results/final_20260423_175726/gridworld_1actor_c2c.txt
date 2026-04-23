@@ -1,0 +1,2 @@
+perf c2c record failed:
+failed: memory events not supported

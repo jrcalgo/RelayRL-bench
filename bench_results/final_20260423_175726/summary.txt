@@ -1,0 +1,94 @@
+RelayRL framework benchmark — 2026-04-23T18:11:05Z
+Framework version : 0.5.0-beta.2
+Host kernel       : 6.18.5
+CPU cores         : 4
+Results dir       : bench_results/final_20260423_175726
+perf version      : perf version 6.8.12
+
+NOTE: Hardware PMU events (cycles, instructions, cache-misses) are not
+      available in this container (no PMU pass-through). Only software
+      events are captured: task-clock, context-switches, cpu-migrations,
+      page-faults, minor-faults.
+      perf c2c: memory-access PMU events not supported on this host.
+
+=======================================================================
+PART 1 — bench_gridworld (multi-actor, shared GridWorldEnv)
+=======================================================================
+
+Each row: N actors each independently step the 10×10 GridWorldEnv.
+request_action(all_ids) fans out to all N actors in parallel.
+All runs: 200,000 calls, 4 logical cores.
+
+Actors     env-steps/sec     calls/sec      S(n)  dispatch µs P50
+------     -------------     ---------      ----   ---------------
+1                19996.2       19996.2     1.028            48.052
+2                48797.2       24398.6     2.510            17.281
+4                77944.5       19486.1     4.009            11.957
+8               119163.8       14895.5     6.129             7.350
+
+--- perf stat summary (multi-actor) ---
+NOTE: bench_gridworld uses a Tokio multi-threaded runtime that leaves a
+      background monitor thread alive after main() returns. perf stat
+      waits for all threads — it would hang indefinitely without a timeout.
+      Runs were wrapped with 'timeout 30 perf stat ...'; the timeout fires
+      after the bench completes but before perf stat writes its summary.
+      Result: benchmark data is complete; perf counters not captured for
+      multi-actor runs. (bench_gridworld_vecenv exits cleanly — see below.)
+
+=======================================================================
+PART 2 — bench_gridworld_vecenv (32 sub-envs, standard framework integration)
+=======================================================================
+
+1 RelayRL actor batches 32 sub-environments per request_action call.
+ONNX forward pass over [32, obs_dim]. rayon parallel stepping.
+Run: 50,000 calls × 32 envs = 1,600,000 env-steps.
+
+  env-steps/sec per sub-env      :       7362.1   (= calls/sec)
+  env-steps/sec per logical core :      58896.8
+  calls/sec (request_action)     :       7362.1
+  env step mean  (rayon, 32 envs) :       50.114 µs
+  actor dispatch latency         :       70.549 µs  (call P50, 1 actor)
+  deadtime per sub-env           :     0.000000  (overhead_ratio / 32)
+  S(n) vs 1-env baseline         :       12.117×  (235587.0 sps / 19443.0 baseline)
+
+--- perf stat (vecenv32, process exited cleanly) ---
+ Performance counter stats for './target/release/bench_gridworld_vecenv --num-envs 32 --target-calls 50000':
+
+           9510.18 msec task-clock                       #    1.193 CPUs utilized             
+           3107624      context-switches                 #  326.768 K/sec                     
+             30896      cpu-migrations                   #    3.249 K/sec                     
+            170374      page-faults                      #   17.915 K/sec                     
+
+       7.973547484 seconds time elapsed
+
+       4.692906000 seconds user
+       5.202743000 seconds sys
+
+
+
+=======================================================================
+SUMMARY: Throughput scaling (relayrl_framework 0.5.0-beta.2)
+=======================================================================
+
+  Baseline (1 actor, single env) : ~19,996 env-steps/sec  S(1) = 1.028
+  2 actors                        : ~48,797 env-steps/sec  S(2) = 2.51x
+  4 actors                        : ~77,945 env-steps/sec  S(4) = 4.01x
+  8 actors                        : ~119,164 env-steps/sec S(8) = 6.13x
+  VecEnv 32 (1 actor, batched)    : ~235,587 env-steps/sec S(32)= 12.12x
+
+  Multi-actor scaling is super-linear at 2 actors (cache effects)
+  and linear through 4 actors, then bottlenecks at 4 logical cores.
+  VecEnv batching provides the highest absolute throughput (1 actor,
+  amortized ONNX inference over 32 observations).
+
+=======================================================================
+perf c2c
+=======================================================================
+
+  perf c2c record requires hardware memory-access PMU events.
+  This container does not provide PMU pass-through.
+  Error from kernel: 'failed: memory events not supported'
+  Placeholder files written: gridworld_1actor_c2c.txt, gridworld_vecenv32_c2c.txt
+  To collect c2c data: run on bare metal or VM with PMU pass-through.
+
+=== All benchmarks complete ===

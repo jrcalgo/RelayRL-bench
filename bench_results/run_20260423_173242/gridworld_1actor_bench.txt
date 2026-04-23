@@ -1,0 +1,101 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL GridWorld benchmark
+  1 actors · 1 routers · 200000 calls · 10×10 grid · 4 logical cores
+  Total env steps = 1 × 200000 = 200000
+═══════════════════════════════════════════════════════════════════
+
+Warming up (500 calls)…
+Warm-up done. Starting benchmark…
+
+  [  100000 calls     100000 env-steps] 19521 env-steps/sec  19521 calls/sec
+  [  200000 calls     200000 env-steps] 19677 env-steps/sec  19677 calls/sec
+
+═══════════════════════════════════════════════════════════════════
+  RelayRL GridWorld — FINAL RESULTS  (1 actors / 1 routers)
+═══════════════════════════════════════════════════════════════════
+
+─── Throughput ──────────────────────────────────────────────────────
+  steps/sec (global)           :    19677.2   (1 actors × 19677 calls/s)
+  steps/sec per actor          :    19677.2   (= calls/sec)
+  steps/sec per logical core   :     4919.3
+  calls/sec (request_action)   :    19677.2
+  episodes/sec                 :     98.386
+  total calls                  :     200000
+  total env steps              :     200000
+  wall time                    :      10.16s
+  logical cores                :          4
+
+─── Episode Statistics ───────────────────────────────────────────────
+  avg steps per episode        :      200.0
+  episode return mean          :     -0.191
+  episode completion variance  :     36.515
+  total episodes               :       1000
+
+─── Call Timing (µs) — request_action(all 1 actors) ────────────────
+  call mean                    :     49.917 µs
+  call std dev                 :     20.454 µs
+  call P50                     :     48.282 µs
+  call P95                     :     63.187 µs
+  call P99                     :     93.469 µs
+  call P99.9                   :    286.914 µs
+  jitter (P99−P50)             :     45.187 µs
+  actor dispatch latency       :     48.282 µs  (P50/N actors)
+
+─── Inference Timing ─────────────────────────────────────────────────
+  inference ≈ call − env       :     49.639 µs  mean
+  inference / call ratio       :      0.994
+  action ser/deser             :   included in call timing
+  state update / buffer write  :   disabled (traj off)
+
+─── Env Step Timing (µs) — all 1 actors ────────────────────────────
+  env step mean  (N actors)    :      0.278 µs
+  env step std dev             :      0.380 µs
+  env step P50                 :      0.261 µs
+  env step P99                 :      0.508 µs
+  env step / call ratio        :      0.006
+
+─── Scheduling / Overhead ────────────────────────────────────────────
+  step mean (call+env)         :     50.196 µs
+  scheduling overhead est.     :      1.498 µs  (~3%% of call)
+  overhead ratio               :     0.0298
+  deadtime per actor           :     0.0298
+  dropped/late updates         :          0
+  scheduler tick time          :   Tokio default (61 µs budget)
+  runqueue contention          :   see run-queue length below
+
+─── Memory ───────────────────────────────────────────────────────────
+  RSS init                     :    29.2 MB
+  RSS peak                     :    31.4 MB
+  RSS mean                     :    30.7 MB
+  RSS final                    :    31.4 MB
+  allocation rate (RSS Δ/s)    : 227.468 KB/s
+  /proc samples                :         51
+  allocator contention         : requires jemalloc/heaptrack profiling
+
+─── CPU / OS ─────────────────────────────────────────────────────────
+  CPU utilisation (1-core %)   :     117.77%
+  CPU util / logical core      :      29.44%
+  mean threads                 :        9.0
+  mean run-queue (1-min avg)   :      0.312
+  context switches total       :     197078
+  context switches/sec         :    19389.7
+  context switches/call        :   0.985390
+  context switches/env-step    :   0.985390
+
+─── Efficiency Ratios ────────────────────────────────────────────────
+  steps/sec / logical core     :     4919.3
+  steps/sec / GB RSS (proxy)   :   657123.8
+  S(n) vs 1-actor baseline     :      1.012  (19677.2 env-steps/s / 19443.0)
+  overhead ratio               :     0.0298
+
+─── Notes ────────────────────────────────────────────────────────────
+  cache misses (L1/L2/L3)      : perf stat -e cache-misses,LLC-load-misses
+  IPC                          : perf stat -e cycles,instructions
+  memory bandwidth             : perf stat -e cache-references
+  queue backlog / contention   : not exposed by framework API
+  inter-thread msg latency     ≈ call_p50 / N = 48.28 µs
+  sync wait time               : included in call_mean
+  buffer contention rate       : n/a (trajectories disabled)
+  steps/sec / watt             : requires external power measurement
+
+═══════════════════════════════════════════════════════════════════

@@ -8,6 +8,7 @@ use relayrl_types::data::trajectory::RelayRLTrajectory;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
+use std::any::Any;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -38,18 +39,23 @@ pub(crate) struct RoutedMessage {
 
 pub(crate) enum RoutingProtocol {
     ModelHandshake,
+    RequestInference,
+    RequestInferenceBatch,
     FlagLastInference,
     ModelVersion,
     ModelUpdate,
     SendTrajectory,
-    RecordAction,
     Shutdown,
 }
 
 pub(crate) enum RoutedPayload {
     ModelHandshake,
+    RequestInference(Box<InferenceRequest>),
+    RequestInferenceBatch(Box<BatchedInferenceRequest>),
     FlagLastInference {
         reward: f32,
+        env_id: Option<Uuid>,
+        env_label: Option<String>,
     },
     ModelVersion {
         reply_to: oneshot::Sender<i64>,
@@ -62,6 +68,25 @@ pub(crate) enum RoutedPayload {
         timestamp: (u128, u128),
         trajectory: RelayRLTrajectory,
     },
-    RecordAction(Arc<RelayRLAction>),
     Shutdown,
+}
+
+/// observation and mask are Arc<AnyBurnTensor<B, D_IN>> and Arc<Option<AnyBurnTensor<B, D_OUT>>> respectively
+///
+/// Using Box<dyn Any + Send + Sync> to avoid adding generic parameters to this struct.
+/// This is (probably) safe because InferenceRequest is only sent to the actor from the coordinator layer, both of which are unavailable to the user.
+pub(crate) struct InferenceRequest {
+    pub(crate) observation: Box<dyn Any + Send + Sync>,
+    pub(crate) mask: Box<dyn Any + Send + Sync>,
+    pub(crate) reward: f32,
+    pub(crate) reply_to: oneshot::Sender<Arc<RelayRLAction>>,
+}
+
+pub(crate) struct BatchedInferenceRequest {
+    pub(crate) env_ids: Vec<Uuid>,
+    pub(crate) env_labels: Vec<String>,
+    pub(crate) observations: Box<dyn Any + Send + Sync>,
+    pub(crate) masks: Box<dyn Any + Send + Sync>,
+    pub(crate) rewards: Vec<f32>,
+    pub(crate) reply_to: oneshot::Sender<Vec<RelayRLAction>>,
 }
