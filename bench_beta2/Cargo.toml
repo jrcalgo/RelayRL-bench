@@ -1,0 +1,24 @@
+[workspace]
+members = [".", "lunarlander-rl"]
+
+[package]
+name = "bench-beta2"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench_lunar_beta2"
+path = "src/main.rs"
+
+[dependencies]
+relayrl_framework  = { version = "=0.5.0-beta.2", default-features = false, features = ["client"] }
+relayrl_algorithms = { version = "=0.2.0", default-features = false, features = ["ndarray-backend"] }
+relayrl_types      = { version = "=0.7.0", default-features = false, features = ["ndarray-backend", "onnx-model"] }
+relayrl_env_trait  = "1.0.0"
+lunarlander-rl     = { path = "./lunarlander-rl" }
+
+burn-ndarray = "0.20.1"
+burn-tensor  = "0.20.1"
+
+tokio = { version = "1", features = ["full"] }
+clap  = { version = "4", features = ["derive"] }
