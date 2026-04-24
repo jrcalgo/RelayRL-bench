@@ -13,12 +13,24 @@
 //! `step_all` fans work out with rayon by zipping mutable slices of the env
 //! Vec and the observation buffer.  Each thread gets exclusive `&mut` access to
 //! one env and one 8-float obs slice — no Mutex acquisitions, no contention.
+//!
+//! `SyncLunarVectorEnvFramework` wraps `SyncLunarVectorEnv` with the
+//! `VectorEnvironment` trait so it can be passed to `agent.set_env()`.
 
+use std::any::Any;
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Mutex;
 
 use rayon::prelude::*;
 
-use relayrl_env_trait::EnvironmentError;
+use burn_ndarray::NdArray;
+use burn_tensor::{Float, Tensor, TensorData};
+
+use relayrl_env_trait::{
+    EnvDType, EnvNdArrayDType, EnvironmentError, EnvironmentHandle, EnvironmentKind,
+    EnvironmentUuid, Uuid, VectorEnvReset, VectorEnvStep, VectorEnvironment,
+};
 use relayrl_types::prelude::tensor::burn::backend::Backend;
 
 use super::LunarLanderEnv;
@@ -142,5 +154,180 @@ where
     /// buffer, this is a single Vec clone — no per-env locking or scatter-gather.
     pub fn get_stacked_obs(&self) -> Vec<f32> {
         self.observations.clone()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SyncLunarVectorEnvFramework — VectorEnvironment adapter for set_env / run_env
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Inner mutable state, protected by a single Mutex.
+struct VecFrameworkInner {
+    env: SyncLunarVectorEnv<NdArray>,
+    /// UUID → env index in the inner Vec.
+    uuid_to_idx: HashMap<EnvironmentUuid, usize>,
+    /// env index → UUID (for building step results in order).
+    idx_to_uuid: Vec<EnvironmentUuid>,
+}
+
+/// Framework-compatible wrapper around `SyncLunarVectorEnv`.
+///
+/// Implements [`VectorEnvironment`] so it can be passed to `agent.set_env()`.
+/// `step_all` uses rayon to step all sub-envs in parallel; auto-reset is
+/// handled inline within each rayon task.  The framework's double-reset path
+/// is suppressed by always returning `terminated = false`.
+pub struct SyncLunarVectorEnvFramework {
+    inner: Mutex<VecFrameworkInner>,
+    num_envs: usize,
+    max_steps: usize,
+}
+
+impl SyncLunarVectorEnvFramework {
+    pub fn new(num_envs: usize, max_steps: usize) -> Result<Self, EnvironmentError> {
+        let env = SyncLunarVectorEnv::<NdArray>::new(num_envs, max_steps, Default::default())
+            .map_err(|e| EnvironmentError::EnvironmentError(e.to_string()))?;
+        Ok(Self {
+            inner: Mutex::new(VecFrameworkInner {
+                env,
+                uuid_to_idx: HashMap::new(),
+                idx_to_uuid: Vec::new(),
+            }),
+            num_envs,
+            max_steps,
+        })
+    }
+}
+
+impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float>
+    for SyncLunarVectorEnvFramework
+{
+    fn run_environment(&self) -> Result<(), EnvironmentError> {
+        Ok(())
+    }
+    fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+        Ok(Box::new(Vec::<f32>::new()))
+    }
+    fn observation_dtype(&self) -> EnvDType {
+        EnvDType::NdArray(EnvNdArrayDType::F32)
+    }
+    fn action_dtype(&self) -> EnvDType {
+        EnvDType::NdArray(EnvNdArrayDType::F32)
+    }
+    fn kind(&self) -> EnvironmentKind {
+        EnvironmentKind::Vector
+    }
+    fn into_handle(
+        self: Box<Self>,
+    ) -> EnvironmentHandle<NdArray, 2, 2, Float, Float> {
+        EnvironmentHandle::Vector(self)
+    }
+}
+
+impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramework {
+    /// Called once by the framework with `count = ENV_COUNT`.
+    /// Generates stable UUIDs for each sub-env and stores the index mapping.
+    fn init_num_envs(
+        &self,
+        num_envs: usize,
+    ) -> Result<Vec<EnvironmentUuid>, EnvironmentError> {
+        let uuids: Vec<EnvironmentUuid> = (0..num_envs).map(|_| Uuid::new_v4()).collect();
+        let mut inner = self.inner.lock().unwrap();
+        inner.idx_to_uuid = uuids.clone();
+        inner.uuid_to_idx = uuids.iter().copied().enumerate().map(|(i, u)| (u, i)).collect();
+        Ok(uuids)
+    }
+
+    /// Step all sub-envs in parallel (rayon).
+    ///
+    /// Actions are keyed by UUID; we decode each action tensor to a u8 via
+    /// argmax, then fan them out to `step_all`.  `terminated` is always
+    /// returned as `false` because `step_all` handles inline auto-reset —
+    /// suppressing the framework's double-reset path.
+    fn step(
+        &self,
+        actions: &[(EnvironmentUuid, Tensor<NdArray, 2, Float>)],
+    ) -> Result<Vec<VectorEnvStep<NdArray, 2, Float>>, EnvironmentError> {
+        let mut inner = self.inner.lock().unwrap();
+        let num_envs = inner.env.num_envs;
+        let mut decoded = vec![0u8; num_envs];
+
+        for (uuid, action_tensor) in actions {
+            let idx = match inner.uuid_to_idx.get(uuid) {
+                Some(&i) => i,
+                None => continue,
+            };
+            let data = action_tensor.to_data();
+            let floats = data
+                .as_slice::<f32>()
+                .map_err(|e| EnvironmentError::EnvironmentError(e.to_string()))?;
+            let act: u8 = floats
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i as u8)
+                .unwrap_or(0);
+            decoded[idx] = act;
+        }
+
+        let step_results = inner.env.step_all(&decoded);
+        let stacked_obs = inner.env.get_stacked_obs();
+
+        let results = inner
+            .idx_to_uuid
+            .iter()
+            .copied()
+            .zip(step_results.iter())
+            .enumerate()
+            .map(|(i, (uuid, (reward, _done)))| {
+                let start = i * OBS_DIM;
+                let obs_tensor = Tensor::<NdArray, 2, Float>::from_data(
+                    TensorData::new(stacked_obs[start..start + OBS_DIM].to_vec(), [1, OBS_DIM]),
+                    &Default::default(),
+                );
+                VectorEnvStep {
+                    env_id: uuid,
+                    observation: obs_tensor,
+                    reward: *reward,
+                    terminated: false, // step_all inline-resets done envs
+                    truncated: false,
+                    info: None,
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Returns current observations for the requested env IDs (used by the
+    /// framework's reset_all at startup and reset_where for done envs).
+    /// Since step_all handles all resets inline, this just echoes the current
+    /// observation buffer without actually re-initialising any physics.
+    fn reset(
+        &self,
+        env_ids: &[EnvironmentUuid],
+    ) -> Result<Vec<VectorEnvReset<NdArray, 2, Float>>, EnvironmentError> {
+        let inner = self.inner.lock().unwrap();
+        let stacked_obs = inner.env.get_stacked_obs();
+        let results = env_ids
+            .iter()
+            .filter_map(|uuid| {
+                let &idx = inner.uuid_to_idx.get(uuid)?;
+                let start = idx * OBS_DIM;
+                let obs_tensor = Tensor::<NdArray, 2, Float>::from_data(
+                    TensorData::new(
+                        stacked_obs[start..start + OBS_DIM].to_vec(),
+                        [1, OBS_DIM],
+                    ),
+                    &Default::default(),
+                );
+                Some(VectorEnvReset {
+                    env_id: *uuid,
+                    observation: obs_tensor,
+                    info: None,
+                })
+            })
+            .collect();
+        Ok(results)
     }
 }
