@@ -7,7 +7,7 @@
 pub mod vec;
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::Vec2;
@@ -589,8 +589,8 @@ where
 {
     pub max_steps: usize,
     pub device: B::Device,
-    state: RefCell<PhysicsState>,
-    step_count: RefCell<usize>,
+    state: Mutex<PhysicsState>,
+    step_count: Mutex<usize>,
     running: AtomicBool,
 }
 
@@ -603,40 +603,47 @@ where
         LunarLanderEnv {
             max_steps,
             device,
-            state: RefCell::new(state),
-            step_count: RefCell::new(0),
+            state: Mutex::new(state),
+            step_count: Mutex::new(0),
             running: AtomicBool::new(false),
         }
     }
 
     pub fn reset(&self) {
-        let seed: u64 = self.state.borrow_mut().rng.random::<u64>();
-        *self.state.borrow_mut() = PhysicsState::build(seed);
-        *self.step_count.borrow_mut() = 0;
+        let seed: u64 = self.state.lock().unwrap().rng.random::<u64>();
+        *self.state.lock().unwrap() = PhysicsState::build(seed);
+        *self.step_count.lock().unwrap() = 0;
     }
 
     pub fn step(&self, _actor_idx: usize, action: u8) -> Result<(f32, bool), EnvironmentError> {
-        *self.step_count.borrow_mut() += 1;
-        self.state.borrow_mut().step_physics(action);
-        let done = self.all_done() || self.is_max_steps_reached();
-        let reward = self.state.borrow().last_reward;
+        let sc = {
+            let mut sc = self.step_count.lock().unwrap();
+            *sc += 1;
+            *sc
+        };
+        let (reward, done) = {
+            let mut state = self.state.lock().unwrap();
+            state.step_physics(action);
+            let done = state.done || sc >= self.max_steps;
+            (state.last_reward, done)
+        };
         Ok((reward, done))
     }
 
     pub fn get_observation(&self, _actor_idx: usize) -> Vec<f32> {
-        self.state.borrow().last_obs.to_vec()
+        self.state.lock().unwrap().last_obs.to_vec()
     }
 
     pub fn get_last_reward(&self, _actor_idx: usize) -> f32 {
-        self.state.borrow().last_reward
+        self.state.lock().unwrap().last_reward
     }
 
     pub fn all_done(&self) -> bool {
-        self.state.borrow().done
+        self.state.lock().unwrap().done
     }
 
     pub fn is_max_steps_reached(&self) -> bool {
-        *self.step_count.borrow() >= self.max_steps
+        *self.step_count.lock().unwrap() >= self.max_steps
     }
 
     pub fn actor_count(&self) -> usize {
@@ -649,11 +656,119 @@ where
     B::Device: Clone,
 {
     fn calculate_performance_return(&self) -> Result<Box<dyn Any>, EnvironmentError> {
-        let reward = self.state.borrow().last_reward;
+        let reward = self.state.lock().unwrap().last_reward;
         let tensor = Tensor::<B, 1, Float>::from_data(
             TensorData::new(vec![reward], [1usize]),
             &self.device,
         );
         Ok(Box::new(tensor))
+    }
+}
+
+// ── relayrl_env_trait 1.1.0 impls (NdArray-concrete) ────────────────────────
+//
+// Required to use LunarLanderEnv with the beta.2 set_env/run_env API.
+// The traits are implemented only for NdArray because Clone requires a
+// concrete device type (NdArray::Device = ()).
+
+use burn_ndarray::NdArray;
+use relayrl_env_trait::{
+    DynScalarEnvironment, EnvDType, EnvNdArrayDType, EnvironmentHandle, EnvironmentKind,
+    ScalarEnvReset, ScalarEnvStep,
+};
+
+impl Clone for LunarLanderEnv<NdArray> {
+    fn clone(&self) -> Self {
+        let new_seed = self.state.lock().unwrap().rng.random::<u64>();
+        LunarLanderEnv {
+            max_steps:  self.max_steps,
+            device:     self.device,   // NdArrayDevice is Copy
+            state:      Mutex::new(PhysicsState::build(new_seed)),
+            step_count: Mutex::new(0),
+            running:    AtomicBool::new(false),
+        }
+    }
+}
+
+impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float> for LunarLanderEnv<NdArray> {
+    fn run_environment(&self) -> Result<(), EnvironmentError> {
+        Ok(())
+    }
+
+    fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+        Ok(Box::new(self.state.lock().unwrap().last_obs.to_vec()))
+    }
+
+    fn observation_dtype(&self) -> EnvDType {
+        EnvDType::NdArray(EnvNdArrayDType::F32)
+    }
+
+    fn action_dtype(&self) -> EnvDType {
+        EnvDType::NdArray(EnvNdArrayDType::F32)
+    }
+
+    fn kind(&self) -> EnvironmentKind {
+        EnvironmentKind::Scalar
+    }
+
+    fn into_handle(self: Box<Self>) -> EnvironmentHandle<NdArray, 2, 2, Float, Float> {
+        EnvironmentHandle::Scalar(self as Box<dyn DynScalarEnvironment<NdArray, 2, 2, Float, Float>>)
+    }
+}
+
+impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
+    for LunarLanderEnv<NdArray>
+{
+    fn step(
+        &self,
+        action: Tensor<NdArray, 2, Float>,
+    ) -> Result<ScalarEnvStep<NdArray, 2, Float>, EnvironmentError> {
+        // Decode discrete action: argmax over the 4 logits in [1, 4] tensor.
+        let data = action.to_data();
+        let floats = data
+            .as_slice::<f32>()
+            .map_err(|e| EnvironmentError::EnvironmentError(e.to_string()))?;
+        let act_u8: u8 = floats
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i as u8)
+            .unwrap_or(0);
+
+        // Increment step counter, run physics.
+        let sc = {
+            let mut sc = self.step_count.lock().unwrap();
+            *sc += 1;
+            *sc
+        };
+        let (reward, obs_arr, done) = {
+            let mut state = self.state.lock().unwrap();
+            state.step_physics(act_u8);
+            let done = state.done || sc >= self.max_steps;
+            (state.last_reward, state.last_obs, done)
+        };
+
+        let obs = Tensor::<NdArray, 2, Float>::from_data(
+            TensorData::new(obs_arr.to_vec(), [1usize, 8usize]),
+            &self.device,
+        );
+        Ok(ScalarEnvStep { observation: obs, reward, terminated: done, truncated: false, info: None })
+    }
+
+    fn reset(&self) -> Result<ScalarEnvReset<NdArray, 2, Float>, EnvironmentError> {
+        let new_seed = {
+            let mut state = self.state.lock().unwrap();
+            state.rng.random::<u64>()
+        };
+        *self.state.lock().unwrap() = PhysicsState::build(new_seed);
+        *self.step_count.lock().unwrap() = 0;
+
+        let obs_arr = self.state.lock().unwrap().last_obs;
+        let obs = Tensor::<NdArray, 2, Float>::from_data(
+            TensorData::new(obs_arr.to_vec(), [1usize, 8usize]),
+            &self.device,
+        );
+        Ok(ScalarEnvReset { observation: obs, info: None })
     }
 }

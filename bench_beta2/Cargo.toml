@@ -1,6 +1,9 @@
 [workspace]
 members = [".", "lunarlander-rl"]
 
+[patch.crates-io]
+relayrl_framework = { path = "./patches/relayrl_framework" }
+
 [package]
 name = "bench-beta2"
 version = "0.1.0"
