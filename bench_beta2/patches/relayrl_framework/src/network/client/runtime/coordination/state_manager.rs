@@ -740,7 +740,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         _device: &DeviceType,
     ) -> Result<AnyBurnTensor<B, D>, StateManagerError> {
         match &tensor_data.dtype {
-            #[cfg(feature = "ndarray-backend")]
             relayrl_types::data::tensor::DType::NdArray(dtype) => match dtype {
                 relayrl_types::data::tensor::NdArrayDType::F16
                 | relayrl_types::data::tensor::NdArrayDType::F32

@@ -4065,14 +4065,14 @@ dependencies = [
  "generic-array",
  "log",
  "once_cell",
- "rand 0.10.1",
+ "rand 0.9.4",
  "relayrl_algorithms",
  "relayrl_env_trait",
  "relayrl_types 0.7.0",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tokio",
 ]
 

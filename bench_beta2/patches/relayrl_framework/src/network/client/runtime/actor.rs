@@ -245,6 +245,10 @@ impl<
     }
 
     async fn send_trajectory(&self, trajectory: RelayRLTrajectory) -> Result<(), ActorError> {
+        // When ActorTrainingDataMode::Disabled the buffer receiver is dropped at startup.
+        if self.shared_tx_to_buffer.is_closed() {
+            return Ok(());
+        }
         let send_traj_msg = self.build_send_trajectory_message(trajectory)?;
         self.shared_tx_to_buffer
             .send(send_traj_msg)
