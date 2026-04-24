@@ -39,6 +39,8 @@ use super::LunarLanderEnv;
 
 /// LunarLander observation dimension (matches PhysicsState::compute_obs).
 pub const OBS_DIM: usize = 8;
+/// LunarLander discrete action count.
+pub const ACT_DIM: usize = 4;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,12 +150,14 @@ where
             .collect()
     }
 
-    /// Return the flat `[num_envs × OBS_DIM]` observation array.
-    ///
-    /// Because observations are maintained in-place in a single contiguous
-    /// buffer, this is a single Vec clone — no per-env locking or scatter-gather.
+    /// Return the flat `[num_envs × OBS_DIM]` observation array (cloned).
     pub fn get_stacked_obs(&self) -> Vec<f32> {
         self.observations.clone()
+    }
+
+    /// Borrow the flat observation buffer without copying.
+    pub fn get_stacked_obs_ref(&self) -> &[f32] {
+        &self.observations
     }
 }
 
@@ -329,5 +333,23 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
             })
             .collect();
         Ok(results)
+    }
+
+    // ── Flat-buffer fast path ────────────────────────────────────────────────────
+
+    fn n_envs(&self) -> usize { self.num_envs }
+    fn obs_dim(&self) -> usize { OBS_DIM }
+    fn act_dim(&self) -> usize { ACT_DIM }
+
+    fn flat_obs(&self) -> Option<Vec<f32>> {
+        Some(self.inner.lock().unwrap().env.get_stacked_obs())
+    }
+
+    fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>)> {
+        let mut inner = self.inner.lock().unwrap();
+        let step_results = inner.env.step_all(actions);
+        let new_obs = inner.env.get_stacked_obs();
+        let rewards: Vec<f32> = step_results.into_iter().map(|(r, _)| r).collect();
+        Some((new_obs, rewards))
     }
 }

@@ -107,6 +107,14 @@ pub(crate) trait VecEnvTrait<
         &mut self,
         actions: &[(EnvironmentUuid, AnyBurnTensor<B, D_OUT>)],
     ) -> Result<Vec<EnvStepRecord<B, D_IN>>, VecEnvError>;
+
+    // ── Flat-buffer fast path (opt-in via VectorEnvironment defaults) ────────────
+    /// Returns `(n_envs, obs_dim, act_dim)` if the underlying env supports the flat path.
+    fn n_envs_dims(&self) -> Option<(usize, usize, usize)> { None }
+    /// Current observations as a flat `[n_envs × obs_dim]` f32 Vec, or None.
+    fn flat_obs_clone(&self) -> Option<Vec<f32>> { None }
+    /// Step all sub-envs with decoded integer actions; returns `(new_obs_flat, rewards)`.
+    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>)> { None }
 }
 
 pub(crate) struct ScalarVecEnv<
@@ -424,5 +432,20 @@ impl<
                 })
             })
             .collect()
+    }
+
+    fn n_envs_dims(&self) -> Option<(usize, usize, usize)> {
+        let n   = self.env.n_envs();
+        let obs = self.env.obs_dim();
+        let act = self.env.act_dim();
+        if n == 0 { None } else { Some((n, obs, act)) }
+    }
+
+    fn flat_obs_clone(&self) -> Option<Vec<f32>> {
+        self.env.flat_obs()
+    }
+
+    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.env.step_raw_actions(actions)
     }
 }

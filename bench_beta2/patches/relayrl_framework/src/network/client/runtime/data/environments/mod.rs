@@ -266,4 +266,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         Ok(steps)
     }
+
+    // ── Flat-buffer fast-path forwarding ─────────────────────────────────────────
+
+    pub(crate) fn n_envs_dims(&self) -> Option<(usize, usize, usize)> {
+        self.env.as_ref().and_then(|e| e.n_envs_dims())
+    }
+
+    pub(crate) fn flat_obs_clone(&self) -> Option<Vec<f32>> {
+        self.env.as_ref().and_then(|e| e.flat_obs_clone())
+    }
+
+    pub(crate) fn step_flat_actions(
+        &mut self,
+        actions: &[u8],
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.env.as_mut().and_then(|e| e.step_flat_actions(actions))
+    }
 }

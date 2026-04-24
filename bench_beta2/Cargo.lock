@@ -4038,8 +4038,6 @@ dependencies = [
 [[package]]
 name = "relayrl_env_trait"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93892ce8f9bda0b1260b8b9ae36aa7c6e37f71454ba41bed2562199b8c0322e6"
 dependencies = [
  "burn-tensor",
  "thiserror 2.0.18",
@@ -4103,8 +4101,6 @@ dependencies = [
 [[package]]
 name = "relayrl_types"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "371c431e95a9abfa0df3cb40d81f8654f3a75b011a9428800bf2022ec5fe0d68"
 dependencies = [
  "arc-swap",
  "arrow",

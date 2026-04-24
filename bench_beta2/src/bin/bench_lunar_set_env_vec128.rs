@@ -32,8 +32,8 @@ use lunarlander_rl::env::vec::SyncLunarVectorEnvFramework;
 const OBS_DIM:      usize = 8;
 const ACT_DIM:      usize = 4;
 const MAX_STEPS:    usize = 500;
-const TARGET_STEPS: usize = 1_000_000;
-const ENV_COUNT:    u32   = 128;
+const TARGET_STEPS: usize = 50_000;
+const ENV_COUNT:    u32   = 512;
 
 // ─────────────────────────── Bootstrap model ────────────────────────────────
 

@@ -3,6 +3,8 @@ members = [".", "lunarlander-rl"]
 
 [patch.crates-io]
 relayrl_framework = { path = "./patches/relayrl_framework" }
+relayrl_env_trait = { path = "./patches/relayrl_env_trait" }
+relayrl_types     = { path = "./patches/relayrl_types" }
 
 [package]
 name = "bench-beta2"
@@ -17,7 +19,7 @@ path = "src/main.rs"
 relayrl_framework  = { version = "=0.5.0-beta.2", default-features = false, features = ["client"] }
 relayrl_algorithms = { version = "=0.2.0", default-features = false, features = ["ndarray-backend"] }
 relayrl_types      = { version = "=0.7.0", default-features = false, features = ["ndarray-backend", "onnx-model"] }
-relayrl_env_trait  = "1.0.0"
+relayrl_env_trait  = "1.1"
 lunarlander-rl     = { path = "./lunarlander-rl" }
 
 burn-ndarray = "0.20.1"

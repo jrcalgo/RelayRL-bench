@@ -400,6 +400,49 @@ impl<
         result
     }
 
+    /// Fast-path inference: takes a flat `[n_envs × obs_dim]` f32 slice, runs one
+    /// batched ONNX forward pass, and returns per-env argmax-decoded actions.
+    /// Bypasses all UUID, HashMap, AnyBurnTensor, and trajectory machinery.
+    pub(crate) async fn infer_flat(
+        &self,
+        obs_flat: &[f32],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+    ) -> Result<Vec<u8>, ActorError> {
+        use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
+
+        let guard = self.reloadable_model.load();
+        let reloadable = guard.as_ref().ok_or_else(|| {
+            ActorError::SystemError("no model loaded for flat inference".to_string())
+        })?;
+        let module = reloadable.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            DType::NdArray(NdArrayDType::F32),
+            bytemuck::cast_slice::<f32, u8>(obs_flat).to_vec(),
+            SupportedTensorBackend::NdArray,
+        );
+        let output = module.infer_flat_batch(input)
+            .unwrap_or_else(|_| module.zeros_flat_batch(n_envs));
+
+        let floats: &[f32] = bytemuck::cast_slice(&output.data);
+        Ok((0..n_envs)
+            .map(|i| {
+                floats[i * act_dim..(i + 1) * act_dim]
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(j, _)| j as u8)
+                    .unwrap_or(0)
+            })
+            .collect())
+    }
+
     pub(crate) async fn flag_last_action(
         &self,
         reward: f32,
