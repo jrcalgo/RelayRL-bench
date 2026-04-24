@@ -1,2 +1,0 @@
-backend,actor_id,timestamp,obs_dtype,obs_shape,obs_f32,obs_f64,obs_binary,act_dtype,act_shape,act_f32,act_f64,act_binary,mask_dtype,mask_shape,mask_f32,mask_f64,mask_binary,reward,done,aux_data
-NdArray,00000075-bf47-8244-ae11-99b1d1eb870c,1775457756,NdArray(F32),[2],"[1.0,2.0]",,,NdArray(F32),[2],"[1.0,2.0]",,,,,,,,1.25,false,{}
