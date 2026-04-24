@@ -1,0 +1,116 @@
+═══════════════════════════════════════════════════════════════════════
+  RelayRL LunarLander VecEnv benchmark
+  1 actor · 32 sub-envs (VecEnv batch) · 50000 calls · max_steps=500 · 4 cores
+  Options: batched ONNX inference [N,8] + rayon parallel env step
+  Total env steps = 32 × 50000 = 1600000
+═══════════════════════════════════════════════════════════════════════
+
+Initialising agent (1 actor, ModelMode::Shared)…
+  init time : 0 ms  (1 actor, batched model [32,8])
+
+Warming up (200 calls)…
+Warm-up done. Starting benchmark…
+
+  [  10000 calls      320000 env-steps]  903716 env-steps/sec  (28241 calls/sec)
+  [  20000 calls      640000 env-steps]  1065462 env-steps/sec  (33296 calls/sec)
+  [  30000 calls      960000 env-steps]  1117390 env-steps/sec  (34918 calls/sec)
+  [  40000 calls     1280000 env-steps]  1152325 env-steps/sec  (36010 calls/sec)
+  [  50000 calls     1600000 env-steps]  1187711 env-steps/sec  (37116 calls/sec)
+
+═══════════════════════════════════════════════════════════════════════
+  RelayRL LunarLander VecEnv — FINAL RESULTS
+  1 actor  |  32 sub-envs  |  50000 calls  |  batched ONNX + rayon step
+═══════════════════════════════════════════════════════════════════════
+
+─── Throughput ──────────────────────────────────────────────────────────
+  env-steps/sec (global)         :    1187697.2   (32 envs × 37116 calls/s)
+  env-steps/sec per sub-env      :      37115.5   (= calls/sec)
+  env-steps/sec per logical core :     296924.3
+  calls/sec (request_action)     :      37115.5
+  episodes/sec (all sub-envs)    :    18076.751
+  total calls                    :        50000
+  total env steps                :      1600000
+  wall time                      :         1.35 s
+  logical cores                  :            4
+  VecEnv batch size              :           32
+  max steps / episode            :          500
+
+─── Episode Statistics ──────────────────────────────────────────────────
+  avg steps per episode          :         65.6   (per sub-env)
+  episode return mean            :     -726.444
+  episode completion variance    :    42470.533
+  total episodes (all sub-envs)  :        24352
+
+─── Inference Timing (µs) — batched [32,8] ONNX forward ──────────────────
+  inference mean  (call − env)   :        0.005 µs  [1 forward pass, 32 obs]
+  inference / total call ratio   :        0.001
+  action ser/deser               :   included in call timing
+  state update / buffer write    :   disabled (trajectories off)
+
+─── Call Timing (µs) — request_action ([32×8] batch) ─────────────────────
+  call mean                      :        4.606 µs
+  call std dev                   :        2.793 µs
+  P50 step latency               :        3.351 µs
+  P95 step latency               :        8.561 µs
+  P99 step latency               :       14.607 µs
+  P99.9 step latency             :       29.257 µs
+  jitter (P99 − P50)             :       11.256 µs
+  variance in step time (σ²)     :        7.801 µs²
+
+─── Env Step Timing (µs) — rayon parallel step (32 sub-envs) ─────────────
+  env step mean  (rayon, 32 envs) :       21.638 µs
+  env step std dev               :       17.919 µs
+  env step P50                   :       15.232 µs
+  env step P99                   :       86.952 µs
+  env step / call ratio          :        0.824
+  env step / sub-env             :        0.676 µs  (mean/32)
+  physics cost / step            :   LunarLander (~4 constraint iters × 3 bodies)
+
+─── Scheduling / Overhead ───────────────────────────────────────────────
+  step mean (call + env)         :       26.243 µs
+  scheduling overhead            :        0.000 µs  (call − infer − env)
+  overhead ratio                 :       0.0000  (orchestration / total)
+  scheduler tick time            :   Tokio default (61 µs budget)
+  actor dispatch latency         :        3.351 µs  (call P50, 1 actor)
+  deadtime per sub-env           :     0.000000  (overhead_ratio / 32)
+  dropped/late updates           :            0
+
+─── Memory ──────────────────────────────────────────────────────────────
+  RSS init                       :      29.0 MB
+  RSS peak                       :      30.3 MB
+  RSS mean                       :      29.7 MB  (0.029 GB)
+  RSS final                      :      30.3 MB
+  allocation rate (RSS Δ/s)      :   973.912 KB/s
+  /proc samples                  :         7
+
+─── CPU / OS ────────────────────────────────────────────────────────────
+  CPU utilisation (summed cores) :    281.34 %
+  CPU util / logical core        :     70.33 %
+  mean threads                   :      13.0   (rayon pool + tokio)
+  run queue length (1-min avg)   :     2.320
+  context switches total         :     45258
+  context switches/sec           :   33595.5
+  context switches/call          :  0.905160
+  context switches/env-step      :  0.028286
+  context switching rate         :   33595.5 ctx-sw/s
+
+─── Efficiency Ratios ───────────────────────────────────────────────────
+  env-steps/sec / logical core   :     296924.3
+  env-steps/sec / GB RSS (proxy) :   40966800.9
+  env-steps/sec / watt           :   requires external power measurement
+  S(n) vs GridWorld-1env baseline:       61.086×  (1187697.2 sps / 19443.0 baseline)
+  overhead ratio                 :       0.0000
+
+─── Not Directly Observable (instrumentation notes) ─────────────────────
+  cache misses (L1/L2/L3)        :   perf stat -e L1-dcache-load-misses,LLC-load-misses
+  IPC (instr/cycle)              :   perf stat -e cycles,instructions
+  memory bandwidth               :   perf stat -e cache-references
+  queue backlog size             :   not exposed by framework API
+  buffer contention rate         :   n/a (trajectories disabled)
+  inter-thread msg latency       :  ~3.35 µs  (P50 = dispatch, 1 actor)
+  sync wait time                 :   included in call_mean (4.606 µs)
+  rayon Mutex contention         :   0.028286 ctx-sw/env-step (proxy)
+
+═══════════════════════════════════════════════════════════════════════
+  INIT SUMMARY: 0 ms init · 1 actor · 32 sub-envs · batch ONNX [32,8]
+═══════════════════════════════════════════════════════════════════════
