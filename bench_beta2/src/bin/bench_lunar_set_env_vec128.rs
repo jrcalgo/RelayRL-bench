@@ -33,7 +33,7 @@ const OBS_DIM:      usize = 8;
 const ACT_DIM:      usize = 4;
 const MAX_STEPS:    usize = 500;
 const TARGET_STEPS: usize = 50_000;
-const ENV_COUNT:    u32   = 512;
+const ENV_COUNT:    u32   = 1024;
 
 // ─────────────────────────── Bootstrap model ────────────────────────────────
 
