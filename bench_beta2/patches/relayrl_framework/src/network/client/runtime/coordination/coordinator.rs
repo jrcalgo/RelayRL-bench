@@ -1709,12 +1709,31 @@ impl<
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params
+                if !matches!(
+                    self.client_modes.actor_inference_mode,
+                    ActorInferenceMode::Local(_)
+                ) {
+                    return Err(CoordinatorError::StateManagerError(
+                        StateManagerError::InferenceRequestError(
+                            "[Coordinator] run_env requires local actor inference".to_string(),
+                        ),
+                    ));
+                }
+                // Brief read lock — clone three Arc handles, then release immediately.
+                let (runtime, device, env_map) = params
                     .shared_state
-                    .write()
+                    .read()
                     .await
-                    .run_env(actor_id, step_count)?;
-                Ok(())
+                    .get_run_env_handles(actor_id)
+                    .map_err(CoordinatorError::from)?;
+                // StateManager read lock is dropped here.
+
+                // Step loop runs with no StateManager lock held.
+                // block_in_place+block_on is inside run_env_step_loop itself.
+                StateManager::<B, D_IN, D_OUT>::run_env_step_loop(
+                    runtime, device, env_map, actor_id, step_count,
+                )
+                .map_err(CoordinatorError::from)
             }
             None => Err(CoordinatorError::StateManagerError(
                 StateManagerError::StepEnvError(
@@ -1734,7 +1753,7 @@ impl<
             Some(params) => {
                 params
                     .shared_state
-                    .write()
+                    .read()
                     .await
                     .set_env(actor_id, env, count)?;
                 Ok(())
@@ -1772,7 +1791,7 @@ impl<
             Some(params) => {
                 params
                     .shared_state
-                    .write()
+                    .read()
                     .await
                     .increase_env_count(actor_id, count)?;
                 Ok(())
@@ -1794,7 +1813,7 @@ impl<
             Some(params) => {
                 params
                     .shared_state
-                    .write()
+                    .read()
                     .await
                     .decrease_env_count(actor_id, count)?;
                 Ok(())
@@ -1810,7 +1829,11 @@ impl<
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), CoordinatorError> {
         match &self.runtime_params {
             Some(params) => {
-                params.shared_state.write().await.remove_env(actor_id)?;
+                params
+                    .shared_state
+                    .read()
+                    .await
+                    .remove_env(actor_id)?;
                 Ok(())
             }
             None => Err(CoordinatorError::StateManagerError(

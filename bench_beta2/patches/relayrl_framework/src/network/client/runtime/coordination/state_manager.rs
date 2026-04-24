@@ -135,7 +135,7 @@ pub(crate) struct StateManager<
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) shared_router_state: Arc<SharedRouterState>,
-    actor_envs: DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>,
+    actor_envs: Arc<DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
@@ -185,7 +185,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 shared_router_state: Arc::new(SharedRouterState {
                     actor_routes: DashMap::new(),
                 }),
-                actor_envs: DashMap::new(),
+                actor_envs: Arc::new(DashMap::new()),
                 actor_handles: DashMap::new(),
                 actor_devices: DashMap::new(),
                 actor_model_handles: DashMap::new(),
@@ -845,108 +845,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))
     }
 
-    pub(crate) fn run_env(
-        &mut self,
-        actor_id: ActorUuid,
-        step_count: usize,
-    ) -> Result<(), StateManagerError> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if !matches!(
-                    self.shared_client_modes.actor_inference_mode,
-                    ActorInferenceMode::Local(_)
-                ) {
-                    return Err(StateManagerError::InferenceRequestError(
-                        "[StateManager] Batched direct env inference requires local actor inference"
-                            .to_string(),
-                    ));
-                }
-                let runtime = self.get_actor_runtime(actor_id).ok_or_else(|| {
-                    StateManagerError::ActorHandleNotFoundError(format!(
-                        "[StateManager] Actor runtime not found for {}",
-                        actor_id
-                    ))
-                })?;
-                let device = self
-                    .actor_devices
-                    .get(&actor_id)
-                    .map(|device| device.clone())
-                    .ok_or_else(|| {
-                        StateManagerError::GetEnvInfoError(format!(
-                            "[StateManager] Actor device not found for {}",
-                            actor_id
-                        ))
-                    })?;
-
-                let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
-                let mut env_labels: HashMap<EnvironmentUuid, String> = HashMap::new();
-                let mut env_interface = self.actor_envs.get_mut(&actor_id).ok_or_else(|| {
-                    StateManagerError::GetEnvInfoError(format!(
-                        "[StateManager] Environment interface not found for {}",
-                        actor_id
-                    ))
-                })?;
-
-                for (env_id, _) in env_interface.ensure_ready()? {
-                    rewards.entry(env_id).or_insert(0.0);
-                }
-                let mut known_env_ids: Vec<_> = rewards.keys().copied().collect();
-                known_env_ids.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-                for (index, env_id) in known_env_ids.into_iter().enumerate() {
-                    env_labels.insert(env_id, format!("env-{}", index + 1));
-                }
-
-                for _ in 0..step_count {
-                    let mut observations = env_interface.current_observations()?;
-                    observations.sort_unstable_by(|(left, _), (right, _)| {
-                        left.as_bytes().cmp(right.as_bytes())
-                    });
-                    let batch: Vec<_> = observations
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (env_id, observation))| {
-                            let reward = *rewards.get(&env_id).unwrap_or(&0.0);
-                            let env_label = env_labels
-                                .entry(env_id)
-                                .or_insert_with(|| format!("env-{}", index + 1))
-                                .clone();
-                            (env_id, env_label, observation, reward)
-                        })
-                        .collect();
-                    let batched_actions =
-                        Self::request_actions_direct(&runtime, batch, &device).await?;
-                    let actions: Vec<_> = batched_actions
-                        .into_iter()
-                        .map(|(env_id, _, action)| (env_id, action))
-                        .collect();
-
-                    let steps = env_interface.step_once(&actions)?;
-                    for step in steps {
-                        rewards.insert(step.env_id, step.reward);
-                        if step.terminated || step.truncated {
-                            let env_label = env_labels
-                                .get(&step.env_id)
-                                .cloned()
-                                .unwrap_or_else(|| step.env_id.to_string());
-                            Self::flag_last_action_direct(
-                                &runtime,
-                                step.reward,
-                                Some(step.env_id),
-                                Some(env_label),
-                            )
-                            .await?;
-                            rewards.insert(step.env_id, 0.0);
-                        }
-                    }
-                }
-
-                Ok(())
-            })
-        })
-    }
-
     pub(crate) fn set_env<KindIn, KindOut>(
-        &mut self,
+        &self,
         id: Uuid,
         env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
         count: u32,
@@ -966,19 +866,21 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ))
             })?;
 
-        if let Some(mut env_interface) = self.actor_envs.get_mut(&id) {
-            env_interface.set_env(Some(env), count as usize)?;
-            Ok(())
+        if let Some(mut env_entry) = self.actor_envs.get_mut(&id) {
+            env_entry.set_env(Some(env), count as usize)?;
         } else {
             let mut env_interface =
                 EnvironmentInterface::new(self.client_namespace.clone(), device);
             env_interface.set_env(Some(env), count as usize)?;
             self.actor_envs.insert(id, env_interface);
-            Ok(())
         }
+        Ok(())
     }
 
-    pub(crate) fn get_env_count(&self, actor_id: ActorUuid) -> Result<u32, StateManagerError> {
+    pub(crate) fn get_env_count(
+        &self,
+        actor_id: ActorUuid,
+    ) -> Result<u32, StateManagerError> {
         self.actor_envs
             .get(&actor_id)
             .ok_or_else(|| {
@@ -992,7 +894,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) fn increase_env_count(
-        &mut self,
+        &self,
         actor_id: ActorUuid,
         count: u32,
     ) -> Result<(), StateManagerError> {
@@ -1009,7 +911,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) fn decrease_env_count(
-        &mut self,
+        &self,
         actor_id: ActorUuid,
         count: u32,
     ) -> Result<(), StateManagerError> {
@@ -1025,7 +927,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map_err(StateManagerError::from)
     }
 
-    pub(crate) fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), StateManagerError> {
+    pub(crate) fn remove_env(
+        &self,
+        actor_id: ActorUuid,
+    ) -> Result<(), StateManagerError> {
         self.actor_envs
             .get_mut(&actor_id)
             .ok_or_else(|| {
@@ -1036,6 +941,127 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             })?
             .remove_env()
             .map_err(StateManagerError::from)
+    }
+
+    /// Extracts the three handles needed by the step loop without holding any StateManager lock.
+    /// Each DashMap lookup acquires only the relevant shard lock and releases it immediately.
+    pub(crate) fn get_run_env_handles(
+        &self,
+        actor_id: ActorUuid,
+    ) -> Result<
+        (
+            Arc<ActorRuntime<B, D_IN, D_OUT>>,
+            DeviceType,
+            Arc<DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>>,
+        ),
+        StateManagerError,
+    > {
+        if !self.actor_envs.contains_key(&actor_id) {
+            return Err(StateManagerError::GetEnvInfoError(format!(
+                "[StateManager] Environment interface not found for {}",
+                actor_id
+            )));
+        }
+        let runtime = self.get_actor_runtime(actor_id).ok_or_else(|| {
+            StateManagerError::ActorHandleNotFoundError(format!(
+                "[StateManager] Actor runtime not found for {}",
+                actor_id
+            ))
+        })?;
+        let device = self
+            .actor_devices
+            .get(&actor_id)
+            .map(|d| d.clone())
+            .ok_or_else(|| {
+                StateManagerError::GetEnvInfoError(format!(
+                    "[StateManager] Actor device not found for {}",
+                    actor_id
+                ))
+            })?;
+        Ok((runtime, device, self.actor_envs.clone()))
+    }
+
+    /// Runs the environment step loop with no StateManager lock held.
+    /// Uses block_in_place+block_on internally so the single async {} state machine
+    /// drives all .await points synchronously without tokio scheduler overhead.
+    /// Callers must verify local inference mode before calling.
+    pub(crate) fn run_env_step_loop(
+        runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
+        device: DeviceType,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>>,
+        actor_id: ActorUuid,
+        step_count: usize,
+    ) -> Result<(), StateManagerError> {
+        tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+        let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
+            StateManagerError::GetEnvInfoError(format!(
+                "[StateManager] Environment interface not found for {}",
+                actor_id
+            ))
+        })?;
+
+        let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
+        let mut env_labels: HashMap<EnvironmentUuid, String> = HashMap::new();
+
+        for (env_id, _) in env_interface.ensure_ready()? {
+            rewards.entry(env_id).or_insert(0.0);
+        }
+        let mut known_env_ids: Vec<_> = rewards.keys().copied().collect();
+        known_env_ids
+            .sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        for (index, env_id) in known_env_ids.into_iter().enumerate() {
+            env_labels.insert(env_id, format!("env-{}", index + 1));
+        }
+
+        for _ in 0..step_count {
+            let mut observations = env_interface.current_observations()?;
+            observations.sort_unstable_by(|(left, _), (right, _)| {
+                left.as_bytes().cmp(right.as_bytes())
+            });
+            let batch: Vec<_> = observations
+                .into_iter()
+                .enumerate()
+                .map(|(index, (env_id, observation))| {
+                    let reward = *rewards.get(&env_id).unwrap_or(&0.0);
+                    let env_label = env_labels
+                        .entry(env_id)
+                        .or_insert_with(|| format!("env-{}", index + 1))
+                        .clone();
+                    (env_id, env_label, observation, reward)
+                })
+                .collect();
+
+            let batched_actions =
+                Self::request_actions_direct(&runtime, batch, &device).await?;
+            let actions: Vec<_> = batched_actions
+                .into_iter()
+                .map(|(env_id, _, action)| (env_id, action))
+                .collect();
+
+            let steps = env_interface.step_once(&actions)?;
+            for step in steps {
+                rewards.insert(step.env_id, step.reward);
+                if step.terminated || step.truncated {
+                    let env_label = env_labels
+                        .get(&step.env_id)
+                        .cloned()
+                        .unwrap_or_else(|| step.env_id.to_string());
+                    Self::flag_last_action_direct(
+                        &runtime,
+                        step.reward,
+                        Some(step.env_id),
+                        Some(env_label),
+                    )
+                    .await?;
+                    rewards.insert(step.env_id, 0.0);
+                }
+            }
+        }
+
+        Ok(())
+        }) // block_on
+        }) // block_in_place
     }
 }
 
