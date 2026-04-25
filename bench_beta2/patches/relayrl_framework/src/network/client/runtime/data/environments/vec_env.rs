@@ -99,6 +99,31 @@ fn dtype_bytes_per_elem(dtype: &EnvNdArrayDType) -> usize {
     }
 }
 
+/// Byte width of one element for a `relayrl_types::data::tensor::DType`.
+fn dtype_bytes_per_elem_dtype(dtype: &DType) -> usize {
+    match dtype {
+        DType::NdArray(nd) => {
+            use relayrl_types::data::tensor::NdArrayDType;
+            match nd {
+                NdArrayDType::F16 | NdArrayDType::I16 => 2,
+                NdArrayDType::F32 | NdArrayDType::I32 => 4,
+                NdArrayDType::F64 | NdArrayDType::I64 => 8,
+                NdArrayDType::I8  | NdArrayDType::Bool => 1,
+            }
+        }
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tc) => {
+            use relayrl_types::data::tensor::TchDType;
+            match tc {
+                TchDType::F16 | TchDType::Bf16 | TchDType::I16 => 2,
+                TchDType::F32 | TchDType::I32 => 4,
+                TchDType::F64 | TchDType::I64 => 8,
+                TchDType::I8  | TchDType::U8 | TchDType::Bool => 1,
+            }
+        }
+    }
+}
+
 pub(crate) trait VecEnvTrait<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -121,17 +146,11 @@ pub(crate) trait VecEnvTrait<
     // ── Flat-buffer fast path (opt-in via VectorEnvironment defaults) ────────────
     /// Returns `(n_envs, obs_dim, act_dim)` if the underlying env supports the flat path.
     fn n_envs_dims(&self) -> Option<(usize, usize, usize)> { None }
-    /// Current observations as a flat `[n_envs × obs_dim]` f32 Vec, or None.
-    fn flat_obs_clone(&self) -> Option<Vec<f32>> { None }
-    /// Step all sub-envs with discrete (argmax) integer actions; returns `(new_obs_flat, rewards, dones)`.
-    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
-    /// Step all sub-envs with continuous actions as typed raw bytes.
-    /// `dtype` identifies the element type of `actions`.
-    fn step_flat_actions_cont_bytes(
-        &mut self,
-        actions: &[u8],
-        dtype: &EnvNdArrayDType,
-    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
+    /// Current observations as raw bytes (`[n_envs × obs_bytes_per_env]`).
+    fn flat_obs_clone(&self) -> Option<Vec<u8>> { None }
+    /// Step all sub-envs; `actions` bytes layout mirrors `flat_obs_clone`.
+    /// Returns `(new_obs_bytes, rewards, dones)`.
+    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> { None }
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> { None }
     /// `true` if the action space is discrete, `false` if continuous.
@@ -149,11 +168,13 @@ pub(crate) struct ScalarVecEnv<
     env_context: ContextString,
     prototype: Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>,
     envs: HashMap<EnvironmentUuid, Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>>,
-    // Fast-path: stable ordering and flat obs buffer
+    // Fast-path: stable ordering and flat obs/action byte buffers
     ordered_ids: Vec<EnvironmentUuid>,
-    obs_flat: Vec<f32>,
-    obs_dim: usize,
-    act_dim: usize,
+    obs_flat: Vec<u8>,         // raw bytes; element dtype = observation_dtype
+    obs_dim: usize,            // obs elements per env (for ONNX shape)
+    obs_bytes_per_env: usize,  // obs_flat stride per env
+    act_dim: usize,            // action elements per env
+    act_bytes_per_env: usize,  // action bytes per env (1 for discrete, dtype-sized for continuous)
     device: DeviceType,
     observation_dtype: DType,
     #[allow(dead_code)]
@@ -192,15 +213,25 @@ impl<
             ordered_ids.push(env_id);
         }
 
-        // Probe fast-path support from the prototype env
-        let obs_dim = env.dyn_flat_obs().map(|o| o.len()).unwrap_or(0);
-        let act_dim = env.dyn_act_dim().unwrap_or(0);
-        let obs_flat = if obs_dim > 0 && act_dim > 0 {
-            let mut buf = Vec::with_capacity(count * obs_dim);
+        // Probe fast-path support from the prototype env.
+        let probe_obs = env.dyn_flat_obs_bytes();
+        let act_dim   = env.dyn_act_dim().unwrap_or(0);
+        let discrete  = env.dyn_action_is_discrete().unwrap_or(true);
+
+        let obs_bytes_per_env = probe_obs.as_ref().map(|b| b.len()).unwrap_or(0);
+        let obs_dim = if obs_bytes_per_env > 0 {
+            obs_bytes_per_env / dtype_bytes_per_elem_dtype(&observation_dtype)
+        } else { 0 };
+        let act_bytes_per_env = if discrete { 1 } else {
+            act_dim * dtype_bytes_per_elem_dtype(&action_dtype)
+        };
+
+        let obs_flat = if obs_bytes_per_env > 0 && act_dim > 0 {
+            let mut buf = Vec::with_capacity(count * obs_bytes_per_env);
             for uuid in &ordered_ids {
-                match envs[uuid].dyn_flat_obs() {
+                match envs[uuid].dyn_flat_obs_bytes() {
                     Some(obs) => buf.extend_from_slice(&obs),
-                    None => buf.extend(std::iter::repeat(0.0f32).take(obs_dim)),
+                    None => buf.extend(std::iter::repeat(0u8).take(obs_bytes_per_env)),
                 }
             }
             buf
@@ -216,7 +247,9 @@ impl<
             ordered_ids,
             obs_flat,
             obs_dim,
+            obs_bytes_per_env,
             act_dim,
+            act_bytes_per_env,
             device,
             observation_dtype,
             action_dtype,
@@ -250,10 +283,10 @@ impl<
             for _ in 0..(count - current) {
                 let env_id = reserve_id(self.client_namespace.as_ref(), self.env_context.as_ref())?;
                 let new_env = self.prototype.clone();
-                if self.obs_dim > 0 {
-                    match new_env.dyn_flat_obs() {
+                if self.obs_bytes_per_env > 0 {
+                    match new_env.dyn_flat_obs_bytes() {
                         Some(obs) => self.obs_flat.extend_from_slice(&obs),
-                        None => self.obs_flat.extend(std::iter::repeat(0.0f32).take(self.obs_dim)),
+                        None => self.obs_flat.extend(std::iter::repeat(0u8).take(self.obs_bytes_per_env)),
                     }
                 }
                 self.envs.insert(env_id, new_env);
@@ -261,8 +294,8 @@ impl<
             }
         } else {
             let removed: Vec<_> = self.ordered_ids.drain(count..).collect();
-            if self.obs_dim > 0 {
-                self.obs_flat.truncate(count * self.obs_dim);
+            if self.obs_bytes_per_env > 0 {
+                self.obs_flat.truncate(count * self.obs_bytes_per_env);
             }
             for env_id in removed {
                 self.envs.remove(&env_id);
@@ -286,7 +319,7 @@ impl<
         env_ids: &[EnvironmentUuid],
     ) -> Result<Vec<EnvResetRecord<B, D_IN>>, VecEnvError> {
         let dtype = self.observation_dtype.clone();
-        let obs_dim = self.obs_dim;
+        let obs_bytes_per_env = self.obs_bytes_per_env;
         env_ids
             .iter()
             .map(|env_id| {
@@ -296,10 +329,10 @@ impl<
                     .ok_or_else(|| VecEnvError::UnknownEnv(*env_id))?;
                 let reset = env.reset()?;
                 // Keep obs_flat in sync when fast path is active
-                if obs_dim > 0 {
+                if obs_bytes_per_env > 0 {
                     if let Some(idx) = self.ordered_ids.iter().position(|id| id == env_id) {
-                        if let Some(obs) = env.dyn_flat_obs() {
-                            self.obs_flat[idx * obs_dim..(idx + 1) * obs_dim]
+                        if let Some(obs) = env.dyn_flat_obs_bytes() {
+                            self.obs_flat[idx * obs_bytes_per_env..(idx + 1) * obs_bytes_per_env]
                                 .copy_from_slice(&obs);
                         }
                     }
@@ -345,54 +378,31 @@ impl<
     // ── Fast-path overrides ──────────────────────────────────────────────────────
 
     fn n_envs_dims(&self) -> Option<(usize, usize, usize)> {
-        if self.obs_dim == 0 || self.act_dim == 0 {
+        if self.obs_bytes_per_env == 0 || self.act_dim == 0 {
             return None;
         }
         let n = self.ordered_ids.len();
         if n == 0 { None } else { Some((n, self.obs_dim, self.act_dim)) }
     }
 
-    fn flat_obs_clone(&self) -> Option<Vec<f32>> {
-        if self.obs_dim == 0 { return None; }
+    fn flat_obs_clone(&self) -> Option<Vec<u8>> {
+        if self.obs_bytes_per_env == 0 { return None; }
         Some(self.obs_flat.clone())
     }
 
-    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-        if self.obs_dim == 0 { return None; }
+    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+        if self.obs_bytes_per_env == 0 { return None; }
         let n = self.ordered_ids.len();
-        let obs_dim = self.obs_dim;
+        let obs_bytes_per_env = self.obs_bytes_per_env;
+        let act_bytes_per_env = self.act_bytes_per_env;
         let mut rewards = Vec::with_capacity(n);
         let mut dones = Vec::with_capacity(n);
 
         for (i, uuid) in self.ordered_ids.iter().enumerate() {
             let env = self.envs.get(uuid)?;
-            let (obs, reward, done) = env.dyn_step_discrete(actions[i])?;
-            self.obs_flat[i * obs_dim..(i + 1) * obs_dim].copy_from_slice(&obs);
-            rewards.push(reward);
-            dones.push(done);
-        }
-        Some((self.obs_flat.clone(), rewards, dones))
-    }
-
-    fn step_flat_actions_cont_bytes(
-        &mut self,
-        actions: &[u8],
-        dtype: &EnvNdArrayDType,
-    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-        if self.obs_dim == 0 { return None; }
-        let n = self.ordered_ids.len();
-        let obs_dim = self.obs_dim;
-        let act_dim = self.act_dim;
-        let bytes_per_elem = dtype_bytes_per_elem(dtype);
-        let act_bytes = act_dim * bytes_per_elem;
-        let mut rewards = Vec::with_capacity(n);
-        let mut dones = Vec::with_capacity(n);
-
-        for (i, uuid) in self.ordered_ids.iter().enumerate() {
-            let env = self.envs.get(uuid)?;
-            let env_act = &actions[i * act_bytes..(i + 1) * act_bytes];
-            let (obs, reward, done) = env.dyn_step_continuous_bytes(env_act, dtype)?;
-            self.obs_flat[i * obs_dim..(i + 1) * obs_dim].copy_from_slice(&obs);
+            let env_act = &actions[i * act_bytes_per_env..(i + 1) * act_bytes_per_env];
+            let (obs, reward, done) = env.dyn_step_bytes(env_act)?;
+            self.obs_flat[i * obs_bytes_per_env..(i + 1) * obs_bytes_per_env].copy_from_slice(&obs);
             rewards.push(reward);
             dones.push(done);
         }
@@ -405,7 +415,7 @@ impl<
     }
 
     fn action_is_discrete(&self) -> Option<bool> {
-        if self.obs_dim == 0 { return None; }
+        if self.obs_bytes_per_env == 0 { return None; }
         self.ordered_ids.first()
             .and_then(|uuid| self.envs.get(uuid))
             .and_then(|env| env.dyn_action_is_discrete())
@@ -580,20 +590,12 @@ impl<
         if n == 0 { None } else { Some((n, obs, act)) }
     }
 
-    fn flat_obs_clone(&self) -> Option<Vec<f32>> {
+    fn flat_obs_clone(&self) -> Option<Vec<u8>> {
         self.env.flat_obs()
     }
 
-    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-        self.env.step_raw_actions(actions)
-    }
-
-    fn step_flat_actions_cont_bytes(
-        &mut self,
-        actions: &[u8],
-        dtype: &EnvNdArrayDType,
-    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-        self.env.step_raw_actions_cont_bytes(actions, dtype)
+    fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+        self.env.step_raw(actions)
     }
 
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {

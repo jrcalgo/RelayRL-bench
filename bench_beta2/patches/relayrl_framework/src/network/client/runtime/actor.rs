@@ -41,52 +41,22 @@ use tokio::sync::oneshot;
 use burn_tensor::backend::Backend;
 use thiserror::Error;
 
-/// Output of `infer_flat`: either per-env argmax indices (discrete) or typed raw bytes (continuous).
-pub(crate) enum FlatActions {
-    Discrete(Vec<u8>),
-    /// Raw action bytes in the dtype declared by the env (`act_dtype`).
-    Continuous(Vec<u8>, relayrl_env_trait::EnvNdArrayDType),
-}
-
-/// Cast a `&[f32]` observation buffer to the bytes and `DType` tag the model expects.
-fn cast_obs_to_dtype(
-    obs: &[f32],
-    target: &relayrl_env_trait::EnvNdArrayDType,
-) -> (Vec<u8>, relayrl_types::data::tensor::DType) {
+/// Map `EnvNdArrayDType` to the `relayrl_types::data::tensor::DType` tag used by the model.
+fn env_dtype_to_dtype(
+    dtype: &relayrl_env_trait::EnvNdArrayDType,
+) -> relayrl_types::data::tensor::DType {
     use relayrl_env_trait::EnvNdArrayDType;
     use relayrl_types::data::tensor::{DType, NdArrayDType};
-    match target {
-        EnvNdArrayDType::F32 => (
-            bytemuck::cast_slice::<f32, u8>(obs).to_vec(),
-            DType::NdArray(NdArrayDType::F32),
-        ),
-        EnvNdArrayDType::F64 => {
-            let v: Vec<f64> = obs.iter().map(|&x| x as f64).collect();
-            (bytemuck::cast_slice::<f64, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::F64))
-        }
-        EnvNdArrayDType::I8 => {
-            let v: Vec<i8> = obs.iter().map(|&x| x as i8).collect();
-            (bytemuck::cast_slice::<i8, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I8))
-        }
-        EnvNdArrayDType::I16 => {
-            let v: Vec<i16> = obs.iter().map(|&x| x as i16).collect();
-            (bytemuck::cast_slice::<i16, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I16))
-        }
-        EnvNdArrayDType::I32 => {
-            let v: Vec<i32> = obs.iter().map(|&x| x as i32).collect();
-            (bytemuck::cast_slice::<i32, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I32))
-        }
-        EnvNdArrayDType::I64 => {
-            let v: Vec<i64> = obs.iter().map(|&x| x as i64).collect();
-            (bytemuck::cast_slice::<i64, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I64))
-        }
-        // F16 and Bool: fall back to f32 — f16 requires the `half` crate in this crate,
-        // Bool observations are not meaningful as model input.
-        _ => (
-            bytemuck::cast_slice::<f32, u8>(obs).to_vec(),
-            DType::NdArray(NdArrayDType::F32),
-        ),
-    }
+    DType::NdArray(match dtype {
+        EnvNdArrayDType::F16  => NdArrayDType::F16,
+        EnvNdArrayDType::F32  => NdArrayDType::F32,
+        EnvNdArrayDType::F64  => NdArrayDType::F64,
+        EnvNdArrayDType::I8   => NdArrayDType::I8,
+        EnvNdArrayDType::I16  => NdArrayDType::I16,
+        EnvNdArrayDType::I32  => NdArrayDType::I32,
+        EnvNdArrayDType::I64  => NdArrayDType::I64,
+        EnvNdArrayDType::Bool => NdArrayDType::Bool,
+    })
 }
 
 /// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
@@ -549,23 +519,24 @@ impl<
         result
     }
 
-    /// Fast-path inference: takes a flat `[n_envs × obs_dim]` f32 slice, runs one
-    /// batched forward pass, and returns decoded actions.
+    /// Fast-path inference: takes `[n_envs × obs_dim × sizeof(obs_dtype)]` raw bytes,
+    /// runs one batched forward pass, and returns decoded action bytes.
     ///
-    /// `obs_dtype` controls how the obs bytes are tagged for the model (the f32 values
-    /// are widened/cast to the target dtype before passing to ONNX).  `discrete`
-    /// selects argmax-to-u8 decoding vs. raw f32 pass-through for continuous spaces.
+    /// Obs bytes are already in `obs_dtype` format (the env's declared dtype) so they
+    /// can be handed directly to the model with the appropriate tag.  `discrete`
+    /// selects argmax-to-u8 decoding vs. re-encoded continuous bytes.
+    /// Returns `Vec<u8>` ready to pass straight to `step_flat_actions`.
     pub(crate) async fn infer_flat(
         &self,
-        obs_flat: &[f32],
+        obs_bytes: &[u8],
         n_envs: usize,
         obs_dim: usize,
         act_dim: usize,
         obs_dtype: &relayrl_env_trait::EnvNdArrayDType,
         act_dtype: &relayrl_env_trait::EnvNdArrayDType,
         discrete: bool,
-    ) -> Result<FlatActions, ActorError> {
-        use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
+    ) -> Result<Vec<u8>, ActorError> {
+        use relayrl_types::data::tensor::{SupportedTensorBackend, TensorData};
 
         let guard = self.reloadable_model.load();
         let reloadable = guard.as_ref().ok_or_else(|| {
@@ -573,26 +544,22 @@ impl<
         })?;
         let module = reloadable.current_module();
 
-        // Cast f32 obs to the dtype the model expects.
-        let (input_bytes, input_dtype) = cast_obs_to_dtype(obs_flat, obs_dtype);
+        // Obs bytes are already in obs_dtype — just tag them for the model.
         let input = TensorData::new(
             vec![n_envs, obs_dim],
-            input_dtype,
-            input_bytes,
+            env_dtype_to_dtype(obs_dtype),
+            obs_bytes.to_vec(),
             SupportedTensorBackend::NdArray,
         );
         let output = module.infer_flat_batch(input)
             .unwrap_or_else(|_| module.zeros_flat_batch(n_envs));
 
-        if discrete {
-            // Argmax over act_dim outputs; works with any numeric output dtype.
-            let actions = decode_argmax(&output.data, &output.dtype, n_envs, act_dim);
-            Ok(FlatActions::Discrete(actions))
+        let action_bytes = if discrete {
+            decode_argmax(&output.data, &output.dtype, n_envs, act_dim)
         } else {
-            // Continuous: re-encode output values as the env's declared action dtype.
-            let bytes = decode_continuous_bytes(&output.data, &output.dtype, n_envs * act_dim, act_dtype);
-            Ok(FlatActions::Continuous(bytes, act_dtype.clone()))
-        }
+            decode_continuous_bytes(&output.data, &output.dtype, n_envs * act_dim, act_dtype)
+        };
+        Ok(action_bytes)
     }
 
     pub(crate) async fn flag_last_action(

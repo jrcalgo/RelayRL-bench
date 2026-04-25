@@ -342,20 +342,21 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
     fn act_dim(&self) -> usize { ACT_DIM }
     fn action_is_discrete(&self) -> Option<bool> { Some(true) }
 
-    fn flat_obs(&self) -> Option<Vec<f32>> {
-        Some(self.inner.lock().unwrap().env.get_stacked_obs())
+    fn flat_obs(&self) -> Option<Vec<u8>> {
+        let obs = self.inner.lock().unwrap().env.get_stacked_obs();
+        Some(bytemuck::cast_slice::<f32, u8>(&obs).to_vec())
     }
 
-    fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
+    fn step_raw(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
         let mut inner = self.inner.lock().unwrap();
         let step_results = inner.env.step_all(actions);
-        let new_obs = inner.env.get_stacked_obs();
+        let new_obs_f32 = inner.env.get_stacked_obs();
         let mut rewards = Vec::with_capacity(step_results.len());
-        let mut dones = Vec::with_capacity(step_results.len());
+        let mut dones   = Vec::with_capacity(step_results.len());
         for (r, d) in step_results {
             rewards.push(r);
             dones.push(d);
         }
-        Some((new_obs, rewards, dones))
+        Some((bytemuck::cast_slice::<f32, u8>(&new_obs_f32).to_vec(), rewards, dones))
     }
 }

@@ -719,11 +719,13 @@ impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float> for LunarLander
 impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
     for LunarLanderEnv<NdArray>
 {
-    fn flat_obs_f32(&self) -> Option<Vec<f32>> {
-        Some(self.state.lock().unwrap().last_obs.to_vec())
+    fn flat_obs_bytes(&self) -> Option<Vec<u8>> {
+        let obs = self.state.lock().unwrap().last_obs;
+        Some(bytemuck::cast_slice::<f32, u8>(&obs).to_vec())
     }
 
-    fn step_discrete_f32(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> {
+    fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
+        let act = *action.first()?;
         let sc = {
             let mut sc = self.step_count.lock().unwrap();
             *sc += 1;
@@ -731,22 +733,21 @@ impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
         };
         let (reward, obs_arr, done) = {
             let mut state = self.state.lock().unwrap();
-            state.step_physics(action);
+            state.step_physics(act);
             let done = state.done || sc >= self.max_steps;
             (state.last_reward, state.last_obs, done)
         };
-        // Inline auto-reset (consistent with SyncLunarVectorEnv::step_all)
         if done {
             let new_seed = self.state.lock().unwrap().rng.random::<u64>();
             *self.state.lock().unwrap() = PhysicsState::build(new_seed);
             *self.step_count.lock().unwrap() = 0;
         }
         let obs = if done {
-            self.state.lock().unwrap().last_obs.to_vec()
+            self.state.lock().unwrap().last_obs
         } else {
-            obs_arr.to_vec()
+            obs_arr
         };
-        Some((obs, reward, done))
+        Some((bytemuck::cast_slice::<f32, u8>(&obs).to_vec(), reward, done))
     }
 
     fn act_dim_hint(&self) -> Option<usize> {

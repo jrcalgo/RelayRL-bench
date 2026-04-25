@@ -36,7 +36,6 @@
 
 pub mod traits {
     pub use burn_tensor::{Tensor, TensorKind, backend::Backend};
-    use bytemuck;
     use std::any::Any;
     pub use thiserror::Error;
     pub use uuid::Uuid;
@@ -183,16 +182,9 @@ pub mod traits {
         fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>;
 
         // ── Flat-buffer fast path (delegates to ScalarEnvironment opt-in methods) ─
-        fn dyn_flat_obs(&self) -> Option<Vec<f32>> { self.flat_obs_f32() }
-        fn dyn_step_discrete(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> {
-            self.step_discrete_f32(action)
-        }
-        fn dyn_step_continuous_bytes(
-            &self,
-            actions: &[u8],
-            dtype: &EnvNdArrayDType,
-        ) -> Option<(Vec<f32>, f32, bool)> {
-            self.step_continuous_bytes(actions, dtype)
+        fn dyn_flat_obs_bytes(&self) -> Option<Vec<u8>> { self.flat_obs_bytes() }
+        fn dyn_step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
+            self.step_bytes(action)
         }
         fn dyn_act_dim(&self) -> Option<usize> { self.act_dim_hint() }
         fn dyn_action_is_discrete(&self) -> Option<bool> { self.action_is_discrete() }
@@ -246,32 +238,15 @@ pub mod traits {
         fn reset(&self) -> Result<ScalarEnvReset<B, D_IN, KindIn>, EnvironmentError>;
 
         // ── Flat-buffer fast path (opt-in) ───────────────────────────────────────
-        /// Returns the current observation as a flat `f32` Vec, or `None`.
-        fn flat_obs_f32(&self) -> Option<Vec<f32>> { None }
-        /// Steps with a discrete integer action; returns `(new_obs_flat, reward, done)`.
-        /// The implementation is responsible for inline auto-reset when `done` is true.
-        fn step_discrete_f32(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> { None }
-        /// Steps with continuous actions as typed raw bytes.  The fast path always calls
-        /// this; `dtype` indicates how to interpret the bytes.  The default implementation
-        /// handles `F32` by delegating to `step_continuous_f32`; override for other dtypes.
-        fn step_continuous_bytes(
-            &self,
-            actions: &[u8],
-            dtype: &EnvNdArrayDType,
-        ) -> Option<(Vec<f32>, f32, bool)> {
-            if *dtype == EnvNdArrayDType::F32 {
-                let floats: &[f32] = bytemuck::cast_slice(actions);
-                self.step_continuous_f32(floats)
-            } else {
-                None
-            }
-        }
-        /// Steps with continuous f32 actions; called by the default `step_continuous_bytes`
-        /// when `dtype == F32`.  Override this for f32 action spaces.
-        fn step_continuous_f32(&self, actions: &[f32]) -> Option<(Vec<f32>, f32, bool)> { None }
-        /// Number of discrete actions, or `None` if not applicable.
+        /// Current observation as raw bytes in the dtype declared by `observation_dtype()`.
+        fn flat_obs_bytes(&self) -> Option<Vec<u8>> { None }
+        /// Step with action bytes in the dtype declared by `action_dtype()` (discrete: one
+        /// `u8` index byte; continuous: `act_dim × sizeof(dtype)` bytes).
+        /// Returns `(new_obs_bytes, reward, done)`; inline auto-reset on `done` is expected.
+        fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> { None }
+        /// Number of action elements (discrete: number of choices; continuous: action dim).
         fn act_dim_hint(&self) -> Option<usize> { None }
-        /// `true` if the action space is discrete (argmax), `false` if continuous.
+        /// `true` if the action space is discrete (argmax → single index byte).
         fn action_is_discrete(&self) -> Option<bool> { None }
     }
 
@@ -297,29 +272,11 @@ pub mod traits {
         fn n_envs(&self) -> usize { 0 }
         fn obs_dim(&self) -> usize { 0 }
         fn act_dim(&self) -> usize { 0 }
-        /// Returns current obs as a flat `[n_envs × obs_dim]` f32 Vec, or None.
-        fn flat_obs(&self) -> Option<Vec<f32>> { None }
-        /// Steps all sub-envs with discrete integer actions (argmax indices).
-        /// Returns `(new_obs_flat, rewards, dones)` or None if unsupported.
-        fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
-        /// Steps all sub-envs with continuous actions as typed raw bytes.
-        /// `dtype` indicates the element type of `actions`.
-        /// The default delegates to `step_raw_actions_cont` when `dtype == F32`.
-        fn step_raw_actions_cont_bytes(
-            &self,
-            actions: &[u8],
-            dtype: &EnvNdArrayDType,
-        ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-            if *dtype == EnvNdArrayDType::F32 {
-                let floats: &[f32] = bytemuck::cast_slice(actions);
-                self.step_raw_actions_cont(floats)
-            } else {
-                None
-            }
-        }
-        /// Steps all sub-envs with continuous f32 actions.
-        /// Called by the default `step_raw_actions_cont_bytes` when `dtype == F32`.
-        fn step_raw_actions_cont(&self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
+        /// Current observations as `[n_envs × obs_dim × sizeof(obs_dtype)]` raw bytes.
+        fn flat_obs(&self) -> Option<Vec<u8>> { None }
+        /// Step all sub-envs with `actions` bytes (layout mirrors `flat_obs`).
+        /// Returns `(new_obs_bytes, rewards, dones)`.
+        fn step_raw(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> { None }
         /// `true` if the action space is discrete, `false` if continuous.
         fn action_is_discrete(&self) -> Option<bool> { None }
     }

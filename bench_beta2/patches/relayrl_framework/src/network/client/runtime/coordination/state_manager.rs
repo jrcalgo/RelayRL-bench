@@ -1024,30 +1024,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         let mut step_rewards = vec![0.0f32; n_envs];
 
         for _ in 0..step_count {
-            let obs_flat = env_interface.flat_obs_clone()
+            let obs_bytes = env_interface.flat_obs_clone()
                 .ok_or_else(|| StateManagerError::GetEnvInfoError(
                     "[StateManager] flat_obs_clone returned None".to_string(),
                 ))?;
 
-            let flat_actions = runtime
-                .infer_flat(&obs_flat, n_envs, obs_dim, act_dim, &obs_dtype, &act_dtype, discrete)
+            let action_bytes = runtime
+                .infer_flat(&obs_bytes, n_envs, obs_dim, act_dim, &obs_dtype, &act_dtype, discrete)
                 .await
                 .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
 
-            let (_, rewards, dones) = match flat_actions {
-                crate::network::client::runtime::actor::FlatActions::Discrete(actions) => {
-                    env_interface.step_flat_actions(&actions)
-                        .ok_or_else(|| StateManagerError::GetEnvInfoError(
-                            "[StateManager] step_flat_actions returned None".to_string(),
-                        ))?
-                }
-                crate::network::client::runtime::actor::FlatActions::Continuous(bytes, dtype) => {
-                    env_interface.step_flat_actions_cont_bytes(&bytes, &dtype)
-                        .ok_or_else(|| StateManagerError::GetEnvInfoError(
-                            "[StateManager] step_flat_actions_cont_bytes returned None".to_string(),
-                        ))?
-                }
-            };
+            let (_, rewards, dones) = env_interface.step_flat_actions(&action_bytes)
+                .ok_or_else(|| StateManagerError::GetEnvInfoError(
+                    "[StateManager] step_flat_actions returned None".to_string(),
+                ))?;
 
             for i in 0..n_envs {
                 step_rewards[i] = rewards[i];
