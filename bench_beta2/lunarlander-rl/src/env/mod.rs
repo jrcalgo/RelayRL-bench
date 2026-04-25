@@ -754,12 +754,6 @@ impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
     }
 
     fn action_is_discrete(&self) -> Option<bool> { Some(true) }
-    fn obs_dtype_hint(&self) -> Option<relayrl_env_trait::EnvNdArrayDType> {
-        Some(relayrl_env_trait::EnvNdArrayDType::F32)
-    }
-    fn act_dtype_hint(&self) -> Option<relayrl_env_trait::EnvNdArrayDType> {
-        Some(relayrl_env_trait::EnvNdArrayDType::F32)
-    }
 
     fn step(
         &self,

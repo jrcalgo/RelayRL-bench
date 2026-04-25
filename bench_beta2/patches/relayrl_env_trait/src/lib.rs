@@ -196,8 +196,6 @@ pub mod traits {
         }
         fn dyn_act_dim(&self) -> Option<usize> { self.act_dim_hint() }
         fn dyn_action_is_discrete(&self) -> Option<bool> { self.action_is_discrete() }
-        fn dyn_obs_dtype(&self) -> Option<EnvNdArrayDType> { self.obs_dtype_hint() }
-        fn dyn_act_dtype(&self) -> Option<EnvNdArrayDType> { self.act_dtype_hint() }
     }
     impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput, T>
         DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> for T
@@ -275,10 +273,6 @@ pub mod traits {
         fn act_dim_hint(&self) -> Option<usize> { None }
         /// `true` if the action space is discrete (argmax), `false` if continuous.
         fn action_is_discrete(&self) -> Option<bool> { None }
-        /// Dtype of the observation produced by `flat_obs_f32`.  Defaults to F32.
-        fn obs_dtype_hint(&self) -> Option<EnvNdArrayDType> { None }
-        /// Dtype of actions expected by `step_continuous_bytes`.  Defaults to F32.
-        fn act_dtype_hint(&self) -> Option<EnvNdArrayDType> { None }
     }
 
     pub trait VectorEnvironment<
@@ -328,10 +322,6 @@ pub mod traits {
         fn step_raw_actions_cont(&self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
         /// `true` if the action space is discrete, `false` if continuous.
         fn action_is_discrete(&self) -> Option<bool> { None }
-        /// Dtype of observations returned by `flat_obs`.  Defaults to F32.
-        fn obs_dtype(&self) -> Option<EnvNdArrayDType> { None }
-        /// Dtype of actions expected by `step_raw_actions_cont_bytes`.  Defaults to F32.
-        fn act_dtype(&self) -> Option<EnvNdArrayDType> { None }
     }
 
     /// Interface for environments where a model can be trained or evaluated.

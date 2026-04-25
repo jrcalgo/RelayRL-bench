@@ -134,10 +134,6 @@ pub(crate) trait VecEnvTrait<
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> { None }
-    /// Dtype of the observations in `flat_obs_clone`.
-    fn obs_dtype(&self) -> Option<EnvNdArrayDType> { None }
-    /// Dtype of actions consumed by `step_flat_actions_cont_bytes`.
-    fn act_dtype(&self) -> Option<EnvNdArrayDType> { None }
     /// `true` if the action space is discrete, `false` if continuous.
     fn action_is_discrete(&self) -> Option<bool> { None }
 }
@@ -408,22 +404,6 @@ impl<
         Some(self.ordered_ids.clone())
     }
 
-    fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
-        if self.obs_dim == 0 { return None; }
-        self.ordered_ids.first()
-            .and_then(|uuid| self.envs.get(uuid))
-            .and_then(|env| env.dyn_obs_dtype())
-            .or(Some(EnvNdArrayDType::F32))
-    }
-
-    fn act_dtype(&self) -> Option<EnvNdArrayDType> {
-        if self.obs_dim == 0 { return None; }
-        self.ordered_ids.first()
-            .and_then(|uuid| self.envs.get(uuid))
-            .and_then(|env| env.dyn_act_dtype())
-            .or(Some(EnvNdArrayDType::F32))
-    }
-
     fn action_is_discrete(&self) -> Option<bool> {
         if self.obs_dim == 0 { return None; }
         self.ordered_ids.first()
@@ -619,14 +599,6 @@ impl<
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         let n = self.env.n_envs();
         if n == 0 { None } else { Some(self.env_ids.clone()) }
-    }
-
-    fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
-        self.env.obs_dtype().or(Some(EnvNdArrayDType::F32))
-    }
-
-    fn act_dtype(&self) -> Option<EnvNdArrayDType> {
-        self.env.act_dtype().or(Some(EnvNdArrayDType::F32))
     }
 
     fn action_is_discrete(&self) -> Option<bool> {

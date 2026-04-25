@@ -67,6 +67,15 @@ fn map_env_dtype(dtype: EnvDType) -> Result<DType, EnvironmentInterfaceError> {
     }
 }
 
+/// Extract `EnvNdArrayDType` from `EnvDType`; returns `None` for Tch dtypes
+/// (the flat-buffer fast path is NdArray-only).
+fn ndarray_dtype(dtype: &EnvDType) -> Option<EnvNdArrayDType> {
+    match dtype {
+        EnvDType::NdArray(nd) => Some(nd.clone()),
+        EnvDType::Tch(_) => None,
+    }
+}
+
 pub(crate) struct EnvironmentInterface<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -77,6 +86,9 @@ pub(crate) struct EnvironmentInterface<
     auto_reset: bool,
     env: Option<Box<dyn VecEnvTrait<B, D_IN, D_OUT>>>,
     current_obs: HashMap<EnvironmentUuid, AnyBurnTensor<B, D_IN>>,
+    // Cached from Environment::observation_dtype / action_dtype at set_env time.
+    obs_dtype: Option<EnvNdArrayDType>,
+    act_dtype: Option<EnvNdArrayDType>,
 }
 
 impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
@@ -89,6 +101,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             auto_reset: true,
             env: None,
             current_obs: HashMap::new(),
+            obs_dtype: None,
+            act_dtype: None,
         }
     }
 
@@ -137,9 +151,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         KindOut: TensorKind<B> + burn_tensor::BasicOps<B> + Send + Sync + 'static,
     {
         self.current_obs.clear();
+        self.obs_dtype = None;
+        self.act_dtype = None;
         self.env = match env {
             None => None,
             Some(env) => {
+                // Read dtypes from the base Environment trait before consuming the box.
+                self.obs_dtype = ndarray_dtype(&env.observation_dtype());
+                self.act_dtype = ndarray_dtype(&env.action_dtype());
+
                 let observation_dtype = map_env_dtype(env.observation_dtype())?;
                 let action_dtype = map_env_dtype(env.action_dtype())?;
                 let boxed_env = match env.into_handle() {
@@ -172,6 +192,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) fn remove_env(&mut self) -> Result<(), EnvironmentInterfaceError> {
         self.current_obs.clear();
+        self.obs_dtype = None;
+        self.act_dtype = None;
         if let Some(env) = self.env.take() {
             drop(env);
         } else {
@@ -296,12 +318,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.env.as_ref().and_then(|e| e.flat_env_ids())
     }
 
+    /// Observation dtype from `Environment::observation_dtype()`, cached at `set_env` time.
     pub(crate) fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
-        self.env.as_ref().and_then(|e| e.obs_dtype())
+        self.obs_dtype.clone()
     }
 
+    /// Action dtype from `Environment::action_dtype()`, cached at `set_env` time.
     pub(crate) fn act_dtype(&self) -> Option<EnvNdArrayDType> {
-        self.env.as_ref().and_then(|e| e.act_dtype())
+        self.act_dtype.clone()
     }
 
     pub(crate) fn action_is_discrete(&self) -> Option<bool> {
