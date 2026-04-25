@@ -1016,9 +1016,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             )
         })?;
 
-        let obs_dtype = env_interface.obs_dtype()
-            .unwrap_or(EnvNdArrayDType::F32);
-        let discrete = env_interface.action_is_discrete().unwrap_or(true);
+        let obs_dtype = env_interface.obs_dtype().unwrap_or(EnvNdArrayDType::F32);
+        let act_dtype = env_interface.act_dtype().unwrap_or(EnvNdArrayDType::F32);
+        let discrete  = env_interface.action_is_discrete().unwrap_or(true);
 
         let env_labels: Vec<String> = (0..n_envs).map(|i| format!("env-{}", i + 1)).collect();
         let mut step_rewards = vec![0.0f32; n_envs];
@@ -1030,7 +1030,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 ))?;
 
             let flat_actions = runtime
-                .infer_flat(&obs_flat, n_envs, obs_dim, act_dim, &obs_dtype, discrete)
+                .infer_flat(&obs_flat, n_envs, obs_dim, act_dim, &obs_dtype, &act_dtype, discrete)
                 .await
                 .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
 
@@ -1041,10 +1041,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             "[StateManager] step_flat_actions returned None".to_string(),
                         ))?
                 }
-                crate::network::client::runtime::actor::FlatActions::Continuous(actions) => {
-                    env_interface.step_flat_actions_cont(&actions)
+                crate::network::client::runtime::actor::FlatActions::Continuous(bytes, dtype) => {
+                    env_interface.step_flat_actions_cont_bytes(&bytes, &dtype)
                         .ok_or_else(|| StateManagerError::GetEnvInfoError(
-                            "[StateManager] step_flat_actions_cont returned None".to_string(),
+                            "[StateManager] step_flat_actions_cont_bytes returned None".to_string(),
                         ))?
                 }
             };

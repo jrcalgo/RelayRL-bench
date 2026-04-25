@@ -284,11 +284,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.env.as_mut().and_then(|e| e.step_flat_actions(actions))
     }
 
-    pub(crate) fn step_flat_actions_cont(
+    pub(crate) fn step_flat_actions_cont_bytes(
         &mut self,
-        actions: &[f32],
+        actions: &[u8],
+        dtype: &EnvNdArrayDType,
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-        self.env.as_mut().and_then(|e| e.step_flat_actions_cont(actions))
+        self.env.as_mut().and_then(|e| e.step_flat_actions_cont_bytes(actions, dtype))
     }
 
     pub(crate) fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
@@ -297,6 +298,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
     pub(crate) fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
         self.env.as_ref().and_then(|e| e.obs_dtype())
+    }
+
+    pub(crate) fn act_dtype(&self) -> Option<EnvNdArrayDType> {
+        self.env.as_ref().and_then(|e| e.act_dtype())
     }
 
     pub(crate) fn action_is_discrete(&self) -> Option<bool> {

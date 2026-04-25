@@ -89,6 +89,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D: usize> IntoAnyTensorKind
     }
 }
 
+/// Byte width of one element for a given NdArray dtype.
+fn dtype_bytes_per_elem(dtype: &EnvNdArrayDType) -> usize {
+    match dtype {
+        EnvNdArrayDType::F16 | EnvNdArrayDType::I16 => 2,
+        EnvNdArrayDType::F32 | EnvNdArrayDType::I32 => 4,
+        EnvNdArrayDType::F64 | EnvNdArrayDType::I64 => 8,
+        EnvNdArrayDType::I8 | EnvNdArrayDType::Bool  => 1,
+    }
+}
+
 pub(crate) trait VecEnvTrait<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
@@ -115,12 +125,19 @@ pub(crate) trait VecEnvTrait<
     fn flat_obs_clone(&self) -> Option<Vec<f32>> { None }
     /// Step all sub-envs with discrete (argmax) integer actions; returns `(new_obs_flat, rewards, dones)`.
     fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
-    /// Step all sub-envs with continuous f32 actions; returns `(new_obs_flat, rewards, dones)`.
-    fn step_flat_actions_cont(&mut self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
+    /// Step all sub-envs with continuous actions as typed raw bytes.
+    /// `dtype` identifies the element type of `actions`.
+    fn step_flat_actions_cont_bytes(
+        &mut self,
+        actions: &[u8],
+        dtype: &EnvNdArrayDType,
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> { None }
     /// Dtype of the observations in `flat_obs_clone`.
     fn obs_dtype(&self) -> Option<EnvNdArrayDType> { None }
+    /// Dtype of actions consumed by `step_flat_actions_cont_bytes`.
+    fn act_dtype(&self) -> Option<EnvNdArrayDType> { None }
     /// `true` if the action space is discrete, `false` if continuous.
     fn action_is_discrete(&self) -> Option<bool> { None }
 }
@@ -361,18 +378,24 @@ impl<
         Some((self.obs_flat.clone(), rewards, dones))
     }
 
-    fn step_flat_actions_cont(&mut self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
+    fn step_flat_actions_cont_bytes(
+        &mut self,
+        actions: &[u8],
+        dtype: &EnvNdArrayDType,
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
         if self.obs_dim == 0 { return None; }
         let n = self.ordered_ids.len();
         let obs_dim = self.obs_dim;
         let act_dim = self.act_dim;
+        let bytes_per_elem = dtype_bytes_per_elem(dtype);
+        let act_bytes = act_dim * bytes_per_elem;
         let mut rewards = Vec::with_capacity(n);
         let mut dones = Vec::with_capacity(n);
 
         for (i, uuid) in self.ordered_ids.iter().enumerate() {
             let env = self.envs.get(uuid)?;
-            let env_actions = &actions[i * act_dim..(i + 1) * act_dim];
-            let (obs, reward, done) = env.dyn_step_continuous(env_actions)?;
+            let env_act = &actions[i * act_bytes..(i + 1) * act_bytes];
+            let (obs, reward, done) = env.dyn_step_continuous_bytes(env_act, dtype)?;
             self.obs_flat[i * obs_dim..(i + 1) * obs_dim].copy_from_slice(&obs);
             rewards.push(reward);
             dones.push(done);
@@ -387,10 +410,17 @@ impl<
 
     fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
         if self.obs_dim == 0 { return None; }
-        // Probe the first env for its obs dtype; fall back to F32.
         self.ordered_ids.first()
             .and_then(|uuid| self.envs.get(uuid))
             .and_then(|env| env.dyn_obs_dtype())
+            .or(Some(EnvNdArrayDType::F32))
+    }
+
+    fn act_dtype(&self) -> Option<EnvNdArrayDType> {
+        if self.obs_dim == 0 { return None; }
+        self.ordered_ids.first()
+            .and_then(|uuid| self.envs.get(uuid))
+            .and_then(|env| env.dyn_act_dtype())
             .or(Some(EnvNdArrayDType::F32))
     }
 
@@ -578,8 +608,12 @@ impl<
         self.env.step_raw_actions(actions)
     }
 
-    fn step_flat_actions_cont(&mut self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
-        self.env.step_raw_actions_cont(actions)
+    fn step_flat_actions_cont_bytes(
+        &mut self,
+        actions: &[u8],
+        dtype: &EnvNdArrayDType,
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
+        self.env.step_raw_actions_cont_bytes(actions, dtype)
     }
 
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
@@ -589,6 +623,10 @@ impl<
 
     fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
         self.env.obs_dtype().or(Some(EnvNdArrayDType::F32))
+    }
+
+    fn act_dtype(&self) -> Option<EnvNdArrayDType> {
+        self.env.act_dtype().or(Some(EnvNdArrayDType::F32))
     }
 
     fn action_is_discrete(&self) -> Option<bool> {
