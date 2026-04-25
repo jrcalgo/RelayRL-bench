@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .actor_count(1)
         .default_device(DeviceType::Cpu)
         .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
-        .actor_training_data_mode(ActorTrainingDataMode::Disabled)
+        .actor_training_data_mode(ActorTrainingDataMode::OfflineWithMemory)
         .default_model(initial_model)
         .router_scale(1);
     if config_path.exists() {
