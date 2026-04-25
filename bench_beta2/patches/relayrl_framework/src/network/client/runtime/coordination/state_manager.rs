@@ -28,7 +28,7 @@ use thiserror::Error;
 
 use active_uuid_registry::UuidPoolError;
 use active_uuid_registry::interface::{remove_id, replace_id};
-use relayrl_env_trait::{Environment, EnvironmentUuid};
+use relayrl_env_trait::{EnvNdArrayDType, Environment, EnvironmentUuid};
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType, TensorData};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
 use relayrl_types::prelude::tensor::burn::TensorKind;
@@ -1015,6 +1015,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 "[StateManager] flat_env_ids returned None".to_string(),
             )
         })?;
+
+        let obs_dtype = env_interface.obs_dtype()
+            .unwrap_or(EnvNdArrayDType::F32);
+        let discrete = env_interface.action_is_discrete().unwrap_or(true);
+
         let env_labels: Vec<String> = (0..n_envs).map(|i| format!("env-{}", i + 1)).collect();
         let mut step_rewards = vec![0.0f32; n_envs];
 
@@ -1024,15 +1029,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     "[StateManager] flat_obs_clone returned None".to_string(),
                 ))?;
 
-            let actions = runtime
-                .infer_flat(&obs_flat, n_envs, obs_dim, act_dim)
+            let flat_actions = runtime
+                .infer_flat(&obs_flat, n_envs, obs_dim, act_dim, &obs_dtype, discrete)
                 .await
                 .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
 
-            let (_, rewards, dones) = env_interface.step_flat_actions(&actions)
-                .ok_or_else(|| StateManagerError::GetEnvInfoError(
-                    "[StateManager] step_flat_actions returned None".to_string(),
-                ))?;
+            let (_, rewards, dones) = match flat_actions {
+                crate::network::client::runtime::actor::FlatActions::Discrete(actions) => {
+                    env_interface.step_flat_actions(&actions)
+                        .ok_or_else(|| StateManagerError::GetEnvInfoError(
+                            "[StateManager] step_flat_actions returned None".to_string(),
+                        ))?
+                }
+                crate::network::client::runtime::actor::FlatActions::Continuous(actions) => {
+                    env_interface.step_flat_actions_cont(&actions)
+                        .ok_or_else(|| StateManagerError::GetEnvInfoError(
+                            "[StateManager] step_flat_actions_cont returned None".to_string(),
+                        ))?
+                }
+            };
 
             for i in 0..n_envs {
                 step_rewards[i] = rewards[i];

@@ -113,10 +113,16 @@ pub(crate) trait VecEnvTrait<
     fn n_envs_dims(&self) -> Option<(usize, usize, usize)> { None }
     /// Current observations as a flat `[n_envs × obs_dim]` f32 Vec, or None.
     fn flat_obs_clone(&self) -> Option<Vec<f32>> { None }
-    /// Step all sub-envs with decoded integer actions; returns `(new_obs_flat, rewards, dones)`.
+    /// Step all sub-envs with discrete (argmax) integer actions; returns `(new_obs_flat, rewards, dones)`.
     fn step_flat_actions(&mut self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
+    /// Step all sub-envs with continuous f32 actions; returns `(new_obs_flat, rewards, dones)`.
+    fn step_flat_actions_cont(&mut self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
     /// Stable env UUIDs in flat-path order, or None if fast path unsupported.
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> { None }
+    /// Dtype of the observations in `flat_obs_clone`.
+    fn obs_dtype(&self) -> Option<EnvNdArrayDType> { None }
+    /// `true` if the action space is discrete, `false` if continuous.
+    fn action_is_discrete(&self) -> Option<bool> { None }
 }
 
 pub(crate) struct ScalarVecEnv<
@@ -355,9 +361,45 @@ impl<
         Some((self.obs_flat.clone(), rewards, dones))
     }
 
+    fn step_flat_actions_cont(&mut self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
+        if self.obs_dim == 0 { return None; }
+        let n = self.ordered_ids.len();
+        let obs_dim = self.obs_dim;
+        let act_dim = self.act_dim;
+        let mut rewards = Vec::with_capacity(n);
+        let mut dones = Vec::with_capacity(n);
+
+        for (i, uuid) in self.ordered_ids.iter().enumerate() {
+            let env = self.envs.get(uuid)?;
+            let env_actions = &actions[i * act_dim..(i + 1) * act_dim];
+            let (obs, reward, done) = env.dyn_step_continuous(env_actions)?;
+            self.obs_flat[i * obs_dim..(i + 1) * obs_dim].copy_from_slice(&obs);
+            rewards.push(reward);
+            dones.push(done);
+        }
+        Some((self.obs_flat.clone(), rewards, dones))
+    }
+
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         if self.obs_dim == 0 { return None; }
         Some(self.ordered_ids.clone())
+    }
+
+    fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
+        if self.obs_dim == 0 { return None; }
+        // Probe the first env for its obs dtype; fall back to F32.
+        self.ordered_ids.first()
+            .and_then(|uuid| self.envs.get(uuid))
+            .and_then(|env| env.dyn_obs_dtype())
+            .or(Some(EnvNdArrayDType::F32))
+    }
+
+    fn action_is_discrete(&self) -> Option<bool> {
+        if self.obs_dim == 0 { return None; }
+        self.ordered_ids.first()
+            .and_then(|uuid| self.envs.get(uuid))
+            .and_then(|env| env.dyn_action_is_discrete())
+            .or(Some(true))
     }
 }
 
@@ -536,8 +578,20 @@ impl<
         self.env.step_raw_actions(actions)
     }
 
+    fn step_flat_actions_cont(&mut self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
+        self.env.step_raw_actions_cont(actions)
+    }
+
     fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         let n = self.env.n_envs();
         if n == 0 { None } else { Some(self.env_ids.clone()) }
+    }
+
+    fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
+        self.env.obs_dtype().or(Some(EnvNdArrayDType::F32))
+    }
+
+    fn action_is_discrete(&self) -> Option<bool> {
+        self.env.action_is_discrete().or(Some(true))
     }
 }

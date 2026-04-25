@@ -284,7 +284,22 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         self.env.as_mut().and_then(|e| e.step_flat_actions(actions))
     }
 
+    pub(crate) fn step_flat_actions_cont(
+        &mut self,
+        actions: &[f32],
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
+        self.env.as_mut().and_then(|e| e.step_flat_actions_cont(actions))
+    }
+
     pub(crate) fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
         self.env.as_ref().and_then(|e| e.flat_env_ids())
+    }
+
+    pub(crate) fn obs_dtype(&self) -> Option<EnvNdArrayDType> {
+        self.env.as_ref().and_then(|e| e.obs_dtype())
+    }
+
+    pub(crate) fn action_is_discrete(&self) -> Option<bool> {
+        self.env.as_ref().and_then(|e| e.action_is_discrete())
     }
 }

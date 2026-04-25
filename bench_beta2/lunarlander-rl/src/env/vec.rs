@@ -340,6 +340,10 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
     fn n_envs(&self) -> usize { self.num_envs }
     fn obs_dim(&self) -> usize { OBS_DIM }
     fn act_dim(&self) -> usize { ACT_DIM }
+    fn action_is_discrete(&self) -> Option<bool> { Some(true) }
+    fn obs_dtype(&self) -> Option<relayrl_env_trait::EnvNdArrayDType> {
+        Some(relayrl_env_trait::EnvNdArrayDType::F32)
+    }
 
     fn flat_obs(&self) -> Option<Vec<f32>> {
         Some(self.inner.lock().unwrap().env.get_stacked_obs())

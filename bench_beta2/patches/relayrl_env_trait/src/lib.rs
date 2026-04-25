@@ -186,7 +186,12 @@ pub mod traits {
         fn dyn_step_discrete(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> {
             self.step_discrete_f32(action)
         }
+        fn dyn_step_continuous(&self, actions: &[f32]) -> Option<(Vec<f32>, f32, bool)> {
+            self.step_continuous_f32(actions)
+        }
         fn dyn_act_dim(&self) -> Option<usize> { self.act_dim_hint() }
+        fn dyn_action_is_discrete(&self) -> Option<bool> { self.action_is_discrete() }
+        fn dyn_obs_dtype(&self) -> Option<EnvNdArrayDType> { self.obs_dtype_hint() }
     }
     impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput, T>
         DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> for T
@@ -242,8 +247,15 @@ pub mod traits {
         /// Steps with a discrete integer action; returns `(new_obs_flat, reward, done)`.
         /// The implementation is responsible for inline auto-reset when `done` is true.
         fn step_discrete_f32(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> { None }
+        /// Steps with a slice of continuous f32 actions (one per action dim); returns
+        /// `(new_obs_flat, reward, done)`.  Inline auto-reset on `done` is expected.
+        fn step_continuous_f32(&self, actions: &[f32]) -> Option<(Vec<f32>, f32, bool)> { None }
         /// Number of discrete actions, or `None` if not applicable.
         fn act_dim_hint(&self) -> Option<usize> { None }
+        /// `true` if the action space is discrete (argmax), `false` if continuous.
+        fn action_is_discrete(&self) -> Option<bool> { None }
+        /// Dtype of the observation produced by `flat_obs_f32`.  Defaults to F32.
+        fn obs_dtype_hint(&self) -> Option<EnvNdArrayDType> { None }
     }
 
     pub trait VectorEnvironment<
@@ -270,9 +282,16 @@ pub mod traits {
         fn act_dim(&self) -> usize { 0 }
         /// Returns current obs as a flat `[n_envs × obs_dim]` f32 Vec, or None.
         fn flat_obs(&self) -> Option<Vec<f32>> { None }
-        /// Steps all sub-envs with decoded integer actions.
+        /// Steps all sub-envs with discrete integer actions (argmax indices).
         /// Returns `(new_obs_flat, rewards, dones)` or None if unsupported.
         fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
+        /// Steps all sub-envs with continuous f32 actions.
+        /// Returns `(new_obs_flat, rewards, dones)` or None if unsupported.
+        fn step_raw_actions_cont(&self, actions: &[f32]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
+        /// `true` if the action space is discrete, `false` if continuous.
+        fn action_is_discrete(&self) -> Option<bool> { None }
+        /// Dtype of observations returned by `flat_obs`.  Defaults to F32.
+        fn obs_dtype(&self) -> Option<EnvNdArrayDType> { None }
     }
 
     /// Interface for environments where a model can be trained or evaluated.

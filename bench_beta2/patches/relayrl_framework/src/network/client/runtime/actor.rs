@@ -41,6 +41,122 @@ use tokio::sync::oneshot;
 use burn_tensor::backend::Backend;
 use thiserror::Error;
 
+/// Output of `infer_flat`: either per-env argmax indices (discrete) or raw f32 values (continuous).
+pub(crate) enum FlatActions {
+    Discrete(Vec<u8>),
+    Continuous(Vec<f32>),
+}
+
+/// Cast a `&[f32]` observation buffer to the bytes and `DType` tag the model expects.
+fn cast_obs_to_dtype(
+    obs: &[f32],
+    target: &relayrl_env_trait::EnvNdArrayDType,
+) -> (Vec<u8>, relayrl_types::data::tensor::DType) {
+    use relayrl_env_trait::EnvNdArrayDType;
+    use relayrl_types::data::tensor::{DType, NdArrayDType};
+    match target {
+        EnvNdArrayDType::F32 => (
+            bytemuck::cast_slice::<f32, u8>(obs).to_vec(),
+            DType::NdArray(NdArrayDType::F32),
+        ),
+        EnvNdArrayDType::F64 => {
+            let v: Vec<f64> = obs.iter().map(|&x| x as f64).collect();
+            (bytemuck::cast_slice::<f64, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::F64))
+        }
+        EnvNdArrayDType::I8 => {
+            let v: Vec<i8> = obs.iter().map(|&x| x as i8).collect();
+            (bytemuck::cast_slice::<i8, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I8))
+        }
+        EnvNdArrayDType::I16 => {
+            let v: Vec<i16> = obs.iter().map(|&x| x as i16).collect();
+            (bytemuck::cast_slice::<i16, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I16))
+        }
+        EnvNdArrayDType::I32 => {
+            let v: Vec<i32> = obs.iter().map(|&x| x as i32).collect();
+            (bytemuck::cast_slice::<i32, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I32))
+        }
+        EnvNdArrayDType::I64 => {
+            let v: Vec<i64> = obs.iter().map(|&x| x as i64).collect();
+            (bytemuck::cast_slice::<i64, u8>(&v).to_vec(), DType::NdArray(NdArrayDType::I64))
+        }
+        // F16 and Bool: fall back to f32 — f16 requires the `half` crate in this crate,
+        // Bool observations are not meaningful as model input.
+        _ => (
+            bytemuck::cast_slice::<f32, u8>(obs).to_vec(),
+            DType::NdArray(NdArrayDType::F32),
+        ),
+    }
+}
+
+/// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
+fn decode_argmax(
+    data: &[u8],
+    dtype: &relayrl_types::data::tensor::DType,
+    n_envs: usize,
+    act_dim: usize,
+) -> Vec<u8> {
+    use relayrl_types::data::tensor::{DType, NdArrayDType};
+    match dtype {
+        DType::NdArray(NdArrayDType::F64) => {
+            let vals: &[f64] = bytemuck::cast_slice(data);
+            (0..n_envs).map(|i| {
+                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(j, _)| j as u8).unwrap_or(0)
+            }).collect()
+        }
+        DType::NdArray(NdArrayDType::I32) => {
+            let vals: &[i32] = bytemuck::cast_slice(data);
+            (0..n_envs).map(|i| {
+                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
+                    .max_by(|(_, a), (_, b)| a.cmp(b))
+                    .map(|(j, _)| j as u8).unwrap_or(0)
+            }).collect()
+        }
+        DType::NdArray(NdArrayDType::I64) => {
+            let vals: &[i64] = bytemuck::cast_slice(data);
+            (0..n_envs).map(|i| {
+                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
+                    .max_by(|(_, a), (_, b)| a.cmp(b))
+                    .map(|(j, _)| j as u8).unwrap_or(0)
+            }).collect()
+        }
+        // Default: treat as f32 (covers F32, F16 fallback, etc.)
+        _ => {
+            let vals: &[f32] = bytemuck::cast_slice(data);
+            (0..n_envs).map(|i| {
+                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(j, _)| j as u8).unwrap_or(0)
+            }).collect()
+        }
+    }
+}
+
+/// Decode `count` continuous action values from raw output bytes to f32.
+fn decode_continuous_f32(
+    data: &[u8],
+    dtype: &relayrl_types::data::tensor::DType,
+    count: usize,
+) -> Vec<f32> {
+    use relayrl_types::data::tensor::{DType, NdArrayDType};
+    match dtype {
+        DType::NdArray(NdArrayDType::F64) => {
+            let vals: &[f64] = bytemuck::cast_slice(data);
+            vals[..count].iter().map(|&x| x as f32).collect()
+        }
+        DType::NdArray(NdArrayDType::I32) => {
+            let vals: &[i32] = bytemuck::cast_slice(data);
+            vals[..count].iter().map(|&x| x as f32).collect()
+        }
+        DType::NdArray(NdArrayDType::I64) => {
+            let vals: &[i64] = bytemuck::cast_slice(data);
+            vals[..count].iter().map(|&x| x as f32).collect()
+        }
+        _ => bytemuck::cast_slice::<u8, f32>(data)[..count].to_vec(),
+    }
+}
+
 /// Shared handle to a hot-reloadable model.
 ///
 /// The outer `Arc<ArcSwapOption<...>>` enables two ownership modes:
@@ -401,15 +517,20 @@ impl<
     }
 
     /// Fast-path inference: takes a flat `[n_envs × obs_dim]` f32 slice, runs one
-    /// batched ONNX forward pass, and returns per-env argmax-decoded actions.
-    /// Bypasses all UUID, HashMap, AnyBurnTensor, and trajectory machinery.
+    /// batched forward pass, and returns decoded actions.
+    ///
+    /// `obs_dtype` controls how the obs bytes are tagged for the model (the f32 values
+    /// are widened/cast to the target dtype before passing to ONNX).  `discrete`
+    /// selects argmax-to-u8 decoding vs. raw f32 pass-through for continuous spaces.
     pub(crate) async fn infer_flat(
         &self,
         obs_flat: &[f32],
         n_envs: usize,
         obs_dim: usize,
         act_dim: usize,
-    ) -> Result<Vec<u8>, ActorError> {
+        obs_dtype: &relayrl_env_trait::EnvNdArrayDType,
+        discrete: bool,
+    ) -> Result<FlatActions, ActorError> {
         use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
 
         let guard = self.reloadable_model.load();
@@ -418,29 +539,26 @@ impl<
         })?;
         let module = reloadable.current_module();
 
+        // Cast f32 obs to the dtype the model expects.
+        let (input_bytes, input_dtype) = cast_obs_to_dtype(obs_flat, obs_dtype);
         let input = TensorData::new(
             vec![n_envs, obs_dim],
-            DType::NdArray(NdArrayDType::F32),
-            bytemuck::cast_slice::<f32, u8>(obs_flat).to_vec(),
+            input_dtype,
+            input_bytes,
             SupportedTensorBackend::NdArray,
         );
         let output = module.infer_flat_batch(input)
             .unwrap_or_else(|_| module.zeros_flat_batch(n_envs));
 
-        let floats: &[f32] = bytemuck::cast_slice(&output.data);
-        Ok((0..n_envs)
-            .map(|i| {
-                floats[i * act_dim..(i + 1) * act_dim]
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| {
-                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(j, _)| j as u8)
-                    .unwrap_or(0)
-            })
-            .collect())
+        if discrete {
+            // Argmax over act_dim outputs; works with any numeric output dtype.
+            let actions = decode_argmax(&output.data, &output.dtype, n_envs, act_dim);
+            Ok(FlatActions::Discrete(actions))
+        } else {
+            // Continuous: cast output to f32 values and return as-is.
+            let values = decode_continuous_f32(&output.data, &output.dtype, n_envs * act_dim);
+            Ok(FlatActions::Continuous(values))
+        }
     }
 
     pub(crate) async fn flag_last_action(
