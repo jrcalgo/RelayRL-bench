@@ -345,11 +345,16 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
         Some(self.inner.lock().unwrap().env.get_stacked_obs())
     }
 
-    fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>)> {
+    fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
         let mut inner = self.inner.lock().unwrap();
         let step_results = inner.env.step_all(actions);
         let new_obs = inner.env.get_stacked_obs();
-        let rewards: Vec<f32> = step_results.into_iter().map(|(r, _)| r).collect();
-        Some((new_obs, rewards))
+        let mut rewards = Vec::with_capacity(step_results.len());
+        let mut dones = Vec::with_capacity(step_results.len());
+        for (r, d) in step_results {
+            rewards.push(r);
+            dones.push(d);
+        }
+        Some((new_obs, rewards, dones))
     }
 }

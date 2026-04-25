@@ -280,7 +280,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn step_flat_actions(
         &mut self,
         actions: &[u8],
-    ) -> Option<(Vec<f32>, Vec<f32>)> {
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> {
         self.env.as_mut().and_then(|e| e.step_flat_actions(actions))
+    }
+
+    pub(crate) fn flat_env_ids(&self) -> Option<Vec<EnvironmentUuid>> {
+        self.env.as_ref().and_then(|e| e.flat_env_ids())
     }
 }

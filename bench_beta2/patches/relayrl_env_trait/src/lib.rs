@@ -180,6 +180,13 @@ pub mod traits {
     >: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Send + Sync
     {
         fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>;
+
+        // ── Flat-buffer fast path (delegates to ScalarEnvironment opt-in methods) ─
+        fn dyn_flat_obs(&self) -> Option<Vec<f32>> { self.flat_obs_f32() }
+        fn dyn_step_discrete(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> {
+            self.step_discrete_f32(action)
+        }
+        fn dyn_act_dim(&self) -> Option<usize> { self.act_dim_hint() }
     }
     impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput, T>
         DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> for T
@@ -228,6 +235,15 @@ pub mod traits {
             action: Tensor<B, D_OUT, KindOut>,
         ) -> Result<ScalarEnvStep<B, D_IN, KindIn>, EnvironmentError>;
         fn reset(&self) -> Result<ScalarEnvReset<B, D_IN, KindIn>, EnvironmentError>;
+
+        // ── Flat-buffer fast path (opt-in) ───────────────────────────────────────
+        /// Returns the current observation as a flat `f32` Vec, or `None`.
+        fn flat_obs_f32(&self) -> Option<Vec<f32>> { None }
+        /// Steps with a discrete integer action; returns `(new_obs_flat, reward, done)`.
+        /// The implementation is responsible for inline auto-reset when `done` is true.
+        fn step_discrete_f32(&self, action: u8) -> Option<(Vec<f32>, f32, bool)> { None }
+        /// Number of discrete actions, or `None` if not applicable.
+        fn act_dim_hint(&self) -> Option<usize> { None }
     }
 
     pub trait VectorEnvironment<
@@ -255,8 +271,8 @@ pub mod traits {
         /// Returns current obs as a flat `[n_envs × obs_dim]` f32 Vec, or None.
         fn flat_obs(&self) -> Option<Vec<f32>> { None }
         /// Steps all sub-envs with decoded integer actions.
-        /// Returns `(new_obs_flat, rewards)` or None if unsupported.
-        fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>)> { None }
+        /// Returns `(new_obs_flat, rewards, dones)` or None if unsupported.
+        fn step_raw_actions(&self, actions: &[u8]) -> Option<(Vec<f32>, Vec<f32>, Vec<bool>)> { None }
     }
 
     /// Interface for environments where a model can be trained or evaluated.

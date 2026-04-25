@@ -1003,84 +1003,48 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
         env_interface.ensure_ready()?;
 
-        // ── Detect flat-buffer fast path once ────────────────────────────────────
-        let flat_dims = env_interface.n_envs_dims();
+        // ── Flat-buffer fast path (only supported path) ──────────────────────────
+        let (n_envs, obs_dim, act_dim) = env_interface.n_envs_dims().ok_or_else(|| {
+            StateManagerError::StepEnvError(
+                "[StateManager] Environment does not support the flat-buffer fast path".to_string(),
+            )
+        })?;
 
-        if let Some((n_envs, obs_dim, act_dim)) = flat_dims {
-            // ── FAST PATH: bypass UUID/HashMap machinery ─────────────────────────
-            for _ in 0..step_count {
-                let obs_flat = env_interface.flat_obs_clone()
-                    .ok_or_else(|| StateManagerError::GetEnvInfoError(
-                        "[StateManager] flat_obs_clone returned None".to_string(),
-                    ))?;
+        let flat_ids = env_interface.flat_env_ids().ok_or_else(|| {
+            StateManagerError::StepEnvError(
+                "[StateManager] flat_env_ids returned None".to_string(),
+            )
+        })?;
+        let env_labels: Vec<String> = (0..n_envs).map(|i| format!("env-{}", i + 1)).collect();
+        let mut step_rewards = vec![0.0f32; n_envs];
 
-                let actions = runtime
-                    .infer_flat(&obs_flat, n_envs, obs_dim, act_dim)
-                    .await
-                    .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
+        for _ in 0..step_count {
+            let obs_flat = env_interface.flat_obs_clone()
+                .ok_or_else(|| StateManagerError::GetEnvInfoError(
+                    "[StateManager] flat_obs_clone returned None".to_string(),
+                ))?;
 
-                env_interface.step_flat_actions(&actions)
-                    .ok_or_else(|| StateManagerError::GetEnvInfoError(
-                        "[StateManager] step_flat_actions returned None".to_string(),
-                    ))?;
-            }
-        } else {
-            // ── SLOW PATH: existing UUID/HashMap loop ────────────────────────────
-            let mut rewards: HashMap<EnvironmentUuid, f32> = HashMap::new();
-            let mut env_labels: HashMap<EnvironmentUuid, String> = HashMap::new();
+            let actions = runtime
+                .infer_flat(&obs_flat, n_envs, obs_dim, act_dim)
+                .await
+                .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
 
-            for (env_id, _) in env_interface.current_observations()? {
-                rewards.entry(env_id).or_insert(0.0);
-            }
-            let mut known_env_ids: Vec<_> = rewards.keys().copied().collect();
-            known_env_ids
-                .sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-            for (index, env_id) in known_env_ids.into_iter().enumerate() {
-                env_labels.insert(env_id, format!("env-{}", index + 1));
-            }
+            let (_, rewards, dones) = env_interface.step_flat_actions(&actions)
+                .ok_or_else(|| StateManagerError::GetEnvInfoError(
+                    "[StateManager] step_flat_actions returned None".to_string(),
+                ))?;
 
-            for _ in 0..step_count {
-                let mut observations = env_interface.current_observations()?;
-                observations.sort_unstable_by(|(left, _), (right, _)| {
-                    left.as_bytes().cmp(right.as_bytes())
-                });
-                let batch: Vec<_> = observations
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (env_id, observation))| {
-                        let reward = *rewards.get(&env_id).unwrap_or(&0.0);
-                        let env_label = env_labels
-                            .entry(env_id)
-                            .or_insert_with(|| format!("env-{}", index + 1))
-                            .clone();
-                        (env_id, env_label, observation, reward)
-                    })
-                    .collect();
-
-                let batched_actions =
-                    Self::request_actions_direct(&runtime, batch, &device).await?;
-                let actions: Vec<_> = batched_actions
-                    .into_iter()
-                    .map(|(env_id, _, action)| (env_id, action))
-                    .collect();
-
-                let steps = env_interface.step_once(&actions)?;
-                for step in steps {
-                    rewards.insert(step.env_id, step.reward);
-                    if step.terminated || step.truncated {
-                        let env_label = env_labels
-                            .get(&step.env_id)
-                            .cloned()
-                            .unwrap_or_else(|| step.env_id.to_string());
-                        Self::flag_last_action_direct(
-                            &runtime,
-                            step.reward,
-                            Some(step.env_id),
-                            Some(env_label),
-                        )
-                        .await?;
-                        rewards.insert(step.env_id, 0.0);
-                    }
+            for i in 0..n_envs {
+                step_rewards[i] = rewards[i];
+                if dones[i] {
+                    Self::flag_last_action_direct(
+                        &runtime,
+                        step_rewards[i],
+                        Some(flat_ids[i]),
+                        Some(env_labels[i].clone()),
+                    )
+                    .await?;
+                    step_rewards[i] = 0.0;
                 }
             }
         }
