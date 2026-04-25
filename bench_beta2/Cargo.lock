@@ -4040,6 +4040,7 @@ name = "relayrl_env_trait"
 version = "1.1.0"
 dependencies = [
  "burn-tensor",
+ "bytemuck",
  "thiserror 2.0.18",
  "uuid",
 ]
