@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "lunarlander-rl"]
+members = [".", "lunarlander-rl", "relayrl-pyo3"]
 
 [patch.crates-io]
 relayrl_framework = { path = "./patches/relayrl_framework" }
