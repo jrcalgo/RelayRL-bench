@@ -59,7 +59,7 @@ fn env_dtype_to_dtype(
     })
 }
 
-/// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
+/// Argmax over `[n_envs × act_dim]` output bytes; exhaustively covers all NdArray and Tch dtypes.
 fn decode_argmax(
     data: &[u8],
     dtype: &relayrl_types::data::tensor::DType,
@@ -67,45 +67,59 @@ fn decode_argmax(
     act_dim: usize,
 ) -> Vec<u8> {
     use relayrl_types::data::tensor::{DType, NdArrayDType};
+
+    macro_rules! argmax_float {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs).map(|i| {
+                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(j, _)| j as u8).unwrap_or(0)
+            }).collect()
+        }};
+    }
+    macro_rules! argmax_int {
+        ($T:ty) => {{
+            let vals: &[$T] = bytemuck::cast_slice(data);
+            (0..n_envs).map(|i| {
+                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
+                    .max_by(|(_, a), (_, b)| a.cmp(b))
+                    .map(|(j, _)| j as u8).unwrap_or(0)
+            }).collect()
+        }};
+    }
+
     match dtype {
-        DType::NdArray(NdArrayDType::F64) => {
-            let vals: &[f64] = bytemuck::cast_slice(data);
-            (0..n_envs).map(|i| {
-                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(j, _)| j as u8).unwrap_or(0)
-            }).collect()
-        }
-        DType::NdArray(NdArrayDType::I32) => {
-            let vals: &[i32] = bytemuck::cast_slice(data);
-            (0..n_envs).map(|i| {
-                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
-                    .max_by(|(_, a), (_, b)| a.cmp(b))
-                    .map(|(j, _)| j as u8).unwrap_or(0)
-            }).collect()
-        }
-        DType::NdArray(NdArrayDType::I64) => {
-            let vals: &[i64] = bytemuck::cast_slice(data);
-            (0..n_envs).map(|i| {
-                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
-                    .max_by(|(_, a), (_, b)| a.cmp(b))
-                    .map(|(j, _)| j as u8).unwrap_or(0)
-            }).collect()
-        }
-        // Default: treat as f32 (covers F32, F16 fallback, etc.)
-        _ => {
-            let vals: &[f32] = bytemuck::cast_slice(data);
-            (0..n_envs).map(|i| {
-                vals[i * act_dim..(i + 1) * act_dim].iter().copied().enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(j, _)| j as u8).unwrap_or(0)
-            }).collect()
+        DType::NdArray(NdArrayDType::F16)  => argmax_float!(half::f16),
+        DType::NdArray(NdArrayDType::F32)  => argmax_float!(f32),
+        DType::NdArray(NdArrayDType::F64)  => argmax_float!(f64),
+        DType::NdArray(NdArrayDType::I8)   => argmax_int!(i8),
+        DType::NdArray(NdArrayDType::I16)  => argmax_int!(i16),
+        DType::NdArray(NdArrayDType::I32)  => argmax_int!(i32),
+        DType::NdArray(NdArrayDType::I64)  => argmax_int!(i64),
+        DType::NdArray(NdArrayDType::Bool) => argmax_int!(u8),
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tc) => {
+            use relayrl_types::data::tensor::TchDType;
+            match tc {
+                TchDType::F16  => argmax_float!(half::f16),
+                TchDType::Bf16 => argmax_float!(half::bf16),
+                TchDType::F32  => argmax_float!(f32),
+                TchDType::F64  => argmax_float!(f64),
+                TchDType::I8   => argmax_int!(i8),
+                TchDType::I16  => argmax_int!(i16),
+                TchDType::I32  => argmax_int!(i32),
+                TchDType::I64  => argmax_int!(i64),
+                TchDType::U8   => argmax_int!(u8),
+                TchDType::Bool => argmax_int!(u8),
+            }
         }
     }
 }
 
-/// Re-encode `count` continuous action values from the ONNX output dtype to the env's action dtype.
-/// Returns raw bytes ready to pass directly to `step_continuous_bytes` / `step_flat_actions_cont_bytes`.
+/// Re-encode `count` continuous action values from the model output dtype to the env's action dtype.
+/// Uses f64 as a lossless intermediate. Exhaustively covers all NdArray and Tch source dtypes
+/// and all EnvNdArrayDType target dtypes.
 fn decode_continuous_bytes(
     data: &[u8],
     src_dtype: &relayrl_types::data::tensor::DType,
@@ -115,22 +129,60 @@ fn decode_continuous_bytes(
     use relayrl_env_trait::EnvNdArrayDType;
     use relayrl_types::data::tensor::{DType, NdArrayDType};
 
-    // First, decode the ONNX output as f64 (lossless intermediate for all numeric types).
     let as_f64: Vec<f64> = match src_dtype {
+        DType::NdArray(NdArrayDType::F16) => {
+            bytemuck::cast_slice::<u8, half::f16>(data)[..count]
+                .iter().map(|&x| f64::from(x)).collect()
+        }
+        DType::NdArray(NdArrayDType::F32) => {
+            bytemuck::cast_slice::<u8, f32>(data)[..count]
+                .iter().map(|&x| x as f64).collect()
+        }
         DType::NdArray(NdArrayDType::F64) => {
             bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec()
         }
+        DType::NdArray(NdArrayDType::I8) => {
+            bytemuck::cast_slice::<u8, i8>(data)[..count]
+                .iter().map(|&x| x as f64).collect()
+        }
+        DType::NdArray(NdArrayDType::I16) => {
+            bytemuck::cast_slice::<u8, i16>(data)[..count]
+                .iter().map(|&x| x as f64).collect()
+        }
         DType::NdArray(NdArrayDType::I32) => {
-            bytemuck::cast_slice::<u8, i32>(data)[..count].iter().map(|&x| x as f64).collect()
+            bytemuck::cast_slice::<u8, i32>(data)[..count]
+                .iter().map(|&x| x as f64).collect()
         }
         DType::NdArray(NdArrayDType::I64) => {
-            bytemuck::cast_slice::<u8, i64>(data)[..count].iter().map(|&x| x as f64).collect()
+            bytemuck::cast_slice::<u8, i64>(data)[..count]
+                .iter().map(|&x| x as f64).collect()
         }
-        _ => bytemuck::cast_slice::<u8, f32>(data)[..count].iter().map(|&x| x as f64).collect(),
+        DType::NdArray(NdArrayDType::Bool) => {
+            data[..count].iter().map(|&x| if x != 0 { 1.0f64 } else { 0.0 }).collect()
+        }
+        #[cfg(feature = "tch-backend")]
+        DType::Tch(tc) => {
+            use relayrl_types::data::tensor::TchDType;
+            match tc {
+                TchDType::F16  => bytemuck::cast_slice::<u8, half::f16>(data)[..count].iter().map(|&x| f64::from(x)).collect(),
+                TchDType::Bf16 => bytemuck::cast_slice::<u8, half::bf16>(data)[..count].iter().map(|&x| f64::from(x)).collect(),
+                TchDType::F32  => bytemuck::cast_slice::<u8, f32>(data)[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::F64  => bytemuck::cast_slice::<u8, f64>(data)[..count].to_vec(),
+                TchDType::I8   => bytemuck::cast_slice::<u8, i8>(data)[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::I16  => bytemuck::cast_slice::<u8, i16>(data)[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::I32  => bytemuck::cast_slice::<u8, i32>(data)[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::I64  => bytemuck::cast_slice::<u8, i64>(data)[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::U8   => data[..count].iter().map(|&x| x as f64).collect(),
+                TchDType::Bool => data[..count].iter().map(|&x| if x != 0 { 1.0f64 } else { 0.0 }).collect(),
+            }
+        }
     };
 
-    // Then re-encode into the target action dtype.
     match tgt_dtype {
+        EnvNdArrayDType::F16 => {
+            let v: Vec<half::f16> = as_f64.iter().map(|&x| half::f16::from_f64(x)).collect();
+            bytemuck::cast_slice::<half::f16, u8>(&v).to_vec()
+        }
         EnvNdArrayDType::F32 => {
             let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
             bytemuck::cast_slice::<f32, u8>(&v).to_vec()
@@ -152,10 +204,8 @@ fn decode_continuous_bytes(
             let v: Vec<i64> = as_f64.iter().map(|&x| x as i64).collect();
             bytemuck::cast_slice::<i64, u8>(&v).to_vec()
         }
-        // F16 / Bool: fall back to f32 bytes.
-        _ => {
-            let v: Vec<f32> = as_f64.iter().map(|&x| x as f32).collect();
-            bytemuck::cast_slice::<f32, u8>(&v).to_vec()
+        EnvNdArrayDType::Bool => {
+            as_f64.iter().map(|&x| if x != 0.0 { 1u8 } else { 0u8 }).collect()
         }
     }
 }
