@@ -1,10 +1,10 @@
-//! bench_gridworld_concurrent — 32 actors, each owning one GridWorld env,
+//! bench_gridworld_concurrent — N actors, each owning one GridWorld env,
 //! all running in independent tokio tasks concurrently.
 //!
 //! Tests whether per-actor throughput remains stable as actor count grows.
 //! Each tokio task issues request_action for its own actor_id in a tight loop,
-//! independent of the other 31 tasks.  No block_on or sequential joins in the
-//! hot path; all 32 tasks run until they finish TARGET_STEPS_PER_ACTOR, then
+//! independent of every other task.  No block_on or sequential joins in the
+//! hot path; all tasks run until they finish --steps-per-actor, then
 //! futures::future::join_all awaits them asynchronously.
 //!
 //! Build:
@@ -12,6 +12,7 @@
 //!
 //! Run:
 //!   ORT_DYLIB_PATH=... ./target/release/bench_gridworld_concurrent
+//!   ORT_DYLIB_PATH=... ./target/release/bench_gridworld_concurrent --actor-count 128
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +20,8 @@ use std::time::Instant;
 
 use burn_ndarray::NdArray;
 use burn_tensor::{Float, Tensor, TensorData};
+
+use clap::Parser;
 
 use relayrl_framework::prelude::network::{
     ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, ModelMode, RelayRLAgentActors,
@@ -30,13 +33,26 @@ use relayrl_algorithms::algorithms::onnx_builder::build_onnx_mlp_bytes;
 
 use gridworld_rl::env::vec::SyncVectorEnv;
 
+// ─────────────────────────── CLI ────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(name = "bench_gridworld_concurrent",
+          about = "RelayRL GridWorld — N concurrent actors, 1 env each")]
+struct Args {
+    /// Number of concurrent actors (each gets its own tokio task + env)
+    #[arg(long, default_value_t = 32)]
+    actor_count: usize,
+
+    /// Steps per actor (total env steps = actor_count × steps_per_actor)
+    #[arg(long, default_value_t = 100_000u64)]
+    steps_per_actor: u64,
+}
+
 // ─────────────────────────── Constants ──────────────────────────────────────
 
-const ACTOR_COUNT:            usize = 32;
-const TARGET_STEPS_PER_ACTOR: u64   = 100_000;
-const OBS_DIM:                usize = 100;  // 10×10 grid
-const ACT_DIM:                usize = 4;
-const GRID_SIZE:              usize = 10;
+const OBS_DIM:  usize = 100;  // 10×10 grid
+const ACT_DIM:  usize = 4;
+const GRID_SIZE: usize = 10;
 
 // ─────────────────────────── Bootstrap model ────────────────────────────────
 
@@ -83,39 +99,42 @@ fn decode_action(relay: &relayrl_types::data::action::RelayRLAction) -> u8 {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     type B = NdArray;
 
+    let args        = Args::parse();
+    let actor_count = args.actor_count;
+    let steps_per   = args.steps_per_actor;
+    let total_steps = actor_count as u64 * steps_per;
     let num_cores   = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let total_steps = ACTOR_COUNT as u64 * TARGET_STEPS_PER_ACTOR;
 
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL GridWorld — concurrent 32-actor benchmark");
+    println!("  RelayRL GridWorld — concurrent {}-actor benchmark", actor_count);
     println!("  {} actors × {} steps/actor = {} total env steps",
-             ACTOR_COUNT, TARGET_STEPS_PER_ACTOR, total_steps);
+             actor_count, steps_per, total_steps);
     println!("  {} independent tokio tasks, 1 SyncVectorEnv(1) per task",
-             ACTOR_COUNT);
+             actor_count);
     println!("  {} logical cores", num_cores);
     println!("═══════════════════════════════════════════════════════════════════\n");
 
-    // ── Agent with 32 actors ─────────────────────────────────────────────────
+    // ── Agent ────────────────────────────────────────────────────────────────
     let model   = bootstrap_model::<B>()?;
     let cfgpath = std::path::PathBuf::from("./config.json");
     let mut bld = AgentBuilder::<B, 2, 2, Float, Float>::builder()
-        .actor_count(ACTOR_COUNT as u32)
+        .actor_count(actor_count as u32)
         .default_device(DeviceType::Cpu)
         .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
         .actor_training_data_mode(ActorTrainingDataMode::Disabled)
         .default_model(model)
-        .router_scale(ACTOR_COUNT as u32);
+        .router_scale(actor_count as u32);
     if cfgpath.exists() { bld = bld.config_path(cfgpath); }
 
     let (mut agent, params) = bld.build().await?;
     agent.start(params).await?;
     let actor_ids = agent.get_actor_ids()?;
-    assert_eq!(actor_ids.len(), ACTOR_COUNT, "expected {} actor IDs", ACTOR_COUNT);
+    assert_eq!(actor_ids.len(), actor_count, "expected {} actor IDs", actor_count);
 
     let agent = Arc::new(agent);
 
     // ── Warm-up: 200 steps per actor, sequential ─────────────────────────────
-    println!("Warming up (200 steps × {} actors)…", ACTOR_COUNT);
+    println!("Warming up (200 steps × {} actors)…", actor_count);
     {
         let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
         for &actor_id in &actor_ids {
@@ -129,16 +148,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!("Warm-up done. Spawning {} concurrent tasks…\n", ACTOR_COUNT);
+    println!("Warm-up done. Spawning {} concurrent tasks…\n", actor_count);
 
     // ── Shared progress counter ───────────────────────────────────────────────
     let total_done = Arc::new(AtomicU64::new(0));
 
-    // ── Spawn 32 independent tokio tasks ─────────────────────────────────────
+    // ── Spawn N independent tokio tasks ──────────────────────────────────────
     let t_start = Instant::now();
 
-    let mut handles = Vec::with_capacity(ACTOR_COUNT);
-    for i in 0..ACTOR_COUNT {
+    let mut handles = Vec::with_capacity(actor_count);
+    for i in 0..actor_count {
         let agent_arc = agent.clone();
         let actor_id  = actor_ids[i];
         let counter   = total_done.clone();
@@ -148,11 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut env = SyncVectorEnv::<B>::new(1, GRID_SIZE, device.clone())
                 .expect("SyncVectorEnv init");
 
-            let mut steps_done:   u64 = 0;
+            let mut steps_done:    u64 = 0;
             let mut call_total_ns: u64 = 0;
             let mut cur_reward:    f32 = 0.0;
 
-            while steps_done < TARGET_STEPS_PER_ACTOR {
+            while steps_done < steps_per {
                 let obs   = env.get_stacked_obs();
                 let obs_t = Tensor::<B, 2, Float>::from_data(
                     TensorData::new(obs, [1, OBS_DIM]), &device);
@@ -179,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                steps_done                        += 1;
+                steps_done                       += 1;
                 counter.fetch_add(1, Ordering::Relaxed);
             }
 
@@ -209,9 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = t_start.elapsed().as_secs_f64();
 
     // ── Aggregate stats ───────────────────────────────────────────────────────
-    let mut all_steps:      u64 = 0;
-    let mut total_call_ns:  u64 = 0;
-    let mut task_errors:    u32 = 0;
+    let mut all_steps:     u64 = 0;
+    let mut total_call_ns: u64 = 0;
+    let mut task_errors:   u32 = 0;
     for r in &results {
         match r {
             Ok((steps, call_ns)) => { all_steps += steps; total_call_ns += call_ns; }
@@ -219,21 +238,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let env_sps        = all_steps as f64 / elapsed;
-    let per_actor_sps  = env_sps / ACTOR_COUNT as f64;
-    let avg_call_us    = total_call_ns as f64 / 1_000.0 / all_steps.max(1) as f64;
+    let env_sps       = all_steps as f64 / elapsed;
+    let per_actor_sps = env_sps / actor_count as f64;
+    let avg_call_us   = total_call_ns as f64 / 1_000.0 / all_steps.max(1) as f64;
 
-    // /proc snapshot for RSS + ctx switches
-    let mut rss_kb:      u64 = 0;
-    let mut ctx_total:   u64 = 0;
+    // /proc snapshot
+    let mut rss_kb:    u64 = 0;
+    let mut ctx_total: u64 = 0;
     if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
         for line in s.lines() {
             let mut it = line.splitn(2, ':');
             let k = it.next().unwrap_or("").trim();
             let v = it.next().unwrap_or("").trim();
             match k {
-                "VmRSS" => rss_kb    = v.split_whitespace().next()
-                                        .and_then(|x| x.parse().ok()).unwrap_or(0),
+                "VmRSS" => rss_kb = v.split_whitespace().next()
+                                      .and_then(|x| x.parse().ok()).unwrap_or(0),
                 "voluntary_ctxt_switches" | "nonvoluntary_ctxt_switches" =>
                     ctx_total += v.parse::<u64>().unwrap_or(0),
                 _ => {}
@@ -243,12 +262,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL GridWorld — {} concurrent actors — FINAL RESULTS", ACTOR_COUNT);
+    println!("  RelayRL GridWorld — {} concurrent actors — FINAL RESULTS", actor_count);
     println!("═══════════════════════════════════════════════════════════════════\n");
 
     println!("─── Throughput ──────────────────────────────────────────────────────");
-    println!("  actor count                  : {:>10}", ACTOR_COUNT);
-    println!("  steps per actor              : {:>10}", TARGET_STEPS_PER_ACTOR);
+    println!("  actor count                  : {:>10}", actor_count);
+    println!("  steps per actor              : {:>10}", steps_per);
     println!("  total env steps              : {:>10}", all_steps);
     println!("  wall time                    : {:>10.2}s", elapsed);
     println!("  env steps/sec (total)        : {:>10.0}", env_sps);
@@ -269,21 +288,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  logical cores                : {:>10}", num_cores);
     println!();
 
-    println!("─── vs 1-actor baseline ─────────────────────────────────────────────");
-    const BASELINE_1A_SPS: f64 = 305_166.0;
-    println!("  1-actor baseline (sequential): {:>10.0}  steps/sec", BASELINE_1A_SPS);
+    println!("─── vs baselines ────────────────────────────────────────────────────");
+    const BASELINE_1A_SPS:  f64 = 305_166.0;  // bench_gridworld --actor-count 1
+    const BASELINE_32A_SPS: f64 = 170_371.0;  // bench_gridworld_concurrent --actor-count 32
+    println!("  1-actor sequential           : {:>10.0}  steps/sec", BASELINE_1A_SPS);
+    println!("  32-actor concurrent (prior)  : {:>10.0}  steps/sec  (total)",
+             BASELINE_32A_SPS);
     println!("  this run (per-actor)         : {:>10.0}  steps/sec", per_actor_sps);
     println!("  this run (total)             : {:>10.0}  steps/sec", env_sps);
     println!("  per-actor throughput retained: {:>10.2}%",
              per_actor_sps / BASELINE_1A_SPS * 100.0);
     println!("  aggregate speedup vs 1-actor : {:>10.2}×",
              env_sps / BASELINE_1A_SPS);
-    println!("  ideal linear speedup         : {:>10.2}×  ({}×)", ACTOR_COUNT as f64, ACTOR_COUNT);
+    println!("  ideal linear speedup         : {:>10.2}×  ({}×)",
+             actor_count as f64, actor_count);
     println!("  scaling efficiency           : {:>10.2}%",
-             env_sps / BASELINE_1A_SPS / ACTOR_COUNT as f64 * 100.0);
+             env_sps / BASELINE_1A_SPS / actor_count as f64 * 100.0);
     println!("═══════════════════════════════════════════════════════════════════");
 
-    // Shutdown — Arc has no more task-held clones at this point
     drop(results);
     let mut agent_owned = Arc::try_unwrap(agent)
         .expect("Arc<agent> still borrowed after all tasks completed");
