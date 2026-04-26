@@ -4,9 +4,11 @@ import time
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
 
-NUM_ENVS   = 32
-NUM_ITERS  = 50
-ENV_ID     = "LunarLander-v3"
+NUM_ENVS              = 32
+NUM_ENV_RUNNERS       = 4   # one Ray actor per CPU core
+ENVS_PER_RUNNER       = NUM_ENVS // NUM_ENV_RUNNERS  # 8 envs per runner
+NUM_ITERS             = 50
+ENV_ID                = "LunarLander-v3"
 
 ray.init(ignore_reinit_error=True)
 
@@ -14,8 +16,8 @@ config = (
     PPOConfig()
     .environment(ENV_ID)
     .env_runners(
-        num_env_runners=NUM_ENVS,
-        num_envs_per_env_runner=1,
+        num_env_runners=NUM_ENV_RUNNERS,
+        num_envs_per_env_runner=ENVS_PER_RUNNER,
     )
     .training(
         train_batch_size=4096,
@@ -30,6 +32,7 @@ algo = config.build()
 
 print("═" * 67)
 print(f"  RLlib PPO — {ENV_ID} — {NUM_ENVS} parallel envs")
+print(f"  {NUM_ENV_RUNNERS} env runners × {ENVS_PER_RUNNER} envs each")
 print(f"  {NUM_ITERS} training iterations")
 print("═" * 67)
 print()
@@ -59,7 +62,7 @@ print("═" * 67)
 print("  RLlib PPO — FINAL RESULTS")
 print("═" * 67)
 print(f"  env                : {ENV_ID}")
-print(f"  parallel envs      : {NUM_ENVS}")
+print(f"  parallel envs      : {NUM_ENVS}  ({NUM_ENV_RUNNERS} runners × {ENVS_PER_RUNNER})")
 print(f"  iterations         : {NUM_ITERS}")
 print(f"  total wall time    : {wall:.2f} s")
 print(f"  avg time / iter    : {wall / NUM_ITERS:.2f} s")
