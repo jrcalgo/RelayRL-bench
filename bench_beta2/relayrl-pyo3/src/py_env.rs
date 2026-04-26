@@ -294,6 +294,10 @@ pub struct PyVectorEnv {
     act_discrete: bool,
     uuids:        Mutex<Vec<EnvironmentUuid>>,
     uuid_to_idx:  Mutex<HashMap<EnvironmentUuid, usize>>,
+    /// Cached flat obs bytes `[n_envs × obs_dim × 4]`; updated on every
+    /// `reset()` and `step_bytes()` so that `flat_observation_bytes()` (called
+    /// by `BatchVecEnv::flat_obs_clone`) always has something to return.
+    obs_cache:    Mutex<Vec<u8>>,
 }
 
 unsafe impl Send for PyVectorEnv {}
@@ -313,8 +317,9 @@ impl PyVectorEnv {
             obs_dim,
             act_dim,
             act_discrete,
-            uuids: Mutex::new(Vec::new()),
+            uuids:     Mutex::new(Vec::new()),
             uuid_to_idx: Mutex::new(HashMap::new()),
+            obs_cache: Mutex::new(Vec::new()),
         }
     }
 
@@ -356,7 +361,8 @@ impl relayrl_env_trait::Environment for PyVectorEnv {
     }
 
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
-        None
+        let c = self.obs_cache.lock().unwrap();
+        if c.is_empty() { None } else { Some(c.clone()) }
     }
 
     fn action_is_discrete(&self) -> bool {
@@ -409,6 +415,9 @@ impl VectorEnvironment for PyVectorEnv {
                 ))
             })?;
 
+            // Cache full flat obs so flat_observation_bytes() / flat_obs_clone() works.
+            *self.obs_cache.lock().unwrap() = flat.clone();
+
             let stride = self.obs_dim * 4;
             let idx_map = self.uuid_to_idx.lock().unwrap();
             let resets = env_ids
@@ -447,6 +456,9 @@ impl VectorEnvironment for PyVectorEnv {
 
             let obs_obj  = tup.get_item(0).ok()?;
             let flat_obs = self.extract_flat_obs(py, &obs_obj)?;
+
+            // Keep obs cache current so flat_observation_bytes() is always valid.
+            *self.obs_cache.lock().unwrap() = flat_obs.clone();
 
             // Rewards: [n_envs] float32
             let rew_obj = tup.get_item(1).ok()?;
