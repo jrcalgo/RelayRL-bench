@@ -138,167 +138,79 @@ pub mod traits {
     pub type EnvInfo = Vec<(String, String)>;
 
     #[derive(Debug, Clone)]
-    pub struct ScalarEnvReset<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
-        pub observation: Tensor<B, D_IN, KInput>,
+    pub struct ScalarEnvReset {
+        pub observation: Vec<u8>,
         pub info: Option<EnvInfo>,
     }
 
     #[derive(Debug, Clone)]
-    pub struct ScalarEnvStep<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
-        pub observation: Tensor<B, D_IN, KInput>,
-        pub reward: f32,
-        pub terminated: bool,
-        pub truncated: bool,
-        pub info: Option<EnvInfo>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct VectorEnvReset<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
+    pub struct VectorEnvReset {
         pub env_id: EnvironmentUuid,
-        pub observation: Tensor<B, D_IN, KInput>,
+        pub observation: Vec<u8>,
         pub info: Option<EnvInfo>,
     }
 
-    #[derive(Debug, Clone)]
-    pub struct VectorEnvStep<B: Backend, const D_IN: usize, KInput: TensorKind<B>> {
-        pub env_id: EnvironmentUuid,
-        pub observation: Tensor<B, D_IN, KInput>,
-        pub reward: f32,
-        pub terminated: bool,
-        pub truncated: bool,
-        pub info: Option<EnvInfo>,
-    }
+    pub type DynVectorEnv = dyn VectorEnvironment;
 
-    pub type DynVectorEnv<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput> =
-        dyn VectorEnvironment<B, D_IN, D_OUT, KInput, KOutput>;
-    pub trait DynScalarEnvironment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-    >: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Send + Sync
-    {
-        fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>;
-
-        // ── Flat-buffer fast path (delegates to ScalarEnvironment opt-in methods) ─
-        fn dyn_flat_obs_bytes(&self) -> Option<Vec<u8>> { self.flat_obs_bytes() }
-        fn dyn_step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
+    pub trait DynScalarEnvironment: ScalarEnvironment + Send + Sync {
+        fn clone_box(&self) -> Box<dyn DynScalarEnvironment>;
+        fn dyn_flat_obs(&self) -> Option<Vec<u8>> { self.flat_observation_bytes() }
+        fn dyn_step(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
             self.step_bytes(action)
         }
-        fn dyn_act_dim(&self) -> Option<usize> { self.act_dim_hint() }
-        fn dyn_action_is_discrete(&self) -> Option<bool> { self.action_is_discrete() }
+        fn dyn_act_dim(&self) -> usize { self.action_dim() }
     }
-    impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput, T>
-        DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> for T
+
+    impl<T> DynScalarEnvironment for T
     where
-        B: Backend,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-        T: ScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput> + Clone + Send + Sync + 'static,
+        T: ScalarEnvironment + Clone + Send + Sync + 'static,
     {
-        fn clone_box(&self) -> Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>> {
+        fn clone_box(&self) -> Box<dyn DynScalarEnvironment> {
             Box::new(self.clone())
         }
     }
-    impl<B, const D_IN: usize, const D_OUT: usize, KInput, KOutput> Clone
-        for Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>
-    where
-        B: Backend,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-    {
+
+    impl Clone for Box<dyn DynScalarEnvironment> {
         fn clone(&self) -> Self {
             self.clone_box()
         }
     }
-    pub enum EnvironmentHandle<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KInput: TensorKind<B>,
-        KOutput: TensorKind<B>,
-    > {
-        Scalar(Box<dyn DynScalarEnvironment<B, D_IN, D_OUT, KInput, KOutput>>),
-        Vector(Box<DynVectorEnv<B, D_IN, D_OUT, KInput, KOutput>>),
+
+    pub enum EnvironmentHandle {
+        Scalar(Box<dyn DynScalarEnvironment>),
+        Vector(Box<DynVectorEnv>),
     }
 
-    pub trait ScalarEnvironment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KindIn: TensorKind<B>,
-        KindOut: TensorKind<B>,
-    >: Environment<B, D_IN, D_OUT, KindIn, KindOut> + Send + Sync
-    {
-        fn step(
-            &self,
-            action: Tensor<B, D_OUT, KindOut>,
-        ) -> Result<ScalarEnvStep<B, D_IN, KindIn>, EnvironmentError>;
-        fn reset(&self) -> Result<ScalarEnvReset<B, D_IN, KindIn>, EnvironmentError>;
-
-        // ── Flat-buffer fast path (opt-in) ───────────────────────────────────────
-        /// Current observation as raw bytes in the dtype declared by `observation_dtype()`.
-        fn flat_obs_bytes(&self) -> Option<Vec<u8>> { None }
-        /// Step with action bytes in the dtype declared by `action_dtype()` (discrete: one
-        /// `u8` index byte; continuous: `act_dim × sizeof(dtype)` bytes).
-        /// Returns `(new_obs_bytes, reward, done)`; inline auto-reset on `done` is expected.
-        fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> { None }
-        /// Number of action elements (discrete: number of choices; continuous: action dim).
-        fn act_dim_hint(&self) -> Option<usize> { None }
-        /// `true` if the action space is discrete (argmax → single index byte).
-        fn action_is_discrete(&self) -> Option<bool> { None }
+    pub trait ScalarEnvironment: Environment + Send + Sync {
+        fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError>;
+        fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)>;
     }
 
-    pub trait VectorEnvironment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KindIn: TensorKind<B>,
-        KindOut: TensorKind<B>,
-    >: Environment<B, D_IN, D_OUT, KindIn, KindOut> + Send + Sync
-    {
+    pub trait VectorEnvironment: Environment + Send + Sync {
         fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError>;
-        fn step(
-            &self,
-            actions: &[(EnvironmentUuid, Tensor<B, D_OUT, KindOut>)],
-        ) -> Result<Vec<VectorEnvStep<B, D_IN, KindIn>>, EnvironmentError>;
         fn reset(
             &self,
             env_ids: &[EnvironmentUuid],
-        ) -> Result<Vec<VectorEnvReset<B, D_IN, KindIn>>, EnvironmentError>;
-
-        // ── Flat-buffer fast path (opt-in) ───────────────────────────────────────
-        fn n_envs(&self) -> usize { 0 }
-        fn obs_dim(&self) -> usize { 0 }
-        fn act_dim(&self) -> usize { 0 }
-        /// Current observations as `[n_envs × obs_dim × sizeof(obs_dtype)]` raw bytes.
-        fn flat_obs(&self) -> Option<Vec<u8>> { None }
-        /// Step all sub-envs with `actions` bytes (layout mirrors `flat_obs`).
-        /// Returns `(new_obs_bytes, rewards, dones)`.
-        fn step_raw(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> { None }
-        /// `true` if the action space is discrete, `false` if continuous.
-        fn action_is_discrete(&self) -> Option<bool> { None }
+        ) -> Result<Vec<VectorEnvReset>, EnvironmentError>;
+        fn n_envs(&self) -> usize;
+        fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)>;
     }
 
     /// Interface for environments where a model can be trained or evaluated.
     ///
     /// Methods are intentionally parameterless: configuration and mutable state live on the
     /// implementing type (often with interior mutability when shared across threads).
-    pub trait Environment<
-        B: Backend,
-        const D_IN: usize,
-        const D_OUT: usize,
-        KindIn: TensorKind<B>,
-        KindOut: TensorKind<B>,
-    >: Send + Sync
-    {
+    pub trait Environment: Send + Sync {
         fn run_environment(&self) -> Result<(), EnvironmentError>;
         fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError>;
         fn observation_dtype(&self) -> EnvDType;
         fn action_dtype(&self) -> EnvDType;
+        fn observation_dim(&self) -> usize;
+        fn action_dim(&self) -> usize;
+        fn flat_observation_bytes(&self) -> Option<Vec<u8>>;
+        fn action_is_discrete(&self) -> bool;
         fn kind(&self) -> EnvironmentKind;
-        fn into_handle(self: Box<Self>) -> EnvironmentHandle<B, D_IN, D_OUT, KindIn, KindOut>;
+        fn into_handle(self: Box<Self>) -> EnvironmentHandle;
     }
 
     /// Computes a performance signal (for example return-to-go) for training feedback.
