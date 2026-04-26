@@ -34,7 +34,7 @@ const ACT_DIM:      usize = 4;
 const MAX_STEPS:    usize = 500;
 const TARGET_STEPS: usize = 50_000;
 const ENV_COUNT:    u32   = 32;
-const ACTOR_COUNT:  u32   = 8;
+const ACTOR_COUNT:  u32   = 64;
 
 // ─────────────────────────── Bootstrap model ────────────────────────────────
 
