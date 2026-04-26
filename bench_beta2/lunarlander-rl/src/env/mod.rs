@@ -674,7 +674,7 @@ where
 use burn_ndarray::NdArray;
 use relayrl_env_trait::{
     DynScalarEnvironment, EnvDType, EnvNdArrayDType, EnvironmentHandle, EnvironmentKind,
-    ScalarEnvReset, ScalarEnvStep,
+    ScalarEnvReset,
 };
 
 impl Clone for LunarLanderEnv<NdArray> {
@@ -690,7 +690,7 @@ impl Clone for LunarLanderEnv<NdArray> {
     }
 }
 
-impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float> for LunarLanderEnv<NdArray> {
+impl relayrl_env_trait::Environment for LunarLanderEnv<NdArray> {
     fn run_environment(&self) -> Result<(), EnvironmentError> {
         Ok(())
     }
@@ -707,23 +707,28 @@ impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float> for LunarLander
         EnvDType::NdArray(EnvNdArrayDType::F32)
     }
 
-    fn kind(&self) -> EnvironmentKind {
-        EnvironmentKind::Scalar
-    }
+    fn observation_dim(&self) -> usize { 8 }
 
-    fn into_handle(self: Box<Self>) -> EnvironmentHandle<NdArray, 2, 2, Float, Float> {
-        EnvironmentHandle::Scalar(self as Box<dyn DynScalarEnvironment<NdArray, 2, 2, Float, Float>>)
-    }
-}
+    fn action_dim(&self) -> usize { 4 }
 
-impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
-    for LunarLanderEnv<NdArray>
-{
-    fn flat_obs_bytes(&self) -> Option<Vec<u8>> {
+    fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
         let obs = self.state.lock().unwrap().last_obs;
         Some(bytemuck::cast_slice::<f32, u8>(&obs).to_vec())
     }
 
+    fn action_is_discrete(&self) -> bool { true }
+
+    fn kind(&self) -> EnvironmentKind {
+        EnvironmentKind::Scalar
+    }
+
+    fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+        EnvironmentHandle::Scalar(self as Box<dyn DynScalarEnvironment>)
+    }
+}
+
+impl relayrl_env_trait::ScalarEnvironment for LunarLanderEnv<NdArray>
+{
     fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
         let act = *action.first()?;
         let sc = {
@@ -750,50 +755,7 @@ impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
         Some((bytemuck::cast_slice::<f32, u8>(&obs).to_vec(), reward, done))
     }
 
-    fn act_dim_hint(&self) -> Option<usize> {
-        Some(4)
-    }
-
-    fn action_is_discrete(&self) -> Option<bool> { Some(true) }
-
-    fn step(
-        &self,
-        action: Tensor<NdArray, 2, Float>,
-    ) -> Result<ScalarEnvStep<NdArray, 2, Float>, EnvironmentError> {
-        // Decode discrete action: argmax over the 4 logits in [1, 4] tensor.
-        let data = action.to_data();
-        let floats = data
-            .as_slice::<f32>()
-            .map_err(|e| EnvironmentError::EnvironmentError(e.to_string()))?;
-        let act_u8: u8 = floats
-            .iter()
-            .copied()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u8)
-            .unwrap_or(0);
-
-        // Increment step counter, run physics.
-        let sc = {
-            let mut sc = self.step_count.lock().unwrap();
-            *sc += 1;
-            *sc
-        };
-        let (reward, obs_arr, done) = {
-            let mut state = self.state.lock().unwrap();
-            state.step_physics(act_u8);
-            let done = state.done || sc >= self.max_steps;
-            (state.last_reward, state.last_obs, done)
-        };
-
-        let obs = Tensor::<NdArray, 2, Float>::from_data(
-            TensorData::new(obs_arr.to_vec(), [1usize, 8usize]),
-            &self.device,
-        );
-        Ok(ScalarEnvStep { observation: obs, reward, terminated: done, truncated: false, info: None })
-    }
-
-    fn reset(&self) -> Result<ScalarEnvReset<NdArray, 2, Float>, EnvironmentError> {
+    fn reset(&self) -> Result<ScalarEnvReset, EnvironmentError> {
         let new_seed = {
             let mut state = self.state.lock().unwrap();
             state.rng.random::<u64>()
@@ -802,10 +764,7 @@ impl relayrl_env_trait::ScalarEnvironment<NdArray, 2, 2, Float, Float>
         *self.step_count.lock().unwrap() = 0;
 
         let obs_arr = self.state.lock().unwrap().last_obs;
-        let obs = Tensor::<NdArray, 2, Float>::from_data(
-            TensorData::new(obs_arr.to_vec(), [1usize, 8usize]),
-            &self.device,
-        );
-        Ok(ScalarEnvReset { observation: obs, info: None })
+        let observation = bytemuck::cast_slice::<f32, u8>(&obs_arr).to_vec();
+        Ok(ScalarEnvReset { observation, info: None })
     }
 }

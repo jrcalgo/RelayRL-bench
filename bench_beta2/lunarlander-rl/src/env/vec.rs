@@ -25,13 +25,12 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 use burn_ndarray::NdArray;
-use burn_tensor::{Float, Tensor, TensorData};
+use burn_tensor::backend::Backend;
 
 use relayrl_env_trait::{
-    EnvDType, EnvNdArrayDType, EnvironmentError, EnvironmentHandle, EnvironmentKind,
-    EnvironmentUuid, Uuid, VectorEnvReset, VectorEnvStep, VectorEnvironment,
+    DynVectorEnv, EnvDType, EnvNdArrayDType, EnvironmentError, EnvironmentHandle, EnvironmentKind,
+    EnvironmentUuid, Uuid, VectorEnvReset, VectorEnvironment,
 };
-use relayrl_types::prelude::tensor::burn::backend::Backend;
 
 use super::LunarLanderEnv;
 
@@ -202,9 +201,7 @@ impl SyncLunarVectorEnvFramework {
     }
 }
 
-impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float>
-    for SyncLunarVectorEnvFramework
-{
+impl relayrl_env_trait::Environment for SyncLunarVectorEnvFramework {
     fn run_environment(&self) -> Result<(), EnvironmentError> {
         Ok(())
     }
@@ -217,17 +214,22 @@ impl relayrl_env_trait::Environment<NdArray, 2, 2, Float, Float>
     fn action_dtype(&self) -> EnvDType {
         EnvDType::NdArray(EnvNdArrayDType::F32)
     }
+    fn observation_dim(&self) -> usize { OBS_DIM }
+    fn action_dim(&self) -> usize { ACT_DIM }
+    fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
+        let obs = self.inner.lock().unwrap().env.get_stacked_obs();
+        Some(bytemuck::cast_slice::<f32, u8>(&obs).to_vec())
+    }
+    fn action_is_discrete(&self) -> bool { true }
     fn kind(&self) -> EnvironmentKind {
         EnvironmentKind::Vector
     }
-    fn into_handle(
-        self: Box<Self>,
-    ) -> EnvironmentHandle<NdArray, 2, 2, Float, Float> {
-        EnvironmentHandle::Vector(self)
+    fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+        EnvironmentHandle::Vector(self as Box<DynVectorEnv>)
     }
 }
 
-impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramework {
+impl VectorEnvironment for SyncLunarVectorEnvFramework {
     /// Called once by the framework with `count = ENV_COUNT`.
     /// Generates stable UUIDs for each sub-env and stores the index mapping.
     fn init_num_envs(
@@ -241,68 +243,6 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
         Ok(uuids)
     }
 
-    /// Step all sub-envs in parallel (rayon).
-    ///
-    /// Actions are keyed by UUID; we decode each action tensor to a u8 via
-    /// argmax, then fan them out to `step_all`.  `terminated` is always
-    /// returned as `false` because `step_all` handles inline auto-reset —
-    /// suppressing the framework's double-reset path.
-    fn step(
-        &self,
-        actions: &[(EnvironmentUuid, Tensor<NdArray, 2, Float>)],
-    ) -> Result<Vec<VectorEnvStep<NdArray, 2, Float>>, EnvironmentError> {
-        let mut inner = self.inner.lock().unwrap();
-        let num_envs = inner.env.num_envs;
-        let mut decoded = vec![0u8; num_envs];
-
-        for (uuid, action_tensor) in actions {
-            let idx = match inner.uuid_to_idx.get(uuid) {
-                Some(&i) => i,
-                None => continue,
-            };
-            let data = action_tensor.to_data();
-            let floats = data
-                .as_slice::<f32>()
-                .map_err(|e| EnvironmentError::EnvironmentError(e.to_string()))?;
-            let act: u8 = floats
-                .iter()
-                .copied()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i as u8)
-                .unwrap_or(0);
-            decoded[idx] = act;
-        }
-
-        let step_results = inner.env.step_all(&decoded);
-        let stacked_obs = inner.env.get_stacked_obs();
-
-        let results = inner
-            .idx_to_uuid
-            .iter()
-            .copied()
-            .zip(step_results.iter())
-            .enumerate()
-            .map(|(i, (uuid, (reward, _done)))| {
-                let start = i * OBS_DIM;
-                let obs_tensor = Tensor::<NdArray, 2, Float>::from_data(
-                    TensorData::new(stacked_obs[start..start + OBS_DIM].to_vec(), [1, OBS_DIM]),
-                    &Default::default(),
-                );
-                VectorEnvStep {
-                    env_id: uuid,
-                    observation: obs_tensor,
-                    reward: *reward,
-                    terminated: false, // step_all inline-resets done envs
-                    truncated: false,
-                    info: None,
-                }
-            })
-            .collect();
-
-        Ok(results)
-    }
-
     /// Returns current observations for the requested env IDs (used by the
     /// framework's reset_all at startup and reset_where for done envs).
     /// Since step_all handles all resets inline, this just echoes the current
@@ -310,7 +250,7 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
     fn reset(
         &self,
         env_ids: &[EnvironmentUuid],
-    ) -> Result<Vec<VectorEnvReset<NdArray, 2, Float>>, EnvironmentError> {
+    ) -> Result<Vec<VectorEnvReset>, EnvironmentError> {
         let inner = self.inner.lock().unwrap();
         let stacked_obs = inner.env.get_stacked_obs();
         let results = env_ids
@@ -318,16 +258,12 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
             .filter_map(|uuid| {
                 let &idx = inner.uuid_to_idx.get(uuid)?;
                 let start = idx * OBS_DIM;
-                let obs_tensor = Tensor::<NdArray, 2, Float>::from_data(
-                    TensorData::new(
-                        stacked_obs[start..start + OBS_DIM].to_vec(),
-                        [1, OBS_DIM],
-                    ),
-                    &Default::default(),
-                );
+                let obs_bytes = bytemuck::cast_slice::<f32, u8>(
+                    &stacked_obs[start..start + OBS_DIM]
+                ).to_vec();
                 Some(VectorEnvReset {
                     env_id: *uuid,
-                    observation: obs_tensor,
+                    observation: obs_bytes,
                     info: None,
                 })
             })
@@ -335,19 +271,9 @@ impl VectorEnvironment<NdArray, 2, 2, Float, Float> for SyncLunarVectorEnvFramew
         Ok(results)
     }
 
-    // ── Flat-buffer fast path ────────────────────────────────────────────────────
-
     fn n_envs(&self) -> usize { self.num_envs }
-    fn obs_dim(&self) -> usize { OBS_DIM }
-    fn act_dim(&self) -> usize { ACT_DIM }
-    fn action_is_discrete(&self) -> Option<bool> { Some(true) }
 
-    fn flat_obs(&self) -> Option<Vec<u8>> {
-        let obs = self.inner.lock().unwrap().env.get_stacked_obs();
-        Some(bytemuck::cast_slice::<f32, u8>(&obs).to_vec())
-    }
-
-    fn step_raw(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+    fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
         let mut inner = self.inner.lock().unwrap();
         let step_results = inner.env.step_all(actions);
         let new_obs_f32 = inner.env.get_stacked_obs();

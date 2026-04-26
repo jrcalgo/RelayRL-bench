@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Create vectorised env (128 rayon-parallel sub-envs) ──────────────────
     let vec_env = SyncLunarVectorEnvFramework::new(ENV_COUNT as usize, MAX_STEPS)
         .map_err(|e| format!("Failed to create vector env: {e}"))?;
-    let boxed: Box<dyn relayrl_env_trait::Environment<B, 2, 2, Float, Float>> = Box::new(vec_env);
+    let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(vec_env);
 
     // set_env with count=ENV_COUNT triggers BatchVecEnv path → init_num_envs(128)
     agent.set_env(actor_id, boxed, ENV_COUNT).await?;

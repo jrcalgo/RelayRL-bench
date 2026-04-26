@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Create env and register it with the actor ─────────────────────────────
     let device: <B as burn_tensor::backend::Backend>::Device = Default::default();
     let env = LunarLanderEnv::<B>::new(MAX_STEPS, device);
-    let boxed: Box<dyn relayrl_env_trait::Environment<B, 2, 2, Float, Float>> = Box::new(env);
+    let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(env);
 
     agent.set_env(actor_id, boxed, 1).await?;
     println!("set_env OK — registered 1 LunarLander env with actor {}", actor_id);

@@ -22,7 +22,6 @@ use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
     StateManager, StateManagerError,
 };
-use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, ScalingDispatcher, TrainingDispatcher,
@@ -249,8 +248,6 @@ pub(crate) trait ClientEnvironments<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B>,
-    KindOut: TensorKind<B>,
 >
 {
     async fn run_env(&self, actor_id: ActorUuid, step_count: usize)
@@ -258,7 +255,7 @@ pub(crate) trait ClientEnvironments<
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), CoordinatorError>;
     async fn remove_env(&mut self, actor_id: ActorUuid) -> Result<(), CoordinatorError>;
@@ -1697,9 +1694,9 @@ impl<
     B: Backend + BackendMatcher<Backend = B>,
     const D_IN: usize,
     const D_OUT: usize,
-    KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
-    KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
-> ClientEnvironments<B, D_IN, D_OUT, KindIn, KindOut>
+    KindIn: TensorKind<B> + Send + Sync + 'static,
+    KindOut: TensorKind<B> + Send + Sync + 'static,
+> ClientEnvironments<B, D_IN, D_OUT>
     for ClientCoordinator<B, D_IN, D_OUT, KindIn, KindOut>
 {
     async fn run_env(
@@ -1746,7 +1743,7 @@ impl<
     async fn set_env(
         &mut self,
         actor_id: ActorUuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
     ) -> Result<(), CoordinatorError> {
         match &self.runtime_params {

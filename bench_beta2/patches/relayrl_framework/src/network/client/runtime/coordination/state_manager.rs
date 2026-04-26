@@ -13,7 +13,6 @@ use crate::network::client::runtime::coordination::lifecycle_manager::SharedTran
 use crate::network::client::runtime::coordination::scale_manager::RouterNamespace;
 use crate::network::client::runtime::data::environments::EnvironmentInterface;
 use crate::network::client::runtime::data::environments::EnvironmentInterfaceError;
-use crate::network::client::runtime::data::environments::vec_env::IntoAnyTensorKind;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::transport_sink::transport_dispatcher::{
     InferenceDispatcher, TrainingDispatcher,
@@ -31,7 +30,6 @@ use active_uuid_registry::interface::{remove_id, replace_id};
 use relayrl_env_trait::{EnvNdArrayDType, Environment, EnvironmentUuid};
 use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DeviceType, TensorData};
 use relayrl_types::model::{HotReloadableModel, ModelModule};
-use relayrl_types::prelude::tensor::burn::TensorKind;
 
 use active_uuid_registry::registry_uuid::Uuid;
 
@@ -135,7 +133,7 @@ pub(crate) struct StateManager<
     metrics: MetricsManager,
     pub(crate) global_dispatcher_tx: Sender<RoutedMessage>,
     pub(crate) shared_router_state: Arc<SharedRouterState>,
-    actor_envs: Arc<DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>>,
+    actor_envs: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
     actor_handles: DashMap<ActorUuid, Arc<JoinHandle<()>>>,
     actor_devices: DashMap<ActorUuid, DeviceType>,
     pub(crate) actor_model_handles: DashMap<ActorUuid, LocalModelHandle<B>>,
@@ -845,16 +843,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))
     }
 
-    pub(crate) fn set_env<KindIn, KindOut>(
+    pub(crate) fn set_env(
         &self,
         id: Uuid,
-        env: Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>,
+        env: Box<dyn Environment>,
         count: u32,
-    ) -> Result<(), StateManagerError>
-    where
-        KindIn: TensorKind<B> + BasicOps<B> + IntoAnyTensorKind<B, D_IN> + Send + Sync + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Sync + 'static,
-    {
+    ) -> Result<(), StateManagerError> {
         let device = self
             .actor_devices
             .get(&id)
@@ -952,7 +946,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         (
             Arc<ActorRuntime<B, D_IN, D_OUT>>,
             DeviceType,
-            Arc<DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>>,
+            Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         ),
         StateManagerError,
     > {
@@ -988,7 +982,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     pub(crate) fn run_env_step_loop(
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         device: DeviceType,
-        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface<B, D_IN, D_OUT>>>,
+        env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         actor_id: ActorUuid,
         step_count: usize,
     ) -> Result<(), StateManagerError> {

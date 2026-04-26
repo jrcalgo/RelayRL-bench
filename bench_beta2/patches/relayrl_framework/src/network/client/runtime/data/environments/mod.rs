@@ -1,15 +1,12 @@
 use crate::network::client::runtime::data::environments::vec_env::{
-    BatchVecEnv, EnvResetRecord, EnvStepRecord, IntoAnyTensorKind, ScalarVecEnv, VecEnvError,
-    VecEnvTrait,
+    BatchVecEnv, ScalarVecEnv, VecEnvError, VecEnvTrait,
 };
 
 use relayrl_env_trait::*;
-use relayrl_types::data::tensor::{AnyBurnTensor, BackendMatcher, DType, DeviceType};
-use relayrl_types::prelude::tensor::burn::{TensorKind, backend::Backend};
+use relayrl_types::data::tensor::{DType, DeviceType};
 
 pub(crate) mod vec_env;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -76,81 +73,42 @@ fn ndarray_dtype(dtype: &EnvDType) -> Option<EnvNdArrayDType> {
     }
 }
 
-pub(crate) struct EnvironmentInterface<
-    B: Backend + BackendMatcher<Backend = B>,
-    const D_IN: usize,
-    const D_OUT: usize,
-> {
+pub(crate) struct EnvironmentInterface {
     client_namespace: Arc<str>,
     device: DeviceType,
+    #[allow(dead_code)]
     auto_reset: bool,
-    env: Option<Box<dyn VecEnvTrait<B, D_IN, D_OUT>>>,
-    current_obs: HashMap<EnvironmentUuid, AnyBurnTensor<B, D_IN>>,
+    env: Option<Box<dyn VecEnvTrait>>,
     // Cached from Environment::observation_dtype / action_dtype at set_env time.
     obs_dtype: Option<EnvNdArrayDType>,
     act_dtype: Option<EnvNdArrayDType>,
 }
 
-impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: usize>
-    EnvironmentInterface<B, D_IN, D_OUT>
-{
+impl EnvironmentInterface {
     pub(crate) fn new(client_namespace: Arc<str>, device: DeviceType) -> Self {
         Self {
             client_namespace,
             device,
             auto_reset: true,
             env: None,
-            current_obs: HashMap::new(),
             obs_dtype: None,
             act_dtype: None,
         }
     }
 
-    pub(crate) fn current_observations(
-        &self,
-    ) -> Result<Vec<(EnvironmentUuid, AnyBurnTensor<B, D_IN>)>, EnvironmentInterfaceError> {
-        if self.env.is_none() {
-            return Err(EnvironmentInterfaceError::EnvironmentNotSetError(
-                "[EnvironmentInterface] Environment not set".to_string(),
-            ));
+    pub(crate) fn ensure_ready(&mut self) -> Result<(), EnvironmentInterfaceError> {
+        if self.env.is_some() {
+            // Reset all envs to ensure they are in a ready state
+            self.reset_all()?;
         }
-
-        Ok(self
-            .current_obs
-            .iter()
-            .map(|(env_id, obs)| (*env_id, obs.clone()))
-            .collect())
+        Ok(())
     }
 
-    pub(crate) fn ensure_ready(
+    pub(crate) fn set_env(
         &mut self,
-    ) -> Result<Vec<(EnvironmentUuid, AnyBurnTensor<B, D_IN>)>, EnvironmentInterfaceError> {
-        if self.current_obs.is_empty() {
-            let resets = self.reset_all()?;
-            self.current_obs = resets
-                .into_iter()
-                .map(|record| (record.env_id, record.observation))
-                .collect();
-        }
-
-        self.current_observations()
-    }
-
-    pub(crate) fn set_env<KindIn, KindOut>(
-        &mut self,
-        env: Option<Box<dyn Environment<B, D_IN, D_OUT, KindIn, KindOut>>>,
+        env: Option<Box<dyn Environment>>,
         count: usize,
-    ) -> Result<(), EnvironmentInterfaceError>
-    where
-        KindIn: TensorKind<B>
-            + burn_tensor::BasicOps<B>
-            + IntoAnyTensorKind<B, D_IN>
-            + Send
-            + Sync
-            + 'static,
-        KindOut: TensorKind<B> + burn_tensor::BasicOps<B> + Send + Sync + 'static,
-    {
-        self.current_obs.clear();
+    ) -> Result<(), EnvironmentInterfaceError> {
         self.obs_dtype = None;
         self.act_dtype = None;
         self.env = match env {
@@ -164,24 +122,24 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let action_dtype = map_env_dtype(env.action_dtype())?;
                 let boxed_env = match env.into_handle() {
                     EnvironmentHandle::Scalar(s) => {
-                        Box::new(ScalarVecEnv::<B, D_IN, D_OUT, KindIn, KindOut>::init_boxed(
+                        Box::new(ScalarVecEnv::init_boxed(
                             self.client_namespace.clone(),
                             s,
                             count,
                             self.device.clone(),
                             observation_dtype.clone(),
                             action_dtype.clone(),
-                        )?) as Box<dyn VecEnvTrait<B, D_IN, D_OUT>>
+                        )?) as Box<dyn VecEnvTrait>
                     }
                     EnvironmentHandle::Vector(v) => {
-                        Box::new(BatchVecEnv::<B, D_IN, D_OUT, KindIn, KindOut>::init_boxed(
+                        Box::new(BatchVecEnv::init_boxed(
                             self.client_namespace.clone(),
                             v,
                             count,
                             self.device.clone(),
                             observation_dtype,
                             action_dtype,
-                        )?) as Box<dyn VecEnvTrait<B, D_IN, D_OUT>>
+                        )?) as Box<dyn VecEnvTrait>
                     }
                 };
                 Some(boxed_env)
@@ -191,7 +149,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
     }
 
     pub(crate) fn remove_env(&mut self) -> Result<(), EnvironmentInterfaceError> {
-        self.current_obs.clear();
         self.obs_dtype = None;
         self.act_dtype = None;
         if let Some(env) = self.env.take() {
@@ -244,49 +201,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    pub(crate) fn reset_all(
-        &mut self,
-    ) -> Result<Vec<EnvResetRecord<B, D_IN>>, EnvironmentInterfaceError> {
+    pub(crate) fn reset_all(&mut self) -> Result<(), EnvironmentInterfaceError> {
         let env = self.env.as_mut().ok_or_else(|| {
             EnvironmentInterfaceError::EnvironmentNotSetError(
                 "[EnvironmentInterface] Environment not set".to_string(),
             )
         })?;
         env.reset_all().map_err(EnvironmentInterfaceError::from)
-    }
-
-    pub(crate) fn step_once(
-        &mut self,
-        actions: &[(EnvironmentUuid, AnyBurnTensor<B, D_OUT>)],
-    ) -> Result<Vec<EnvStepRecord<B, D_IN>>, EnvironmentInterfaceError> {
-        let env = self.env.as_mut().ok_or_else(|| {
-            EnvironmentInterfaceError::EnvironmentNotSetError(
-                "[EnvironmentInterface] Environment not set".to_string(),
-            )
-        })?;
-
-        let steps = env.step(actions)?;
-        for step in &steps {
-            self.current_obs
-                .insert(step.env_id, step.observation.clone());
-        }
-
-        if self.auto_reset {
-            let done_ids: Vec<_> = steps
-                .iter()
-                .filter(|step| step.terminated || step.truncated)
-                .map(|step| step.env_id)
-                .collect();
-
-            if !done_ids.is_empty() {
-                let resets = env.reset_where(&done_ids)?;
-                for reset in resets {
-                    self.current_obs.insert(reset.env_id, reset.observation);
-                }
-            }
-        }
-
-        Ok(steps)
     }
 
     // ── Flat-buffer fast-path forwarding ─────────────────────────────────────────
