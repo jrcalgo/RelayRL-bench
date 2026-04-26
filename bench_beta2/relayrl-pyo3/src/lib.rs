@@ -1,12 +1,15 @@
 //! `relayrl_pyo3` — Python bindings for the RelayRL beta.2 framework.
 //!
-//! ## Build (maturin)
+//! ## Build
 //!
 //! ```bash
-//! cd bench_beta2/relayrl-pyo3
-//! maturin develop --release          # installs into the active venv
-//! # or
-//! maturin build --release            # produces a wheel in target/wheels/
+//! # Python 3.11 (GIL)
+//! cd bench_beta2 && cargo build -p relayrl-pyo3 --release
+//! ln -sf librelayrl_pyo3.so target/release/relayrl_pyo3.cpython-311-x86_64-linux-gnu.so
+//!
+//! # Python 3.13t (free-threaded / no-GIL)
+//! PYO3_PYTHON=/usr/local/python3.13t/bin/python3.13t cargo build -p relayrl-pyo3 --release
+//! ln -sf librelayrl_pyo3.so target/release/relayrl_pyo3.cpython-313t-x86_64-linux-gnu.so
 //! ```
 //!
 //! ## Usage
@@ -65,7 +68,7 @@ fn build_bootstrap_model_bytes(obs_dim: usize, act_dim: usize, hidden_dim: usize
     build_onnx_mlp_bytes(&specs)
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn relayrl_pyo3(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<agent::PyRelayRLAgent>()?;
     m.add_function(wrap_pyfunction!(build_bootstrap_model_bytes, m)?)?;
