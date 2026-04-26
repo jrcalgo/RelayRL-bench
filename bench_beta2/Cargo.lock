@@ -4062,6 +4062,7 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "generic-array",
+ "half",
  "log",
  "once_cell",
  "rand 0.9.4",
