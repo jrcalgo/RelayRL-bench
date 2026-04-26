@@ -25,5 +25,6 @@ lunarlander-rl     = { path = "./lunarlander-rl" }
 burn-ndarray = "0.20.1"
 burn-tensor  = "0.20.1"
 
-tokio = { version = "1", features = ["full"] }
-clap  = { version = "4", features = ["derive"] }
+tokio   = { version = "1", features = ["full"] }
+futures = "0.3"
+clap    = { version = "4", features = ["derive"] }
