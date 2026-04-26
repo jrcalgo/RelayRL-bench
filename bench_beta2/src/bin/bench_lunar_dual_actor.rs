@@ -34,7 +34,7 @@ const ACT_DIM:      usize = 4;
 const MAX_STEPS:    usize = 500;
 const TARGET_STEPS: usize = 50_000;
 const ENV_COUNT:    u32   = 32;
-const ACTOR_COUNT:  u32   = 2;
+const ACTOR_COUNT:  u32   = 8;
 
 // ─────────────────────────── Bootstrap model ────────────────────────────────
 
@@ -97,12 +97,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut agent, params) = builder.build().await?;
     agent.start(params).await?;
     let actor_ids = agent.get_actor_ids()?;
-    assert_eq!(actor_ids.len(), 2, "expected 2 actor IDs from actor_count(2)");
-    let (actor_a, actor_b) = (actor_ids[0], actor_ids[1]);
-    println!("Actors: A={} B={}", actor_a, actor_b);
+    assert_eq!(actor_ids.len(), ACTOR_COUNT as usize,
+        "expected {} actor IDs from actor_count({})", ACTOR_COUNT, ACTOR_COUNT);
+    for (i, id) in actor_ids.iter().enumerate() {
+        println!("  actor[{}] = {}", i, id);
+    }
 
-    // ── Register 32 envs per actor ───────────────────────────────────────────
-    for &actor_id in &[actor_a, actor_b] {
+    // ── Register envs per actor ──────────────────────────────────────────────
+    for &actor_id in &actor_ids {
         let vec_env = SyncLunarVectorEnvFramework::new(ENV_COUNT as usize, MAX_STEPS)
             .map_err(|e| format!("failed to create vector env: {e}"))?;
         let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(vec_env);
@@ -110,21 +112,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("set_env OK — actor {} registered {} envs", actor_id, ENV_COUNT);
     }
 
-    // ── Warm-up: 500 iters on both actors concurrently ───────────────────────
+    // ── Warm-up: 500 iters on all actors concurrently ───────────────────────
     println!("\nWarming up (500 iters × {} envs × {} actors)…",
         ENV_COUNT, ACTOR_COUNT);
-    try_join_all(vec![
-        Box::pin(agent.run_env(actor_a, 500)),
-        Box::pin(agent.run_env(actor_b, 500)),
-    ]).await?;
+    try_join_all(actor_ids.iter().map(|&id| Box::pin(agent.run_env(id, 500)))).await?;
     println!("Warm-up done. Starting timed benchmark ({} iters)…\n", TARGET_STEPS);
 
-    // ── Timed run: both actors concurrently via join_all ─────────────────────
+    // ── Timed run: all actors concurrently via join_all ──────────────────────
     let t0 = Instant::now();
-    try_join_all(vec![
-        Box::pin(agent.run_env(actor_a, TARGET_STEPS)),
-        Box::pin(agent.run_env(actor_b, TARGET_STEPS)),
-    ]).await?;
+    try_join_all(actor_ids.iter().map(|&id| Box::pin(agent.run_env(id, TARGET_STEPS)))).await?;
     let wall = t0.elapsed().as_secs_f64();
 
     let env_transitions_sec = total_transitions as f64 / wall;
