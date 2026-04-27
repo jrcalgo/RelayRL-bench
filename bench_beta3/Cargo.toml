@@ -1,0 +1,25 @@
+[workspace]
+members = [".", "lunarlander-rl"]
+
+[patch.crates-io]
+# Disable tch/libtorch features that can't build in this environment.
+relayrl_types = { path = "./patches/relayrl_types" }
+
+[package]
+name = "bench-beta3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+relayrl_framework  = { version = "=0.5.0-beta.3", default-features = false, features = ["client"] }
+relayrl_algorithms = { version = "=0.2.0",         default-features = false, features = ["ndarray-backend"] }
+relayrl_types      = { version = "=0.7.1",         default-features = false, features = ["ndarray-backend", "onnx-model"] }
+relayrl_env_trait  = "1.2"
+lunarlander-rl     = { path = "./lunarlander-rl" }
+
+burn-ndarray = "0.20.1"
+burn-tensor  = "0.20.1"
+
+tokio   = { version = "1", features = ["full"] }
+futures = "0.3"
+clap    = { version = "4", features = ["derive"] }
