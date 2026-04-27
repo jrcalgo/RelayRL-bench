@@ -21,6 +21,7 @@ relayrl_algorithms = { version = "=0.2.0", default-features = false, features = 
 relayrl_types      = { version = "=0.7.0", default-features = false, features = ["ndarray-backend", "onnx-model"] }
 relayrl_env_trait  = "1.1"
 lunarlander-rl     = { path = "./lunarlander-rl" }
+gridworld-rl       = { path = "../crates/gridworld-rl" }
 
 burn-ndarray = "0.20.1"
 burn-tensor  = "0.20.1"
