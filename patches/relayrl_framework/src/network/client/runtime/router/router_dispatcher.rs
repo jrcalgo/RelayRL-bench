@@ -79,9 +79,13 @@ impl RouterDispatcher {
     ///
     /// This loop:
     /// 1. Receives new messages from the global channel
-    /// 2. Attempts to dispatch them immediately to the appropriate router
+    /// 2. Spawns a dedicated tokio task per message so dispatch never blocks the recv loop
     /// 3. Queues messages for unassigned actors and retries them with exponential backoff
     /// 4. Spawns a background task to retry pending messages
+    ///
+    /// Each message is handed off to `do_dispatch` inside its own tokio task, meaning
+    /// the loop returns to `recv()` immediately — N concurrent senders get N concurrent
+    /// dispatch tasks rather than queuing behind a single await.
     pub(crate) async fn spawn_loop(mut self) -> Result<(), RouterDispatcherError> {
         let mut shutdown = self.shutdown.take();
 
@@ -107,17 +111,31 @@ impl RouterDispatcher {
                 msg_opt = self.global_dispatcher_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
-                            if let Err(e) = self.dispatch_message(msg).await {
-                                // Log errors but continue processing
-                                match e {
-                                    RouterDispatcherError::ActorNotAssignedError(error_message) => {
-                                        log::error!("[RouterDispatcher] {}. Message queued for retry.", error_message);
-                                    }
-                                    _ => {
-                                        log::error!("[RouterDispatcher] Dispatch error: {}", e);
+                            // Clone Arc handles (ref-count bump only) and spawn a task so
+                            // the recv loop is never blocked waiting for a channel send.
+                            let router_channels     = Arc::clone(&self.router_channels);
+                            let shared_router_state = Arc::clone(&self.shared_router_state);
+                            let pending_messages    = Arc::clone(&self.pending_messages);
+                            #[cfg(feature = "metrics")]
+                            let metrics = self.metrics.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::do_dispatch(
+                                    msg,
+                                    router_channels,
+                                    shared_router_state,
+                                    pending_messages,
+                                    #[cfg(feature = "metrics")] metrics,
+                                ).await {
+                                    match e {
+                                        RouterDispatcherError::ActorNotAssignedError(m) => {
+                                            log::error!("[RouterDispatcher] {}. Message queued for retry.", m);
+                                        }
+                                        _ => {
+                                            log::error!("[RouterDispatcher] Dispatch error: {}", e);
+                                        }
                                     }
                                 }
-                            }
+                            });
                         }
                         None => {
                             // Channel closed, exit loop
@@ -137,6 +155,73 @@ impl RouterDispatcher {
                     retry_handle.abort();
                     break Ok(());
                 }
+            }
+        }
+    }
+
+    /// Core dispatch logic extracted so it can be called from both the spawned hot-path
+    /// task and the `dispatch_message` wrapper used by tests.
+    async fn do_dispatch(
+        msg: RoutedMessage,
+        router_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
+        shared_router_state: Arc<SharedRouterState>,
+        pending_messages: Arc<DashMap<ActorUuid, PendingMessage>>,
+        #[cfg(feature = "metrics")] metrics: MetricsManager,
+    ) -> Result<(), RouterDispatcherError> {
+        #[cfg(feature = "metrics")]
+        let start_time = Instant::now();
+        let actor_id = msg.actor_id;
+
+        let router_namespace = {
+            shared_router_state
+                .actor_router_addresses
+                .get(&actor_id)
+                .map(|entry| entry.value().clone())
+        };
+
+        match router_namespace {
+            Some(router_namespace) => match router_channels.get(&router_namespace) {
+                Some(tx) => {
+                    tx.send(msg).await.map_err(|e| {
+                        RouterDispatcherError::DispatchError(format!(
+                            "Failed to send message to router {}: {}",
+                            router_namespace, e
+                        ))
+                    })?;
+                    #[cfg(feature = "metrics")]
+                    {
+                        let duration = start_time.elapsed().as_secs_f64();
+                        metrics
+                            .record_histogram("router_dispatch_latency", duration, &[])
+                            .await;
+                        metrics
+                            .record_counter("router_messages_dispatched", 1, &[])
+                            .await;
+                    }
+                    Ok(())
+                }
+                None => Err(RouterDispatcherError::RouterNotFoundError(format!(
+                    "Router {} not found for actor {}",
+                    router_namespace, actor_id
+                ))),
+            },
+            None => {
+                pending_messages.insert(
+                    actor_id,
+                    PendingMessage {
+                        message: msg,
+                        first_attempt: Instant::now(),
+                        retry_count: 0,
+                    },
+                );
+                #[cfg(feature = "metrics")]
+                metrics
+                    .record_counter("router_messages_queued", 1, &[])
+                    .await;
+                Err(RouterDispatcherError::ActorNotAssignedError(format!(
+                    "Actor {} not assigned to any router (message queued for retry)",
+                    actor_id
+                )))
             }
         }
     }
