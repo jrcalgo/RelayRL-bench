@@ -4,6 +4,8 @@ members = [".", "lunarlander-rl"]
 [patch.crates-io]
 # Disable tch/libtorch features that can't build in this environment.
 relayrl_types = { path = "./patches/relayrl_types" }
+# Rayon-parallel ScalarVecEnv patch.
+relayrl_framework = { path = "./patches/relayrl_framework" }
 
 [package]
 name = "bench-beta3"
