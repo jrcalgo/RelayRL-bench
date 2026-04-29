@@ -29,3 +29,7 @@ clap    = { version = "4", features = ["derive"] }
 [[bin]]
 name = "bench_lunar_set_env_scalar8192"
 path = "src/bin/bench_lunar_set_env_scalar8192.rs"
+
+[[bin]]
+name = "bench_lunar_set_env_scalar16384"
+path = "src/bin/bench_lunar_set_env_scalar16384.rs"
