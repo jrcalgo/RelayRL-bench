@@ -21,6 +21,7 @@ lunarlander-rl     = { path = "./lunarlander-rl" }
 
 burn-ndarray = "0.20.1"
 burn-tensor  = "0.20.1"
+rayon        = "1"
 
 tokio   = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -33,6 +34,18 @@ path = "src/bin/bench_lunar_set_env_scalar8192.rs"
 [[bin]]
 name = "bench_lunar_set_env_scalar16384"
 path = "src/bin/bench_lunar_set_env_scalar16384.rs"
+
+[[bin]]
+name = "bench_lunar_set_env_vec8192"
+path = "src/bin/bench_lunar_set_env_vec8192.rs"
+
+[[bin]]
+name = "bench_lunar_direct_scalar1"
+path = "src/bin/bench_lunar_direct_scalar1.rs"
+
+[[bin]]
+name = "bench_lunar_direct_scalar8192"
+path = "src/bin/bench_lunar_direct_scalar8192.rs"
 
 [[bin]]
 name = "bench_request_action_latency"

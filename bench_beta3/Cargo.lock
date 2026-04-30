@@ -532,6 +532,7 @@ dependencies = [
  "clap",
  "futures",
  "lunarlander-rl",
+ "rayon",
  "relayrl_algorithms",
  "relayrl_env_trait",
  "relayrl_framework",
