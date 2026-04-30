@@ -506,60 +506,6 @@ impl<
         Ok(())
     }
 
-    /// Hot-path dispatcher: sends directly to the actor's per-router filter channel,
-    /// bypassing RouterDispatcher entirely. Falls back to global_dispatcher_tx when:
-    ///   - actor has no assigned namespace (scaling transition / unassigned)
-    ///   - filter channel is closed (router being torn down mid-call)
-    async fn try_hot_dispatch(
-        &self,
-        actor_id: ActorUuid,
-        msg: RoutedMessage,
-    ) -> Result<(), CoordinatorError> {
-        let hp = self.hot_path.as_ref().ok_or_else(|| {
-            CoordinatorError::ScaleManagerError(
-                ScaleManagerError::GetRouterRuntimeParamsError(
-                    "[Coordinator] Hot path not initialized — call start() first.".to_string(),
-                ),
-            )
-        })?;
-
-        let namespace = hp
-            .shared_router_state
-            .actor_routes
-            .get(&actor_id)
-            .and_then(|route| route.router_namespace.clone());
-
-        if let Some(ns) = namespace {
-            if let Some(filter_tx) = hp.filter_channels.get(&ns) {
-                match filter_tx.send(msg).await {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        // Filter channel closed (router teardown in progress) — recover msg and fall back.
-                        let msg = e.0;
-                        return hp
-                            .global_dispatcher_tx
-                            .send(msg)
-                            .await
-                            .map_err(|e| {
-                                CoordinatorError::ScaleManagerError(
-                                    ScaleManagerError::SendActionRequestError(e.to_string()),
-                                )
-                            });
-                    }
-                }
-            }
-        }
-
-        // Actor unassigned or namespace not yet in filter_channels — use global dispatcher.
-        hp.global_dispatcher_tx
-            .send(msg)
-            .await
-            .map_err(|e| {
-                CoordinatorError::ScaleManagerError(
-                    ScaleManagerError::SendActionRequestError(e.to_string()),
-                )
-            })
-    }
 }
 
 // ===== Client interface implementation =====
@@ -1146,16 +1092,15 @@ impl<
         let mut pending = Vec::with_capacity(ids.len());
 
         for id in ids {
-            // Fast lockless validity check via cached DashMap — skip unassigned actors.
-            let has_route = hp
+            // Single DashMap read: validate assignment and get namespace in one shot.
+            let Some(ns) = hp
                 .shared_router_state
                 .actor_routes
                 .get(&id)
                 .and_then(|r| r.router_namespace.clone())
-                .is_some();
-            if !has_route {
-                continue;
-            }
+            else {
+                continue; // unassigned actor — skip
+            };
 
             let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
             let msg = RoutedMessage {
@@ -1169,7 +1114,24 @@ impl<
                 })),
             };
 
-            self.try_hot_dispatch(id, msg).await?;
+            if let Some(filter_tx) = hp.filter_channels.get(&ns) {
+                match filter_tx.send(msg).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        hp.global_dispatcher_tx.send(e.0).await.map_err(|e| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::SendActionRequestError(e.to_string()),
+                            )
+                        })?;
+                    }
+                }
+            } else {
+                hp.global_dispatcher_tx.send(msg).await.map_err(|e| {
+                    CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::SendActionRequestError(e.to_string()),
+                    )
+                })?;
+            }
             pending.push((id, resp_rx));
         }
 
@@ -1220,8 +1182,7 @@ impl<
         ids: Vec<ActorUuid>,
         reward: Option<f32>,
     ) -> Result<(), CoordinatorError> {
-        // Hot path: same direct-to-filter dispatch as request_action — no RwLock acquisition.
-        self.hot_path.as_ref().ok_or_else(|| {
+        let hp = self.hot_path.as_ref().ok_or_else(|| {
             CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
                     "[Coordinator] No runtime instance to flag_last_action...".to_string(),
@@ -1234,6 +1195,15 @@ impl<
 
         let reward_val: f32 = reward.unwrap_or(0.0);
         for id in ids {
+            let Some(ns) = hp
+                .shared_router_state
+                .actor_routes
+                .get(&id)
+                .and_then(|r| r.router_namespace.clone())
+            else {
+                continue;
+            };
+
             let msg = RoutedMessage {
                 actor_id: id,
                 protocol: RoutingProtocol::FlagLastInference,
@@ -1243,13 +1213,29 @@ impl<
                     env_label: None,
                 },
             };
-            self.try_hot_dispatch(id, msg).await.map_err(|_| {
-                CoordinatorError::ScaleManagerError(
-                    ScaleManagerError::SendFlagLastActionMessageError(
-                        format!("Hot dispatch failed for actor {id}"),
-                    ),
-                )
-            })?;
+
+            if let Some(filter_tx) = hp.filter_channels.get(&ns) {
+                match filter_tx.send(msg).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        hp.global_dispatcher_tx.send(e.0).await.map_err(|_| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::SendFlagLastActionMessageError(
+                                    format!("Hot dispatch failed for actor {id}"),
+                                ),
+                            )
+                        })?;
+                    }
+                }
+            } else {
+                hp.global_dispatcher_tx.send(msg).await.map_err(|_| {
+                    CoordinatorError::ScaleManagerError(
+                        ScaleManagerError::SendFlagLastActionMessageError(
+                            format!("Hot dispatch failed for actor {id}"),
+                        ),
+                    )
+                })?;
+            }
         }
 
         #[cfg(feature = "metrics")]
