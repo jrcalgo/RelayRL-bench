@@ -18,6 +18,7 @@ use crate::network::client::runtime::coordination::scale_manager::RouterNamespac
 use crate::network::client::runtime::coordination::scale_manager::{
     ScaleManager, ScaleManagerError,
 };
+use crate::network::client::runtime::actor::ActorRuntime;
 use crate::network::client::runtime::coordination::state_manager::ActorUuid;
 use crate::network::client::runtime::coordination::state_manager::{
     SharedRouterState, StateManager, StateManagerError,
@@ -274,18 +275,26 @@ pub(crate) trait ClientEnvironments<
 
 // ===== Coordinator state =====
 
-/// Cached channels for the hot dispatch path (request_action / flag_last_action).
+/// Cached hot-dispatch state for request_action / flag_last_action.
 ///
 /// Populated once at the end of start() and held for the lifetime of the runtime.
-/// Allows both methods to bypass the RwLock<StateManager> on every call — the
-/// actor_routes DashMap and filter_channels DashMap are both lock-free for reads.
-pub(crate) struct HotPathChannels {
-    /// Same Arc<DashMap> held by RouterDispatcher — new routers are immediately visible.
-    filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
-    /// Cached Arc — DashMap reads require no lock.
-    shared_router_state: Arc<SharedRouterState>,
-    /// Fallback when actor has no assigned namespace or filter channel is closed.
-    global_dispatcher_tx: Sender<RoutedMessage>,
+/// Local variant bypasses all routing and calls ActorRuntime methods directly.
+/// Network variant routes through per-router filter channels.
+pub(crate) enum HotPath<
+    B: Backend + BackendMatcher<Backend = B>,
+    const D_IN: usize,
+    const D_OUT: usize,
+> {
+    /// ActorInferenceMode::Local — zero async task boundaries on the inference path.
+    Local {
+        local_runtimes: Arc<DashMap<ActorUuid, Arc<ActorRuntime<B, D_IN, D_OUT>>>>,
+    },
+    /// ActorInferenceMode::Server / ServerOverflow — routes through filter task → actor inbox.
+    Network {
+        filter_channels: Arc<DashMap<RouterNamespace, Sender<RoutedMessage>>>,
+        shared_router_state: Arc<SharedRouterState>,
+        global_dispatcher_tx: Sender<RoutedMessage>,
+    },
 }
 
 pub struct CoordinatorParams<
@@ -313,7 +322,7 @@ pub struct ClientCoordinator<
     pub(crate) client_modes: Arc<ClientModes>,
     pub(crate) runtime_params: Option<CoordinatorParams<B, D_IN, D_OUT>>,
     /// None until start() completes; cleared on shutdown().
-    hot_path: Option<HotPathChannels>,
+    hot_path: Option<HotPath<B, D_IN, D_OUT>>,
     _phantom: PhantomData<(KindIn, KindOut)>,
 }
 
@@ -907,18 +916,32 @@ impl<
             });
         }
 
-        // Cache hot-path channels once — avoids RwLock acquisition on every
-        // request_action / flag_last_action call for the lifetime of the runtime.
+        // Cache hot-path state once — avoids RwLock on every request_action / flag_last_action.
         if let Some(params) = self.runtime_params.as_ref() {
-            let filter_channels = params.scaling.router_filter_channels.clone();
-            let state = params.shared_state.read().await;
-            let shared_router_state = state.shared_router_state.clone();
-            let global_dispatcher_tx = state.global_dispatcher_tx.clone();
-            drop(state);
-            self.hot_path = Some(HotPathChannels {
-                filter_channels,
-                shared_router_state,
-                global_dispatcher_tx,
+            #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
+            let is_local = matches!(
+                self.client_modes.actor_inference_mode,
+                ActorInferenceMode::Local(_)
+            );
+            #[cfg(not(any(feature = "nats-transport", feature = "zmq-transport")))]
+            let is_local = true; // only Local exists without transport features
+
+            self.hot_path = Some(if is_local {
+                let state = params.shared_state.read().await;
+                let local_runtimes = state.actor_runtime_handles.clone();
+                drop(state);
+                HotPath::Local { local_runtimes }
+            } else {
+                let filter_channels = params.scaling.router_filter_channels.clone();
+                let state = params.shared_state.read().await;
+                let shared_router_state = state.shared_router_state.clone();
+                let global_dispatcher_tx = state.global_dispatcher_tx.clone();
+                drop(state);
+                HotPath::Network {
+                    filter_channels,
+                    shared_router_state,
+                    global_dispatcher_tx,
+                }
             });
         }
 
@@ -1075,9 +1098,6 @@ impl<
         mask: Option<Arc<AnyBurnTensor<B, D_OUT>>>,
         reward: f32,
     ) -> Result<Vec<(ActorUuid, Arc<RelayRLAction>)>, CoordinatorError> {
-        // Hot path: resolve actor namespace and send directly to per-router filter channel,
-        // bypassing RouterDispatcher and the RwLock<StateManager>. Actors without an
-        // assigned namespace (scaling transition) are skipped, matching original behaviour.
         let hp = self.hot_path.as_ref().ok_or_else(|| {
             CoordinatorError::ScaleManagerError(
                 ScaleManagerError::GetRouterRuntimeParamsError(
@@ -1089,77 +1109,103 @@ impl<
         #[cfg(feature = "metrics")]
         let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
-        let mut pending = Vec::with_capacity(ids.len());
+        let actions = match hp {
+            HotPath::Local { local_runtimes } => {
+                // Zero async task boundaries — call ActorRuntime directly.
+                let mut results = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let Some(runtime) = local_runtimes.get(&id).map(|r| Arc::clone(r.value()))
+                    else {
+                        continue;
+                    };
+                    let action = runtime
+                        .perform_local_inference(observation.clone(), mask.clone(), reward)
+                        .await
+                        .map_err(|e| {
+                            CoordinatorError::StateManagerError(
+                                StateManagerError::InferenceRequestError(e.to_string()),
+                            )
+                        })?;
+                    results.push((id, Arc::new(action)));
+                }
+                results
+            }
+            HotPath::Network {
+                filter_channels,
+                shared_router_state,
+                global_dispatcher_tx,
+            } => {
+                let mut pending = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let Some(ns) = shared_router_state
+                        .actor_routes
+                        .get(&id)
+                        .and_then(|r| r.router_namespace.clone())
+                    else {
+                        continue;
+                    };
 
-        for id in ids {
-            // Single DashMap read: validate assignment and get namespace in one shot.
-            let Some(ns) = hp
-                .shared_router_state
-                .actor_routes
-                .get(&id)
-                .and_then(|r| r.router_namespace.clone())
-            else {
-                continue; // unassigned actor — skip
-            };
+                    let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
+                    let msg = RoutedMessage {
+                        actor_id: id,
+                        protocol: RoutingProtocol::RequestInference,
+                        payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
+                            observation: Box::new(observation.clone()),
+                            mask: Box::new(mask.clone()),
+                            reward,
+                            reply_to: resp_tx,
+                        })),
+                    };
 
-            let (resp_tx, resp_rx) = oneshot::channel::<Arc<RelayRLAction>>();
-            let msg = RoutedMessage {
-                actor_id: id,
-                protocol: RoutingProtocol::RequestInference,
-                payload: RoutedPayload::RequestInference(Box::new(InferenceRequest {
-                    observation: Box::new(observation.clone()),
-                    mask: Box::new(mask.clone()),
-                    reward,
-                    reply_to: resp_tx,
-                })),
-            };
-
-            if let Some(filter_tx) = hp.filter_channels.get(&ns) {
-                match filter_tx.send(msg).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        hp.global_dispatcher_tx.send(e.0).await.map_err(|e| {
+                    if let Some(filter_tx) = filter_channels.get(&ns) {
+                        match filter_tx.send(msg).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                global_dispatcher_tx.send(e.0).await.map_err(|e| {
+                                    CoordinatorError::ScaleManagerError(
+                                        ScaleManagerError::SendActionRequestError(e.to_string()),
+                                    )
+                                })?;
+                            }
+                        }
+                    } else {
+                        global_dispatcher_tx.send(msg).await.map_err(|e| {
                             CoordinatorError::ScaleManagerError(
                                 ScaleManagerError::SendActionRequestError(e.to_string()),
                             )
                         })?;
                     }
+                    pending.push((id, resp_rx));
                 }
-            } else {
-                hp.global_dispatcher_tx.send(msg).await.map_err(|e| {
-                    CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::SendActionRequestError(e.to_string()),
-                    )
-                })?;
+
+                let pending_len = pending.len();
+                let mut join_set = tokio::task::JoinSet::<
+                    Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>,
+                >::new();
+                for (id, rx) in pending {
+                    join_set.spawn(async move {
+                        let action = rx.await.map_err(|e| {
+                            CoordinatorError::ScaleManagerError(
+                                ScaleManagerError::ReceiveActionResponseError(e.to_string()),
+                            )
+                        })?;
+                        Ok::<(Uuid, Arc<RelayRLAction>), CoordinatorError>((id, action))
+                    });
+                }
+
+                let mut results: Vec<(Uuid, Arc<RelayRLAction>)> =
+                    Vec::with_capacity(pending_len);
+                while let Some(join_result) = join_set.join_next().await {
+                    let pair = join_result.map_err(|e| {
+                        CoordinatorError::ScaleManagerError(
+                            ScaleManagerError::ReceiveActionResponseError(e.to_string()),
+                        )
+                    })??;
+                    results.push(pair);
+                }
+                results
             }
-            pending.push((id, resp_rx));
-        }
-
-        let pending_len = pending.len();
-        let mut join_set = tokio::task::JoinSet::<
-            Result<(Uuid, Arc<RelayRLAction>), CoordinatorError>,
-        >::new();
-
-        for (id, rx) in pending {
-            join_set.spawn(async move {
-                let action = rx.await.map_err(|e| {
-                    CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::ReceiveActionResponseError(e.to_string()),
-                    )
-                })?;
-                Ok::<(Uuid, Arc<RelayRLAction>), CoordinatorError>((id, action))
-            });
-        }
-
-        let mut actions: Vec<(Uuid, Arc<RelayRLAction>)> = Vec::with_capacity(pending_len);
-        while let Some(join_result) = join_set.join_next().await {
-            let pair = join_result.map_err(|e| {
-                CoordinatorError::ScaleManagerError(
-                    ScaleManagerError::ReceiveActionResponseError(e.to_string()),
-                )
-            })??;
-            actions.push(pair);
-        }
+        };
 
         #[cfg(feature = "metrics")]
         if let Some(params) = &self.runtime_params {
@@ -1194,31 +1240,62 @@ impl<
         let (start_time, num_ids) = (Instant::now(), ids.len() as u64);
 
         let reward_val: f32 = reward.unwrap_or(0.0);
-        for id in ids {
-            let Some(ns) = hp
-                .shared_router_state
-                .actor_routes
-                .get(&id)
-                .and_then(|r| r.router_namespace.clone())
-            else {
-                continue;
-            };
+        match hp {
+            HotPath::Local { local_runtimes } => {
+                for id in ids {
+                    let Some(runtime) = local_runtimes.get(&id).map(|r| Arc::clone(r.value()))
+                    else {
+                        continue;
+                    };
+                    runtime
+                        .flag_last_action(reward_val, None, None)
+                        .await
+                        .map_err(|e| {
+                            CoordinatorError::StateManagerError(
+                                StateManagerError::InferenceRequestError(e.to_string()),
+                            )
+                        })?;
+                }
+            }
+            HotPath::Network {
+                filter_channels,
+                shared_router_state,
+                global_dispatcher_tx,
+            } => {
+                for id in ids {
+                    let Some(ns) = shared_router_state
+                        .actor_routes
+                        .get(&id)
+                        .and_then(|r| r.router_namespace.clone())
+                    else {
+                        continue;
+                    };
 
-            let msg = RoutedMessage {
-                actor_id: id,
-                protocol: RoutingProtocol::FlagLastInference,
-                payload: RoutedPayload::FlagLastInference {
-                    reward: reward_val,
-                    env_id: None,
-                    env_label: None,
-                },
-            };
+                    let msg = RoutedMessage {
+                        actor_id: id,
+                        protocol: RoutingProtocol::FlagLastInference,
+                        payload: RoutedPayload::FlagLastInference {
+                            reward: reward_val,
+                            env_id: None,
+                            env_label: None,
+                        },
+                    };
 
-            if let Some(filter_tx) = hp.filter_channels.get(&ns) {
-                match filter_tx.send(msg).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        hp.global_dispatcher_tx.send(e.0).await.map_err(|_| {
+                    if let Some(filter_tx) = filter_channels.get(&ns) {
+                        match filter_tx.send(msg).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                global_dispatcher_tx.send(e.0).await.map_err(|_| {
+                                    CoordinatorError::ScaleManagerError(
+                                        ScaleManagerError::SendFlagLastActionMessageError(
+                                            format!("Hot dispatch failed for actor {id}"),
+                                        ),
+                                    )
+                                })?;
+                            }
+                        }
+                    } else {
+                        global_dispatcher_tx.send(msg).await.map_err(|_| {
                             CoordinatorError::ScaleManagerError(
                                 ScaleManagerError::SendFlagLastActionMessageError(
                                     format!("Hot dispatch failed for actor {id}"),
@@ -1227,14 +1304,6 @@ impl<
                         })?;
                     }
                 }
-            } else {
-                hp.global_dispatcher_tx.send(msg).await.map_err(|_| {
-                    CoordinatorError::ScaleManagerError(
-                        ScaleManagerError::SendFlagLastActionMessageError(
-                            format!("Hot dispatch failed for actor {id}"),
-                        ),
-                    )
-                })?;
             }
         }
 
