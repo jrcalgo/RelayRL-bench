@@ -14,8 +14,9 @@ use std::time::Instant;
 use burn_ndarray::NdArray;
 use burn_tensor::Float;
 
-use relayrl_algorithms::algorithms::REINFORCE::ActivationKind;
 use relayrl_algorithms::algorithms::PPO::PPOKernel;
+use relayrl_algorithms::algorithms::REINFORCE::ActivationKind;
+use relayrl_algorithms::PPOParams;
 use relayrl_framework::prelude::network::{
     ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, AlgorithmCfg, ModelMode,
     RelayRLActorEnv, RelayRLAgentActors, ReplayBufferSize, SaveModelPath,
@@ -30,6 +31,7 @@ const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 1;
+const TRAJ_PER_EPOCH: u64 = 64;
 const TOTAL_STEPS: usize = 500_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
@@ -46,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL beta.4 — PPO — LunarLander discrete — 1 env");
     println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  total steps={TOTAL_STEPS}");
-    println!("  gamma=0.99  lam=0.97  clip=0.2  pi_iters=80  vf_iters=80");
+    println!("  gamma=0.99  lam=0.97  clip=0.2  pi_iters=80  vf_iters=80  traj/epoch={TRAJ_PER_EPOCH}");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
@@ -102,7 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run_env_with_ppo::<Float, Float, _>(
             actor_id,
             TOTAL_STEPS,
-            AlgorithmCfg::PPO(None),
+            AlgorithmCfg::PPO(Some(PPOParams {
+                traj_per_epoch: TRAJ_PER_EPOCH,
+                ..Default::default()
+            })),
             SaveModelPath::from("./models/lunar_ppo"),
             BUFFER_SIZE,
             DeviceType::Cpu,
