@@ -3,12 +3,14 @@ members = [".", "lunarlander-rl"]
 
 [patch.crates-io]
 # Disable tch/libtorch features that can't build in this environment.
-relayrl_types = { path = "./patches/relayrl_types" }
+relayrl_types      = { path = "./patches/relayrl_types" }
+relayrl_framework  = { path = "./patches/relayrl_framework" }
 
 [package]
 name = "bench-beta4"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 
 [dependencies]
 relayrl_framework  = { version = "=0.5.0-beta.4", default-features = false, features = ["client"] }

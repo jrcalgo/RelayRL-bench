@@ -5,18 +5,16 @@
 //!   - this path: framework owns the loop via run_env (perform_local_byte_inference inline)
 //!   - other path: caller owns the loop via request_action + flag_last_action
 //!
-//! Beta.4 change: run_env() now takes an optional algorithm-training tuple.
-//! Pass None with NoTrainKernel to run inference-only (no training).
+//! Beta.4 change: run_env() is now a no-KN, no-training call (inference-only).
+//! Use run_env_with_ppo / run_env_with_reinforce etc. for training variants.
 //!
 //! Build & run:
 //!   cargo build --release -p bench-beta4 --bin bench_lunar_set_env_scalar1
 //!   ORT_DYLIB_PATH=... perf stat -r 10 ./target/release/bench_lunar_set_env_scalar1
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use burn_ndarray::NdArray;
-use burn_tensor::{Float, Int, Tensor, TensorKind};
 
 use relayrl_framework::prelude::network::{
     ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, ModelMode,
@@ -26,154 +24,8 @@ use relayrl_framework::prelude::types::model::ModelModule;
 use relayrl_framework::prelude::types::tensor::relayrl::{BackendMatcher, DeviceType};
 
 use relayrl_algorithms::algorithms::onnx_builder::build_onnx_mlp_bytes;
-use relayrl_algorithms::{
-    DDPGKernelTrait, MultiagentDDPGKernelTrait, MultiagentKernelTrait, MultiagentPPOKernelTrait,
-    MultiagentReinforceKernelTrait, MultiagentTD3KernelTrait, PPOKernelTrait, REINFORCEKernelTrait,
-    StepKernelTrait, TD3KernelTrait, WeightProvider,
-};
 
 use lunarlander_rl::env::LunarLanderEnv;
-
-// ─────────────────────────── NoTrainKernel ───────────────────────────────────
-// Satisfies run_env(None) kernel bounds without instantiating any trainer.
-// All training methods are unimplemented — they are never called when
-// algorithm_cfg = None.
-
-#[derive(Default)]
-struct NoTrainKernel;
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    StepKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn step<const IN_D: usize, const OUT_D: usize>(
-        &self,
-        _obs: Tensor<B, IN_D, InK>,
-        _mask: Tensor<B, OUT_D, OutK>,
-    ) -> Result<
-        (relayrl_algorithms::templates::base_algorithm::StepAction<B>, HashMap<String, relayrl_types::prelude::tensor::relayrl::TensorData>),
-        relayrl_types::prelude::tensor::relayrl::TensorError,
-    > {
-        unimplemented!("NoTrainKernel: run_env called with None algorithm_cfg; step() should not be invoked")
-    }
-    fn get_input_dim(&self) -> usize { 0 }
-    fn get_output_dim(&self) -> usize { 0 }
-}
-
-impl WeightProvider for NoTrainKernel {
-    fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> { None }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    REINFORCEKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn train_pi_step(
-        &mut self, _obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _act: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _mask: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _adv: &[f32], _logp_old: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-    ) -> (f32, HashMap<String, f32>) { unimplemented!() }
-    fn train_vf_step(
-        &mut self, _obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _mask: &[relayrl_types::prelude::tensor::relayrl::TensorData], _ret: &[f32],
-    ) -> f32 { unimplemented!() }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    PPOKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn new_for_actor(_obs_dim: usize, _act_dim: usize) -> Self { NoTrainKernel }
-    fn ppo_pi_loss(
-        &mut self, _obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _act: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _mask: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _adv: &[f32], _logp_old: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _clip_ratio: f32,
-    ) -> (f32, HashMap<String, f32>) { unimplemented!() }
-    fn ppo_vf_loss(
-        &mut self, _obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _mask: &[relayrl_types::prelude::tensor::relayrl::TensorData], _ret: &[f32],
-    ) -> f32 { unimplemented!() }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    DDPGKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn new_for_actor(_obs_dim: usize, _act_dim: usize) -> Self { NoTrainKernel }
-    fn ddpg_train_step(
-        &mut self, _obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _act: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _next_obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _rew: &[f32], _done: &[f32], _gamma: f32, _tau: f32,
-    ) -> relayrl_algorithms::algorithms::DDPG::DDPGTrainMetrics { unimplemented!() }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    TD3KernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn new_for_actor(_obs_dim: usize, _act_dim: usize) -> Self { NoTrainKernel }
-    fn td3_train_step(
-        &mut self, _obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _act: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _next_obs: &[relayrl_types::prelude::tensor::relayrl::TensorData],
-        _rew: &[f32], _done: &[f32], _gamma: f32, _tau: f32,
-        _policy_noise: f32, _noise_clip: f32, _policy_frequency: u32,
-    ) -> relayrl_algorithms::algorithms::TD3::TD3TrainMetrics { unimplemented!() }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    MultiagentKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn register_agent(&mut self) {}
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    MultiagentReinforceKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn train_epoch(
-        &mut self,
-        _batches: &[relayrl_algorithms::algorithms::REINFORCE::multiagent::kernel::AgentBatch],
-    ) -> relayrl_algorithms::algorithms::REINFORCE::multiagent::kernel::MultiagentTrainMetrics {
-        unimplemented!()
-    }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    MultiagentPPOKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn train_epoch(
-        &mut self,
-        _batches: &[relayrl_algorithms::algorithms::PPO::multiagent::kernel::AgentBatch],
-        _clip_ratio: f32, _target_kl: f32, _train_pi_iters: u64, _train_vf_iters: u64,
-    ) -> relayrl_algorithms::algorithms::PPO::multiagent::kernel::MultiagentPPOTrainMetrics {
-        unimplemented!()
-    }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    MultiagentDDPGKernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn train_epoch(
-        &mut self,
-        _batches: &[relayrl_algorithms::algorithms::DDPG::multiagent::kernel::AgentBatch],
-        _gamma: f32, _tau: f32, _policy_frequency: usize,
-    ) -> relayrl_algorithms::algorithms::DDPG::multiagent::kernel::MultiagentDDPGTrainMetrics {
-        unimplemented!()
-    }
-}
-
-impl<B: burn_tensor::backend::Backend + BackendMatcher<Backend = B>, InK: TensorKind<B>, OutK: TensorKind<B>>
-    MultiagentTD3KernelTrait<B, InK, OutK> for NoTrainKernel
-{
-    fn train_epoch(
-        &mut self,
-        _batches: &[relayrl_algorithms::algorithms::TD3::multiagent::kernel::AgentBatch],
-        _gamma: f32, _tau: f32, _policy_noise: f32, _noise_clip: f32, _policy_frequency: usize,
-    ) -> relayrl_algorithms::algorithms::TD3::multiagent::kernel::MultiagentTD3TrainMetrics {
-        unimplemented!()
-    }
-}
-
-unsafe impl Send for NoTrainKernel {}
 
 // ─────────────────────────── Constants ──────────────────────────────────────
 
@@ -223,12 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  RelayRL beta.4 — set_env / run_env — ScalarLunarLander — {} env", ENV_COUNT);
     println!("  1 actor · {} loop iters · {} total transitions · {} logical cores",
              TARGET_STEPS, TARGET_STEPS * ENV_COUNT as usize, num_cores);
-    println!("  path: framework-internal run_env (perform_local_byte_inference)");
+    println!("  path: framework-internal run_env (perform_local_byte_inference, no-KN)");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
     let initial_model = make_bootstrap_model::<B>()?;
     let config_path   = std::path::PathBuf::from("./config.json");
-    // beta.4: AgentBuilder no longer has KindIn/KindOut type params
     let mut builder = AgentBuilder::<B, 2, 2>::builder()
         .actor_count(1)
         .default_device(DeviceType::Cpu)
@@ -254,13 +105,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Warm-up ───────────────────────────────────────────────────────────────
     println!("Warming up ({WARMUP_ITERS} iters)…");
-    // beta.4: run_env now takes an optional algorithm-training tuple; pass None for inference-only
-    agent.run_env::<Float, Float, NoTrainKernel>(actor_id, WARMUP_ITERS, None).await?;
+    agent.run_env(actor_id, WARMUP_ITERS).await?;
     println!("Warm-up done. Starting timed run ({TARGET_STEPS} loop iters)…\n");
 
     // ── Timed run ─────────────────────────────────────────────────────────────
     let t0 = Instant::now();
-    agent.run_env::<Float, Float, NoTrainKernel>(actor_id, TARGET_STEPS, None).await?;
+    agent.run_env(actor_id, TARGET_STEPS).await?;
     let wall = t0.elapsed().as_secs_f64();
 
     let iters_per_sec    = TARGET_STEPS as f64 / wall;
