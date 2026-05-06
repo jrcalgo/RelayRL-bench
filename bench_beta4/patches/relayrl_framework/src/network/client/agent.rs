@@ -1210,7 +1210,7 @@ pub trait RelayRLActorEnv<
         actor_id: ActorUuid,
         step_count: usize,
     ) -> Result<(), ClientError>;
-    async fn run_env_with_ppo<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_with_ppo<KindIn, KindOut, KN>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
@@ -1221,6 +1221,8 @@ pub trait RelayRLActorEnv<
         kernel: KN,
     ) -> Result<(), ClientError>
     where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
@@ -1392,7 +1394,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         result
     }
 
-    async fn run_env_with_ppo<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_with_ppo<KindIn, KindOut, KN>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
@@ -1403,6 +1405,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         kernel: KN,
     ) -> Result<(), ClientError>
     where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider

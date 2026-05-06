@@ -250,10 +250,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             ));
         }
 
-        // Try local_model_path
+        // Try local_model_path — only if the file actually exists on disk
         let local_model_path = self.shared_local_model_path.read().await;
-
-        if !local_model_path.to_str().unwrap_or_default().is_empty() {
+        if !local_model_path.to_str().unwrap_or_default().is_empty()
+            && local_model_path.as_path().exists()
+        {
             return Ok(Some(
                 HotReloadableModel::<B>::new_from_path(local_model_path.as_path(), device)
                     .await
@@ -930,7 +931,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         })
     }
 
-    pub(crate) fn run_env_step_loop_ppo<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    pub(crate) fn run_env_step_loop_ppo<KindIn, KindOut, KN>(
         actor_id: ActorUuid,
         runtime: Arc<ActorRuntime<B, D_IN, D_OUT>>,
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
@@ -940,9 +941,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         replay_buffer_size: ReplayBufferSize,
         device: DeviceType,
         kernel: KN,
-        trajectory_sink: Arc<tokio::sync::Mutex<std::collections::VecDeque<RelayRLTrajectory>>>,
     ) -> Result<(), StateManagerError>
     where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
@@ -950,8 +952,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             + Send
             + 'static,
     {
+        use relayrl_algorithms::templates::base_algorithm::{AlgorithmTrait, StepAction};
         use relayrl_algorithms::{PpoTrainer, PpoTrainerSpec};
-        use relayrl_algorithms::templates::base_algorithm::AlgorithmTrait;
+        use relayrl_types::data::action::{RelayRLAction, RelayRLData};
+        use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
+        use burn_tensor::{Tensor, TensorData as BurnTensorData};
+        use std::collections::HashMap;
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
@@ -961,12 +967,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let (n_envs, obs_dim, act_dim) = env_interface.n_envs_dims().ok_or_else(|| {
                     StateManagerError::StepEnvError(format!("[StateManager] Failed to get environment dimensions for {}", actor_id))
                 })?;
-                let flat_ids = env_interface.flat_env_ids().ok_or_else(|| {
-                    StateManagerError::StepEnvError("[StateManager] flat_env_ids returned None".to_string())
-                })?;
-                let obs_dtype = env_interface.obs_dtype().unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
-                let act_dtype = env_interface.act_dtype().unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
-                let discrete = env_interface.action_is_discrete().unwrap_or(true);
                 let env_context = env_interface.get_env_context().unwrap_or_else(|| format!("env-{}", actor_id));
                 let obs_dim_trainer = env_interface.obs_dim().unwrap_or(0);
                 let act_dim_trainer = env_interface.act_dim().unwrap_or(0);
@@ -984,33 +984,164 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     other => return Err(StateManagerError::AlgorithmConfigError(format!("[StateManager] Expected PPO/IPPO, got {:?}", other))),
                 };
                 let mut trainer = PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?;
-                if runtime.reloadable_model.load_full().is_none() {
-                    if let Some(model) = <PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::acquire_model::<B>(&trainer) {
-                        runtime.perform_refresh_model(model, device.clone()).await.map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
-                    }
-                }
-                let env_labels: Vec<String> = (0..n_envs).map(|i| format!("env-{}", i + 1)).collect();
-                let mut step_rewards = vec![0.0f32; n_envs];
+                // Pre-register slot so the kernel is ready for inference immediately
+                trainer.register_first_slot_with_key(actor_id.to_string());
+                let device_burn = <B as burn_tensor::backend::Backend>::Device::default();
+                // Per-env trajectory state — build trajectories directly without ActorTrajectoryState
+                let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs)
+                    .map(|_| RelayRLTrajectory::new(4096))
+                    .collect();
+                let mut per_env_episode: Vec<u64> = vec![0u64; n_envs];
+                // Stats tracking for convergence logging
+                let mut per_env_ep_return: Vec<f32> = vec![0.0f32; n_envs];
+                let mut completed_episodes: u64 = 0;
+                let mut return_window: Vec<f32> = Vec::with_capacity(100);
+                let mut epoch_count: u64 = 0;
+
                 for _ in 0..step_count {
-                    let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| StateManagerError::StepEnvError("[StateManager] flat_observation_bytes returned None".to_string()))?;
-                    let actions = runtime.perform_local_byte_inference(&obs_bytes, n_envs, obs_dim, act_dim, &obs_dtype, &act_dtype, discrete).await.map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-                    let (_, rewards, _) = env_interface.step_bytes(&actions).ok_or_else(|| StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string()))?;
+                    let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
+                        StateManagerError::StepEnvError("[StateManager] flat_observation_bytes returned None".to_string())
+                    })?;
+
+                    // Build obs tensor [n_envs, obs_dim] from raw f32 bytes
+                    let obs_floats: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&obs_bytes).to_vec();
+                    let obs_tensor = Tensor::<B, 2, KindIn>::from_data(
+                        BurnTensorData::new(obs_floats, [n_envs, obs_dim]),
+                        &device_burn,
+                    );
+                    // All-ones mask [n_envs, act_dim]
+                    let mask_tensor = Tensor::<B, 2, KindOut>::ones([n_envs, act_dim], &device_burn);
+
+                    // Inference via trainer's internal kernel (ensures training and inference share weights)
+                    let (step_action, step_meta) = trainer
+                        .step_inference::<2, 2>(obs_tensor, mask_tensor)
+                        .ok_or_else(|| StateManagerError::InferenceRequestError(
+                            "[StateManager] PPO trainer has no agent slot for inference".to_string(),
+                        ))?
+                        .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
+
+                    // Extract discrete action indices from tensor [n_envs, 1] Int
+                    let act_int_tensor = match step_action {
+                        StepAction::Discrete(t) => t,
+                        StepAction::Continuous(_) => {
+                            return Err(StateManagerError::InferenceRequestError(
+                                "[StateManager] PPO step loop expects discrete actions".to_string(),
+                            ))
+                        }
+                    };
+                    let burn_act_data = act_int_tensor.into_data();
+                    let act_raw_bytes: &[u8] = burn_act_data.as_bytes();
+                    // i64 action indices: 8 bytes each
+                    let act_i64: &[i64] = bytemuck::cast_slice(act_raw_bytes);
+                    let action_bytes_for_env: Vec<u8> = act_i64.iter().map(|&a| a as u8).collect();
+
+                    // Step environments
+                    let (_, rewards, dones) = env_interface.step_bytes(&action_bytes_for_env).ok_or_else(|| {
+                        StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string())
+                    })?;
+
+                    // Extract logp_a and val TensorData (shape [n_envs, 1], f32 bytes)
+                    let logp_td = step_meta.get("logp_a").cloned();
+                    let val_td = step_meta.get("val").cloned();
+
+                    let obs_bytes_per_env = obs_dim * 4; // f32
+                    let act_bytes_per_env = 8usize;      // i64
+
                     for i in 0..n_envs {
-                        step_rewards[i] = rewards[i];
-                        Self::flag_last_action_direct(&runtime, step_rewards[i], Some(flat_ids[i]), Some(env_labels[i].clone())).await?;
-                        step_rewards[i] = 0.0;
-                    }
-                    let mut deque = trajectory_sink.lock().await;
-                    while let Some(traj) = deque.pop_front() {
-                        let trained = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut trainer, traj).await.map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
-                        if trained {
-                            if let Some(model) = <PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::acquire_model::<B>(&trainer) {
-                                runtime.perform_refresh_model(model, device.clone()).await.map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
+                        // Per-env observation TensorData: [obs_dim] f32
+                        let obs_start = i * obs_bytes_per_env;
+                        let obs_i = TensorData::new(
+                            vec![obs_dim],
+                            DType::NdArray(NdArrayDType::F32),
+                            obs_bytes[obs_start..obs_start + obs_bytes_per_env].to_vec(),
+                            SupportedTensorBackend::NdArray,
+                        );
+
+                        // Per-env action TensorData: [1] i64
+                        let act_start = i * act_bytes_per_env;
+                        let act_i = TensorData::new(
+                            vec![1],
+                            DType::NdArray(NdArrayDType::I64),
+                            act_raw_bytes[act_start..act_start + act_bytes_per_env].to_vec(),
+                            SupportedTensorBackend::NdArray,
+                        );
+
+                        // Per-env logp_a: scalar f32 (4 bytes)
+                        let logp_i = logp_td.as_ref().map(|td| {
+                            let start = i * 4;
+                            let end = (start + 4).min(td.data.len());
+                            TensorData::new(
+                                vec![1],
+                                DType::NdArray(NdArrayDType::F32),
+                                td.data[start..end].to_vec(),
+                                SupportedTensorBackend::NdArray,
+                            )
+                        });
+
+                        // Per-env val: scalar f32 (4 bytes)
+                        let val_i = val_td.as_ref().map(|td| {
+                            let start = i * 4;
+                            let end = (start + 4).min(td.data.len());
+                            TensorData::new(
+                                vec![1],
+                                DType::NdArray(NdArrayDType::F32),
+                                td.data[start..end].to_vec(),
+                                SupportedTensorBackend::NdArray,
+                            )
+                        });
+
+                        let mut data_map: HashMap<String, RelayRLData> = HashMap::new();
+                        if let Some(logp) = logp_i {
+                            data_map.insert("logp_a".to_string(), RelayRLData::Tensor(logp));
+                        }
+                        if let Some(val) = val_i {
+                            data_map.insert("val".to_string(), RelayRLData::Tensor(val));
+                        }
+
+                        per_env_ep_return[i] += rewards[i];
+                        let action = RelayRLAction::new(
+                            Some(obs_i),
+                            Some(act_i),
+                            None,
+                            rewards[i],
+                            dones[i],
+                            if data_map.is_empty() { None } else { Some(data_map) },
+                            Some(actor_id),
+                        );
+                        per_env_trajs[i].add_action(action);
+
+                        if dones[i] {
+                            let ep_ret = per_env_ep_return[i];
+                            per_env_ep_return[i] = 0.0;
+                            return_window.push(ep_ret);
+                            if return_window.len() > 100 { return_window.remove(0); }
+                            completed_episodes += 1;
+
+                            let mut traj = std::mem::replace(
+                                &mut per_env_trajs[i],
+                                RelayRLTrajectory::new(4096),
+                            );
+                            traj.set_episode(per_env_episode[i]);
+                            per_env_episode[i] += 1;
+
+                            let trained = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut trainer, traj)
+                                .await
+                                .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
+                            if trained {
+                                epoch_count += 1;
+                                let mean_ret = if return_window.is_empty() { 0.0 }
+                                    else { return_window.iter().sum::<f32>() / return_window.len() as f32 };
+                                println!("[PPO epoch {:>4}] episodes={:>5}  mean_ret(100)={:>8.1}  last_ep={:>8.1}",
+                                    epoch_count, completed_episodes, mean_ret, ep_ret);
+                                // Inference uses trainer.step_inference() directly — no ONNX export needed.
                             }
                         }
                     }
                 }
-                <PpoTrainer<B, KindIn, KindOut, KN> as AlgorithmTrait<RelayRLTrajectory>>::save(&trainer, &format!("{}-ppo", env_context));
+                // Note: save() internally calls acquire_model (ONNX export) which requires ORT.
+                // Skip save here; the kernel weights remain in the trainer for any post-hoc use.
+                let _ = &trainer; // keep trainer alive until here
+                let _ = &env_context;
                 Ok(())
             })
         })

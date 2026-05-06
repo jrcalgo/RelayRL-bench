@@ -251,7 +251,7 @@ pub(crate) trait ClientEnvironments<
         actor_id: ActorUuid,
         step_count: usize,
     ) -> Result<(), CoordinatorError>;
-    async fn run_env_with_ppo<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_with_ppo<KindIn, KindOut, KN>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
@@ -262,6 +262,8 @@ pub(crate) trait ClientEnvironments<
         kernel: KN,
     ) -> Result<(), CoordinatorError>
     where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
@@ -1922,7 +1924,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         }
     }
 
-    async fn run_env_with_ppo<KindIn: TensorKind<B>, KindOut: TensorKind<B>, KN>(
+    async fn run_env_with_ppo<KindIn, KindOut, KN>(
         &self,
         actor_id: ActorUuid,
         step_count: usize,
@@ -1933,6 +1935,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         kernel: KN,
     ) -> Result<(), CoordinatorError>
     where
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
@@ -1955,7 +1959,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         };
                         (runtime, env_map, resolved_cfg)
                     };
-                    let trajectory_sink = runtime.force_memory_trajectories();
                     let result = StateManager::<B, D_IN, D_OUT>::run_env_step_loop_ppo::<KindIn, KindOut, KN>(
                         actor_id,
                         Arc::clone(&runtime),
@@ -1966,10 +1969,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         replay_buffer_size,
                         device,
                         kernel,
-                        trajectory_sink,
                     )
                     .map_err(CoordinatorError::from);
-                    runtime.release_memory_trajectories();
                     result
                 }
                 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
