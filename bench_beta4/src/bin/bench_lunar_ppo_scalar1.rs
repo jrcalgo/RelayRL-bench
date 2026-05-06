@@ -4,6 +4,10 @@
 //! environment via run_env_with_ppo. Prints per-epoch stats (mean return over last
 //! 100 episodes) to show convergence.
 //!
+//! Hyperparameters follow the SB3 RL Baselines3-Zoo tuned config for LunarLander-v2:
+//!   gamma=0.999, lam=0.98, clip=0.2, pi_lr=2.5e-4, vf_lr=1e-3,
+//!   train_pi_iters=10, train_vf_iters=10, target_kl=0.1, traj_per_epoch=64
+//!
 //! Build & run:
 //!   cargo build --release -p bench-beta4 --bin bench_lunar_ppo_scalar1
 //!   ./target/release/bench_lunar_ppo_scalar1
@@ -31,6 +35,15 @@ const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 1;
+// ── Hyperparameters (SB3 RL Baselines3-Zoo for LunarLander-v2) ──────────────
+const GAMMA: f32 = 0.999;
+const LAM: f32 = 0.98;
+const CLIP_RATIO: f32 = 0.2;
+const PI_LR: f64 = 2.5e-4;
+const VF_LR: f64 = 1e-3;
+const TRAIN_PI_ITERS: u64 = 10;
+const TRAIN_VF_ITERS: u64 = 10;
+const TARGET_KL: f32 = 0.1;
 const TRAJ_PER_EPOCH: u64 = 64;
 const TOTAL_STEPS: usize = 500_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
@@ -46,9 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(1);
 
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL beta.4 — PPO — LunarLander discrete — 1 env");
+    println!("  RelayRL beta.4 — PPO — LunarLander discrete — 1 env  (SB3 Zoo hparams)");
     println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  total steps={TOTAL_STEPS}");
-    println!("  gamma=0.99  lam=0.97  clip=0.2  pi_iters=80  vf_iters=80  traj/epoch={TRAJ_PER_EPOCH}");
+    println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}");
+    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  traj/epoch={TRAJ_PER_EPOCH}");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
@@ -86,8 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true, // discrete actions
         &[128, 128],
         ActivationKind::ReLU,
-        3e-4, // pi_lr
-        1e-3, // vf_lr
+        PI_LR,
+        VF_LR,
         &burn_device,
     );
 
@@ -105,6 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             actor_id,
             TOTAL_STEPS,
             AlgorithmCfg::PPO(Some(PPOParams {
+                discrete: true,
+                gamma: GAMMA,
+                lam: LAM,
+                clip_ratio: CLIP_RATIO,
+                train_pi_iters: TRAIN_PI_ITERS,
+                train_vf_iters: TRAIN_VF_ITERS,
+                target_kl: TARGET_KL,
                 traj_per_epoch: TRAJ_PER_EPOCH,
                 ..Default::default()
             })),
