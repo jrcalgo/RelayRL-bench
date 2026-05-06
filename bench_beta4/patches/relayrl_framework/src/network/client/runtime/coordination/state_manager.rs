@@ -997,8 +997,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut completed_episodes: u64 = 0;
                 let mut return_window: Vec<f32> = Vec::with_capacity(100);
                 let mut epoch_count: u64 = 0;
+                // Timing accumulators (nanoseconds)
+                let mut ns_infer: u128 = 0;
+                let mut ns_traj: u128 = 0;
+                let mut ns_train: u128 = 0;
 
                 for _ in 0..step_count {
+                    let t_infer_start = std::time::Instant::now();
                     let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
                         StateManagerError::StepEnvError("[StateManager] flat_observation_bytes returned None".to_string())
                     })?;
@@ -1039,8 +1044,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let (_, rewards, dones) = env_interface.step_bytes(&action_bytes_for_env).ok_or_else(|| {
                         StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string())
                     })?;
+                    ns_infer += t_infer_start.elapsed().as_nanos();
 
                     // Extract logp_a and val TensorData (shape [n_envs, 1], f32 bytes)
+                    let t_traj_start = std::time::Instant::now();
                     let logp_td = step_meta.get("logp_a").cloned();
                     let val_td = step_meta.get("val").cloned();
 
@@ -1124,9 +1131,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             traj.set_episode(per_env_episode[i]);
                             per_env_episode[i] += 1;
 
+                            ns_traj += t_traj_start.elapsed().as_nanos();
+                            let t_train_start = std::time::Instant::now();
                             let trained = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut trainer, traj)
                                 .await
                                 .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
+                            ns_train += t_train_start.elapsed().as_nanos();
                             if trained {
                                 epoch_count += 1;
                                 let mean_ret = if return_window.is_empty() { 0.0 }
@@ -1135,9 +1145,22 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                     epoch_count, completed_episodes, mean_ret, ep_ret);
                                 // Inference uses trainer.step_inference() directly — no ONNX export needed.
                             }
+                        } else {
+                            ns_traj += t_traj_start.elapsed().as_nanos();
                         }
                     }
                 }
+                // Print timing breakdown
+                let total_ns = ns_infer + ns_traj + ns_train;
+                let pct = |n: u128| if total_ns > 0 { n as f64 / total_ns as f64 * 100.0 } else { 0.0 };
+                let ms = |n: u128| n as f64 / 1_000_000.0;
+                println!("\n── PPO step-loop time breakdown ({} steps) ──────────────────────", step_count);
+                println!("  inference (obs→tensor→forward→env.step) : {:>8.0} ms  ({:.1}%)", ms(ns_infer), pct(ns_infer));
+                println!("  trajectory building (TensorData/per-env) : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
+                println!("  PPO training (receive_trajectory/update)  : {:>8.0} ms  ({:.1}%)", ms(ns_train), pct(ns_train));
+                println!("  accounted total                           : {:>8.0} ms", ms(total_ns));
+                println!("─────────────────────────────────────────────────────────────────");
+
                 // Note: save() internally calls acquire_model (ONNX export) which requires ORT.
                 // Skip save here; the kernel weights remain in the trainer for any post-hoc use.
                 let _ = &trainer; // keep trainer alive until here
