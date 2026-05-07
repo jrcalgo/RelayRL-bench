@@ -459,6 +459,8 @@ pub(crate) struct ActorRuntime<
 > {
     actor_id: ActorUuid,
     pub(crate) reloadable_model: LocalModelHandle<B>,
+    /// Separate ORT slot for the value (baseline) head, used by `perform_local_value_inference`.
+    reloadable_value_model: LocalModelHandle<B>,
     shared_max_traj_length: Arc<RwLock<usize>>,
     shared_tx_to_buffer: Sender<RoutedMessage>,
     trajectories: Mutex<ActorTrajectoryState>,
@@ -487,6 +489,7 @@ impl<
         Self {
             actor_id,
             reloadable_model,
+            reloadable_value_model: Arc::new(ArcSwapOption::new(None)),
             shared_max_traj_length,
             shared_tx_to_buffer,
             trajectories: Mutex::new(ActorTrajectoryState::new(max_traj_length)),
@@ -769,6 +772,60 @@ impl<
         }
 
         result
+    }
+
+    /// Load or hot-reload the value head ORT model from an updated `ModelModule`.
+    pub(crate) async fn perform_refresh_value_model(
+        &self,
+        model_module: ModelModule<B>,
+        device: DeviceType,
+    ) -> Result<(), ActorError> {
+        match self.reloadable_value_model.load_full() {
+            Some(model) => {
+                model
+                    .reload_from_module(model_module, model.version())
+                    .await
+                    .map_err(ActorError::from)?;
+                Ok(())
+            }
+            None => {
+                let reloadable_model =
+                    Arc::new(HotReloadableModel::<B>::new_from_module(model_module, device).await?);
+                self.reloadable_value_model.store(Some(reloadable_model));
+                Ok(())
+            }
+        }
+    }
+
+    /// ORT-backed value-head inference.  Returns per-env scalar values (f32, one per env).
+    /// Falls back to zeros if the value model is not yet loaded.
+    pub(crate) async fn perform_local_value_inference(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+    ) -> Vec<f32> {
+        let loaded = self.reloadable_value_model.load();
+        let model_ref = match loaded.as_ref() {
+            Some(m) => m,
+            None => return vec![0.0f32; n_envs],
+        };
+        let module = model_ref.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            DType::NdArray(NdArrayDType::F32),
+            obs_bytes.to_vec(),
+            SupportedTensorBackend::NdArray,
+        );
+        let output = module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
+
+        // output.data: n_envs × 1 f32 values (one scalar per env)
+        output.data.chunks(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
     }
 
     pub(crate) async fn perform_refresh_model(

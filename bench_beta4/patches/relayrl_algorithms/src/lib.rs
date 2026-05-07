@@ -600,6 +600,15 @@ where
             Self::IPPO(algorithm) => algorithm.acquire_model_module(),
         }
     }
+
+    /// Export the value (baseline) head as an in-memory ONNX model.
+    /// Returns `None` before the first training epoch or when no actors are registered.
+    pub fn acquire_value_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::PPO(algorithm) => algorithm.acquire_value_module(),
+            Self::IPPO(algorithm) => algorithm.acquire_value_module(),
+        }
+    }
 }
 
 /// Runtime wrapper for **independent** REINFORCE-family algorithms with kernel `K`.

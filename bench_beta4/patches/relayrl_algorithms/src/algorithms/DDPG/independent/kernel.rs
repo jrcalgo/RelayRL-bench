@@ -213,6 +213,7 @@ where
         }
         Some(specs)
     }
+    fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> { None }
 }
 
 // ── Training backend (ndarray + autodiff) ─────────────────────────────────────

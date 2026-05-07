@@ -985,12 +985,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut trainer = PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?;
                 // Pre-register slot so the kernel is ready for inference immediately
                 trainer.register_first_slot_with_key(actor_id.to_string());
-                // Prime ORT with initial policy weights so perform_local_ppo_inference is ready
+                // Prime ORT policy head
                 if let Some(model_module) = trainer.acquire_model_module() {
                     runtime.perform_refresh_model(model_module, device.clone())
                         .await
                         .map_err(|e| StateManagerError::TrainerError(
-                            format!("[StateManager] ORT prime failed: {}", e)
+                            format!("[StateManager] ORT policy prime failed: {}", e)
+                        ))?;
+                }
+                // Prime ORT value head
+                if let Some(vf_module) = trainer.acquire_value_module() {
+                    runtime.perform_refresh_value_model(vf_module, device.clone())
+                        .await
+                        .map_err(|e| StateManagerError::TrainerError(
+                            format!("[StateManager] ORT value prime failed: {}", e)
                         ))?;
                 }
                 // Per-env trajectory state — build trajectories directly without ActorTrajectoryState
@@ -1030,22 +1038,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     })?;
                     ns_ort += t_ort.elapsed().as_nanos();
 
-                    // Burn value-head-only inference for GAE advantage estimates
+                    // ORT value-head inference for GAE advantage estimates
                     let t_val = std::time::Instant::now();
-                    let obs_data_per_env: Vec<TensorData> = (0..n_envs)
-                        .map(|i| {
-                            let start = i * obs_bytes_per_env;
-                            TensorData::new(
-                                vec![obs_dim],
-                                DType::NdArray(NdArrayDType::F32),
-                                obs_bytes[start..start + obs_bytes_per_env].to_vec(),
-                                SupportedTensorBackend::NdArray,
-                            )
-                        })
-                        .collect();
-                    let vals: Vec<f32> = trainer
-                        .value_inference_only(&obs_data_per_env)
-                        .unwrap_or_else(|| vec![0.0f32; n_envs]);
+                    let vals: Vec<f32> = runtime
+                        .perform_local_value_inference(&obs_bytes, n_envs, obs_dim)
+                        .await;
                     ns_val += t_val.elapsed().as_nanos();
 
                     let t_traj_start = std::time::Instant::now();
@@ -1128,9 +1125,12 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                     else { return_window.iter().sum::<f32>() / return_window.len() as f32 };
                                 println!("[PPO epoch {:>4}] episodes={:>5}  mean_ret(100)={:>8.1}  last_ep={:>8.1}",
                                     epoch_count, completed_episodes, mean_ret, ep_ret);
-                                // Refresh ORT with updated policy weights after each training epoch
+                                // Refresh ORT policy and value heads with updated weights
                                 if let Some(model_module) = trainer.acquire_model_module() {
                                     let _ = runtime.perform_refresh_model(model_module, device.clone()).await;
+                                }
+                                if let Some(vf_module) = trainer.acquire_value_module() {
+                                    let _ = runtime.perform_refresh_value_model(vf_module, device.clone()).await;
                                 }
                             }
                         } else {
@@ -1144,7 +1144,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let ms = |n: u128| n as f64 / 1_000_000.0;
                 println!("\n── PPO step-loop time breakdown ({} steps) ──────────────────────", step_count);
                 println!("  ORT policy inference (logits+sample+step) : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
-                println!("  burn value-head inference (GAE val)       : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
+                println!("  ORT value-head inference (GAE val)        : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
                 println!("  trajectory building (TensorData/per-env)  : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
                 println!("  PPO training (receive_trajectory/update)   : {:>8.0} ms  ({:.1}%)", ms(ns_train), pct(ns_train));
                 println!("  accounted total                            : {:>8.0} ms", ms(total_ns));

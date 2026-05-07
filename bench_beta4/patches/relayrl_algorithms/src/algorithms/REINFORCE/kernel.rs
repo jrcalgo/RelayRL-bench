@@ -1056,6 +1056,7 @@ where
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
         PolicyWithBaseline::get_pi_layer_specs(self)
     }
+    fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> { None }
 }
 
 #[cfg(feature = "ndarray-backend")]
@@ -1105,4 +1106,5 @@ where
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
         PolicyWithoutBaseline::get_pi_layer_specs(self)
     }
+    fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> { None }
 }

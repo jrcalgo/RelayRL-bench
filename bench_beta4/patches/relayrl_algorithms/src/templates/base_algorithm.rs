@@ -164,6 +164,7 @@ pub trait StepKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK:
 /// weights to the ONNX builder without any filesystem I/O.
 pub trait WeightProvider {
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
+    fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>>;
 }
 
 /// Base trait for kernels used in **multi-agent** algorithms.

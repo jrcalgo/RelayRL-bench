@@ -634,11 +634,28 @@ where
             let out_dim = dims[1];
             let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
             let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
-                bias_param
-                    .val()
-                    .into_data()
-                    .to_vec::<f32>()
-                    .unwrap_or_default()
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; out_dim]
+            };
+            specs.push((in_dim, out_dim, weights, biases));
+        }
+        Some(specs)
+    }
+
+    fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
+        let trainer = self.vf_trainer.as_ref()?;
+        let network = trainer.network.as_ref()?;
+
+        let mut specs = Vec::new();
+        for layer in &network.layers {
+            let w = layer.weight.val();
+            let dims = w.dims();
+            let in_dim = dims[0];
+            let out_dim = dims[1];
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
             } else {
                 vec![0.0; out_dim]
             };

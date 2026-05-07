@@ -416,6 +416,25 @@ where
             None,
         )
     }
+
+    /// Export the value (baseline) head as an in-memory ONNX model.
+    /// Output is a single scalar value per obs: shape [batch, 1].
+    pub fn acquire_value_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        use relayrl_types::data::tensor::{DType, NdArrayDType};
+
+        let slot = self.runtime.components.agent_slots.first()?;
+        let layer_specs = slot.kernel.get_vf_layer_specs()?;
+
+        crate::acquire_model_module::<B>(
+            "ppo_vf",
+            layer_specs,
+            DType::NdArray(NdArrayDType::F32),
+            DType::NdArray(NdArrayDType::F32),
+            vec![1, self.runtime.args.obs_dim],
+            vec![1, 1],
+            None,
+        )
+    }
 }
 
 impl<B, InK, OutK, KN, T> AlgorithmTrait<T> for IndependentPPOAlgorithm<B, InK, OutK, KN>

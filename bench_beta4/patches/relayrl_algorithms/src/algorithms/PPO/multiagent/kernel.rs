@@ -186,6 +186,7 @@ impl crate::templates::base_algorithm::WeightProvider for MultiagentPPOKernel {
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
         MultiagentPPOKernel::get_pi_layer_specs(self)
     }
+    fn get_vf_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> { None }
 }
 
 fn sample_count_for_batch(batch: &AgentBatch) -> usize {
