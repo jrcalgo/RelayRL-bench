@@ -943,8 +943,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         kernel: KN,
     ) -> Result<(), StateManagerError>
     where
-        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
-        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B> + Send + 'static,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
@@ -1001,6 +1001,45 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             format!("[StateManager] ORT value prime failed: {}", e)
                         ))?;
                 }
+                // Async learner-worker split: collection loop sends completed trajectories
+                // non-blocking; the learner task consumes them and runs gradient updates
+                // independently, so env stepping is never stalled by training.
+                let (traj_tx, mut traj_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<RelayRLTrajectory>();
+                let epoch_count_shared =
+                    Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let epoch_count_learner = Arc::clone(&epoch_count_shared);
+                let runtime_learner = Arc::clone(&runtime);
+                let device_learner = device.clone();
+                // trainer moves into the learner task; collection loop only holds traj_tx
+                let learner_handle: tokio::task::JoinHandle<Result<(), StateManagerError>> =
+                    tokio::spawn(async move {
+                        let mut trainer = trainer;
+                        while let Some(traj) = traj_rx.recv().await {
+                            let trained =
+                                AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
+                                    &mut trainer, traj,
+                                )
+                                .await
+                                .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
+                            if trained {
+                                epoch_count_learner
+                                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+                                if let Some(model_module) = trainer.acquire_model_module() {
+                                    let _ = runtime_learner
+                                        .perform_refresh_model(model_module, device_learner.clone())
+                                        .await;
+                                }
+                                if let Some(vf_module) = trainer.acquire_value_module() {
+                                    let _ = runtime_learner
+                                        .perform_refresh_value_model(vf_module, device_learner.clone())
+                                        .await;
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+
                 // Per-env trajectory state — build trajectories directly without ActorTrajectoryState
                 let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs)
                     .map(|_| RelayRLTrajectory::new(4096))
@@ -1010,20 +1049,23 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut per_env_ep_return: Vec<f32> = vec![0.0f32; n_envs];
                 let mut completed_episodes: u64 = 0;
                 let mut return_window: Vec<f32> = Vec::with_capacity(100);
-                let mut epoch_count: u64 = 0;
-                // Timing accumulators (nanoseconds)
+                let mut last_printed_epoch: u64 = 0;
+                // Timing accumulators (nanoseconds) — training runs concurrently, not measured here
                 let mut ns_ort: u128 = 0;
                 let mut ns_val: u128 = 0;
                 let mut ns_traj: u128 = 0;
-                let mut ns_train: u128 = 0;
 
                 let obs_bytes_per_env = obs_dim * 4; // f32
                 let act_bytes_per_env = 8usize;      // i64
 
+                let t_collection_start = std::time::Instant::now();
+                let mut ns_flat_obs: u128 = 0;
                 for _ in 0..step_count {
+                    let t_flat = std::time::Instant::now();
                     let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
                         StateManagerError::StepEnvError("[StateManager] flat_observation_bytes returned None".to_string())
                     })?;
+                    ns_flat_obs += t_flat.elapsed().as_nanos();
 
                     // ORT inference: policy logits → categorical sample → (action i64 bytes, logp f32 bytes)
                     let t_ort = std::time::Instant::now();
@@ -1114,43 +1156,50 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             per_env_episode[i] += 1;
 
                             ns_traj += t_traj_env.elapsed().as_nanos();
-                            let t_train_start = std::time::Instant::now();
-                            let trained = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut trainer, traj)
-                                .await
-                                .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
-                            ns_train += t_train_start.elapsed().as_nanos();
-                            if trained {
-                                epoch_count += 1;
+                            // Non-blocking send to learner task (unbounded channel, never stalls collection)
+                            let _ = traj_tx.send(traj);
+                            // Check if the learner completed an epoch and print convergence stats
+                            let current_epoch =
+                                epoch_count_shared.load(std::sync::atomic::Ordering::Acquire);
+                            if current_epoch > last_printed_epoch {
+                                last_printed_epoch = current_epoch;
                                 let mean_ret = if return_window.is_empty() { 0.0 }
                                     else { return_window.iter().sum::<f32>() / return_window.len() as f32 };
                                 println!("[PPO epoch {:>4}] episodes={:>5}  mean_ret(100)={:>8.1}  last_ep={:>8.1}",
-                                    epoch_count, completed_episodes, mean_ret, ep_ret);
-                                // Refresh ORT policy and value heads with updated weights
-                                if let Some(model_module) = trainer.acquire_model_module() {
-                                    let _ = runtime.perform_refresh_model(model_module, device.clone()).await;
-                                }
-                                if let Some(vf_module) = trainer.acquire_value_module() {
-                                    let _ = runtime.perform_refresh_value_model(vf_module, device.clone()).await;
-                                }
+                                    current_epoch, completed_episodes, mean_ret, ep_ret);
                             }
                         } else {
                             ns_traj += t_traj_env.elapsed().as_nanos();
                         }
                     }
                 }
-                // Print timing breakdown
-                let total_ns = ns_ort + ns_val + ns_traj + ns_train;
+                // Snapshot collection time BEFORE waiting for the learner to drain
+                let collection_wall_ns = t_collection_start.elapsed().as_nanos();
+
+                // Signal learner to drain remaining trajectories and shut down cleanly
+                drop(traj_tx);
+                learner_handle
+                    .await
+                    .map_err(|e| StateManagerError::TrainerError(
+                        format!("learner task panicked: {e:?}")
+                    ))??;
+
+                // Print timing breakdown (training ran concurrently with collection)
+                let collection_fps =
+                    step_count as f64 * n_envs as f64 / (collection_wall_ns as f64 / 1e9);
+                let total_ns = ns_flat_obs + ns_ort + ns_val + ns_traj;
                 let pct = |n: u128| if total_ns > 0 { n as f64 / total_ns as f64 * 100.0 } else { 0.0 };
                 let ms = |n: u128| n as f64 / 1_000_000.0;
-                println!("\n── PPO step-loop time breakdown ({} steps) ──────────────────────", step_count);
+                println!("\n── PPO step-loop time breakdown ({} steps, async learner) ────────", step_count);
+                println!("  flat_observation_bytes (get obs)           : {:>8.0} ms  ({:.1}%)", ms(ns_flat_obs), pct(ns_flat_obs));
                 println!("  ORT policy inference (logits+sample+step) : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
                 println!("  ORT value-head inference (GAE val)        : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
                 println!("  trajectory building (TensorData/per-env)  : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
-                println!("  PPO training (receive_trajectory/update)   : {:>8.0} ms  ({:.1}%)", ms(ns_train), pct(ns_train));
-                println!("  accounted total                            : {:>8.0} ms", ms(total_ns));
+                println!("  PPO training (learner task, concurrent)    : not measured (overlapped with collection)");
+                println!("  collection wall time                       : {:>8.0} ms", collection_wall_ns as f64 / 1e6);
+                println!("  collection env-frames/sec                  : {:>8.0}", collection_fps);
                 println!("─────────────────────────────────────────────────────────────────");
 
-                let _ = &trainer;
                 let _ = &env_context;
                 Ok(())
             })

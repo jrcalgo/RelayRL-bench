@@ -262,8 +262,8 @@ pub(crate) trait ClientEnvironments<
         kernel: KN,
     ) -> Result<(), CoordinatorError>
     where
-        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
-        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B> + Send + 'static,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
@@ -1935,8 +1935,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
         kernel: KN,
     ) -> Result<(), CoordinatorError>
     where
-        KindIn: TensorKind<B> + burn_tensor::BasicOps<B>,
-        KindOut: TensorKind<B> + burn_tensor::Numeric<B>,
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + burn_tensor::Numeric<B> + Send + 'static,
         KN: relayrl_algorithms::StepKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::PPOKernelTrait<B, KindIn, KindOut>
             + relayrl_algorithms::WeightProvider
