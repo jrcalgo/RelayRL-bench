@@ -952,11 +952,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
             + Send
             + 'static,
     {
-        use relayrl_algorithms::templates::base_algorithm::{AlgorithmTrait, StepAction};
+        use relayrl_algorithms::templates::base_algorithm::AlgorithmTrait;
         use relayrl_algorithms::{PpoTrainer, PpoTrainerSpec};
         use relayrl_types::data::action::{RelayRLAction, RelayRLData};
         use relayrl_types::data::tensor::{DType, NdArrayDType, SupportedTensorBackend, TensorData};
-        use burn_tensor::{Tensor, TensorData as BurnTensorData};
         use std::collections::HashMap;
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -986,7 +985,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut trainer = PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?;
                 // Pre-register slot so the kernel is ready for inference immediately
                 trainer.register_first_slot_with_key(actor_id.to_string());
-                let device_burn = <B as burn_tensor::backend::Backend>::Device::default();
+                // Prime ORT with initial policy weights so perform_local_ppo_inference is ready
+                if let Some(model_module) = trainer.acquire_model_module() {
+                    runtime.perform_refresh_model(model_module, device.clone())
+                        .await
+                        .map_err(|e| StateManagerError::TrainerError(
+                            format!("[StateManager] ORT prime failed: {}", e)
+                        ))?;
+                }
                 // Per-env trajectory state — build trajectories directly without ActorTrajectoryState
                 let mut per_env_trajs: Vec<RelayRLTrajectory> = (0..n_envs)
                     .map(|_| RelayRLTrajectory::new(4096))
@@ -998,62 +1004,51 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut return_window: Vec<f32> = Vec::with_capacity(100);
                 let mut epoch_count: u64 = 0;
                 // Timing accumulators (nanoseconds)
-                let mut ns_infer: u128 = 0;
+                let mut ns_ort: u128 = 0;
+                let mut ns_val: u128 = 0;
                 let mut ns_traj: u128 = 0;
                 let mut ns_train: u128 = 0;
 
+                let obs_bytes_per_env = obs_dim * 4; // f32
+                let act_bytes_per_env = 8usize;      // i64
+
                 for _ in 0..step_count {
-                    let t_infer_start = std::time::Instant::now();
                     let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
                         StateManagerError::StepEnvError("[StateManager] flat_observation_bytes returned None".to_string())
                     })?;
 
-                    // Build obs tensor [n_envs, obs_dim] from raw f32 bytes
-                    let obs_floats: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&obs_bytes).to_vec();
-                    let obs_tensor = Tensor::<B, 2, KindIn>::from_data(
-                        BurnTensorData::new(obs_floats, [n_envs, obs_dim]),
-                        &device_burn,
-                    );
-                    // All-ones mask [n_envs, act_dim]
-                    let mask_tensor = Tensor::<B, 2, KindOut>::ones([n_envs, act_dim], &device_burn);
-
-                    // Inference via trainer's internal kernel (ensures training and inference share weights)
-                    let (step_action, step_meta) = trainer
-                        .step_inference::<2, 2>(obs_tensor, mask_tensor)
-                        .ok_or_else(|| StateManagerError::InferenceRequestError(
-                            "[StateManager] PPO trainer has no agent slot for inference".to_string(),
-                        ))?
+                    // ORT inference: policy logits → categorical sample → (action i64 bytes, logp f32 bytes)
+                    let t_ort = std::time::Instant::now();
+                    let (action_bytes_i64, logp_bytes) = runtime
+                        .perform_local_ppo_inference(&obs_bytes, n_envs, obs_dim, act_dim)
+                        .await
                         .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-
-                    // Extract discrete action indices from tensor [n_envs, 1] Int
-                    let act_int_tensor = match step_action {
-                        StepAction::Discrete(t) => t,
-                        StepAction::Continuous(_) => {
-                            return Err(StateManagerError::InferenceRequestError(
-                                "[StateManager] PPO step loop expects discrete actions".to_string(),
-                            ))
-                        }
-                    };
-                    let burn_act_data = act_int_tensor.into_data();
-                    let act_raw_bytes: &[u8] = burn_act_data.as_bytes();
-                    // i64 action indices: 8 bytes each
-                    let act_i64: &[i64] = bytemuck::cast_slice(act_raw_bytes);
+                    let act_i64: &[i64] = bytemuck::cast_slice(&action_bytes_i64);
                     let action_bytes_for_env: Vec<u8> = act_i64.iter().map(|&a| a as u8).collect();
-
-                    // Step environments
                     let (_, rewards, dones) = env_interface.step_bytes(&action_bytes_for_env).ok_or_else(|| {
                         StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string())
                     })?;
-                    ns_infer += t_infer_start.elapsed().as_nanos();
+                    ns_ort += t_ort.elapsed().as_nanos();
 
-                    // Extract logp_a and val TensorData (shape [n_envs, 1], f32 bytes)
+                    // Burn value-head-only inference for GAE advantage estimates
+                    let t_val = std::time::Instant::now();
+                    let obs_data_per_env: Vec<TensorData> = (0..n_envs)
+                        .map(|i| {
+                            let start = i * obs_bytes_per_env;
+                            TensorData::new(
+                                vec![obs_dim],
+                                DType::NdArray(NdArrayDType::F32),
+                                obs_bytes[start..start + obs_bytes_per_env].to_vec(),
+                                SupportedTensorBackend::NdArray,
+                            )
+                        })
+                        .collect();
+                    let vals: Vec<f32> = trainer
+                        .value_inference_only(&obs_data_per_env)
+                        .unwrap_or_else(|| vec![0.0f32; n_envs]);
+                    ns_val += t_val.elapsed().as_nanos();
+
                     let t_traj_start = std::time::Instant::now();
-                    let logp_td = step_meta.get("logp_a").cloned();
-                    let val_td = step_meta.get("val").cloned();
-
-                    let obs_bytes_per_env = obs_dim * 4; // f32
-                    let act_bytes_per_env = 8usize;      // i64
-
                     for i in 0..n_envs {
                         // Per-env observation TensorData: [obs_dim] f32
                         let obs_start = i * obs_bytes_per_env;
@@ -1069,41 +1064,31 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         let act_i = TensorData::new(
                             vec![1],
                             DType::NdArray(NdArrayDType::I64),
-                            act_raw_bytes[act_start..act_start + act_bytes_per_env].to_vec(),
+                            action_bytes_i64[act_start..act_start + act_bytes_per_env].to_vec(),
                             SupportedTensorBackend::NdArray,
                         );
 
-                        // Per-env logp_a: scalar f32 (4 bytes)
-                        let logp_i = logp_td.as_ref().map(|td| {
-                            let start = i * 4;
-                            let end = (start + 4).min(td.data.len());
-                            TensorData::new(
-                                vec![1],
-                                DType::NdArray(NdArrayDType::F32),
-                                td.data[start..end].to_vec(),
-                                SupportedTensorBackend::NdArray,
-                            )
-                        });
+                        // Per-env logp_a from ORT categorical sample (f32, 4 bytes)
+                        let logp_start = i * 4;
+                        let logp_i = TensorData::new(
+                            vec![1],
+                            DType::NdArray(NdArrayDType::F32),
+                            logp_bytes[logp_start..logp_start + 4].to_vec(),
+                            SupportedTensorBackend::NdArray,
+                        );
 
-                        // Per-env val: scalar f32 (4 bytes)
-                        let val_i = val_td.as_ref().map(|td| {
-                            let start = i * 4;
-                            let end = (start + 4).min(td.data.len());
-                            TensorData::new(
-                                vec![1],
-                                DType::NdArray(NdArrayDType::F32),
-                                td.data[start..end].to_vec(),
-                                SupportedTensorBackend::NdArray,
-                            )
-                        });
+                        // Per-env value from burn value-head
+                        let val_bytes = vals[i].to_le_bytes().to_vec();
+                        let val_i = TensorData::new(
+                            vec![1],
+                            DType::NdArray(NdArrayDType::F32),
+                            val_bytes,
+                            SupportedTensorBackend::NdArray,
+                        );
 
                         let mut data_map: HashMap<String, RelayRLData> = HashMap::new();
-                        if let Some(logp) = logp_i {
-                            data_map.insert("logp_a".to_string(), RelayRLData::Tensor(logp));
-                        }
-                        if let Some(val) = val_i {
-                            data_map.insert("val".to_string(), RelayRLData::Tensor(val));
-                        }
+                        data_map.insert("logp_a".to_string(), RelayRLData::Tensor(logp_i));
+                        data_map.insert("val".to_string(), RelayRLData::Tensor(val_i));
 
                         per_env_ep_return[i] += rewards[i];
                         let action = RelayRLAction::new(
@@ -1112,7 +1097,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             None,
                             rewards[i],
                             dones[i],
-                            if data_map.is_empty() { None } else { Some(data_map) },
+                            Some(data_map),
                             Some(actor_id),
                         );
                         per_env_trajs[i].add_action(action);
@@ -1143,7 +1128,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                     else { return_window.iter().sum::<f32>() / return_window.len() as f32 };
                                 println!("[PPO epoch {:>4}] episodes={:>5}  mean_ret(100)={:>8.1}  last_ep={:>8.1}",
                                     epoch_count, completed_episodes, mean_ret, ep_ret);
-                                // Inference uses trainer.step_inference() directly — no ONNX export needed.
+                                // Refresh ORT with updated policy weights after each training epoch
+                                if let Some(model_module) = trainer.acquire_model_module() {
+                                    let _ = runtime.perform_refresh_model(model_module, device.clone()).await;
+                                }
                             }
                         } else {
                             ns_traj += t_traj_start.elapsed().as_nanos();
@@ -1151,19 +1139,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     }
                 }
                 // Print timing breakdown
-                let total_ns = ns_infer + ns_traj + ns_train;
+                let total_ns = ns_ort + ns_val + ns_traj + ns_train;
                 let pct = |n: u128| if total_ns > 0 { n as f64 / total_ns as f64 * 100.0 } else { 0.0 };
                 let ms = |n: u128| n as f64 / 1_000_000.0;
                 println!("\n── PPO step-loop time breakdown ({} steps) ──────────────────────", step_count);
-                println!("  inference (obs→tensor→forward→env.step) : {:>8.0} ms  ({:.1}%)", ms(ns_infer), pct(ns_infer));
-                println!("  trajectory building (TensorData/per-env) : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
-                println!("  PPO training (receive_trajectory/update)  : {:>8.0} ms  ({:.1}%)", ms(ns_train), pct(ns_train));
-                println!("  accounted total                           : {:>8.0} ms", ms(total_ns));
+                println!("  ORT policy inference (logits+sample+step) : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
+                println!("  burn value-head inference (GAE val)       : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
+                println!("  trajectory building (TensorData/per-env)  : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
+                println!("  PPO training (receive_trajectory/update)   : {:>8.0} ms  ({:.1}%)", ms(ns_train), pct(ns_train));
+                println!("  accounted total                            : {:>8.0} ms", ms(total_ns));
                 println!("─────────────────────────────────────────────────────────────────");
 
-                // Note: save() internally calls acquire_model (ONNX export) which requires ORT.
-                // Skip save here; the kernel weights remain in the trainer for any post-hoc use.
-                let _ = &trainer; // keep trainer alive until here
+                let _ = &trainer;
                 let _ = &env_context;
                 Ok(())
             })

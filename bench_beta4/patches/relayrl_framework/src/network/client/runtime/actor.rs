@@ -649,6 +649,70 @@ impl<
         Ok(action_bytes)
     }
 
+    /// ORT-backed inference for PPO rollouts: returns discrete action indices (i64 LE bytes,
+    /// 8 bytes per env) and the log-probability of each sampled action (f32 LE bytes, 4
+    /// bytes per env).  Sampling is categorical so exploration is preserved.
+    pub(crate) async fn perform_local_ppo_inference(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+    ) -> Result<(Vec<u8>, Vec<u8>), ActorError> {
+        let loaded_model = self.reloadable_model.load();
+        let reloadable_model_ref = loaded_model.as_ref().ok_or_else(|| {
+            ActorError::SystemError("ORT model not loaded — call perform_refresh_model first".to_string())
+        })?;
+        let module = reloadable_model_ref.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            DType::NdArray(NdArrayDType::F32),
+            obs_bytes.to_vec(),
+            SupportedTensorBackend::NdArray,
+        );
+        let output = module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
+
+        // output.data is raw f32 logits [n_envs × act_dim]
+        let logits: Vec<f32> = output.data.chunks(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        let mut action_bytes = Vec::with_capacity(n_envs * 8);
+        let mut logp_bytes   = Vec::with_capacity(n_envs * 4);
+        let mut rng = rand::rng();
+
+        for i in 0..n_envs {
+            let start = i * act_dim;
+            let env_logits = &logits[start..start + act_dim];
+
+            // numerically stable softmax
+            let max_l = env_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f64> = env_logits.iter().map(|&x| ((x - max_l) as f64).exp()).collect();
+            let sum_exp: f64 = exps.iter().sum();
+            let probs: Vec<f64> = exps.iter().map(|&x| x / sum_exp).collect();
+
+            // categorical sample
+            let act_idx: i64 = match rand::distr::weighted::WeightedIndex::new(&probs) {
+                Ok(dist) => {
+                    use rand::distr::Distribution;
+                    dist.sample(&mut rng) as i64
+                }
+                Err(_) => 0,
+            };
+
+            // logp of sampled action
+            let logp = (probs[act_idx as usize] as f32).ln();
+
+            action_bytes.extend_from_slice(&act_idx.to_le_bytes());
+            logp_bytes.extend_from_slice(&logp.to_le_bytes());
+        }
+
+        Ok((action_bytes, logp_bytes))
+    }
+
     pub(crate) async fn flag_last_action(
         &self,
         reward: f32,

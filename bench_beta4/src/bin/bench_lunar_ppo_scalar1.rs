@@ -52,6 +52,12 @@ const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Make ORT dylib available for policy ONNX inference during rollouts.
+    std::env::set_var(
+        "ORT_DYLIB_PATH",
+        "/usr/local/lib/python3.11/dist-packages/onnxruntime/capi/libonnxruntime.so.1.25.0",
+    );
+
     type B = NdArray;
 
     let num_cores = std::thread::available_parallelism()
@@ -60,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL beta.4 — PPO — LunarLander discrete — 1 env  (SB3 Zoo hparams)");
+    println!("  inference: ORT policy (categorical) + burn value-head (GAE)");
     println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  total steps={TOTAL_STEPS}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}");
     println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  traj/epoch={TRAJ_PER_EPOCH}");

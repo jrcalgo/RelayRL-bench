@@ -367,6 +367,20 @@ where
         let slot = self.runtime.components.agent_slots.first()?;
         Some(slot.kernel.step::<IN_D, OUT_D>(obs, mask))
     }
+
+    /// Run only the value (baseline) head of the first registered kernel.
+    /// `obs_data`: one TensorData per env, shape [obs_dim].
+    /// Returns per-env value estimates as a flat `Vec<f32>`.
+    pub fn value_inference_only(
+        &self,
+        obs_data: &[relayrl_types::data::tensor::TensorData],
+    ) -> Option<Vec<f32>>
+    where
+        KN: super::kernel::PPOKernelTrait<B, InK, OutK>,
+    {
+        let slot = self.runtime.components.agent_slots.first()?;
+        Some(slot.kernel.value_forward_only(obs_data, &[]))
+    }
 }
 
 #[cfg(feature = "ndarray-backend")]

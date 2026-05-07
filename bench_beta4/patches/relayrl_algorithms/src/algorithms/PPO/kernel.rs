@@ -69,6 +69,11 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     ) -> (f32, HashMap<String, f32>);
 
     fn ppo_vf_loss(&mut self, obs: &[TensorData], mask: &[TensorData], ret: &[f32]) -> f32;
+
+    /// Run only the value head for a batch of observations. Returns flat f32 values.
+    /// Used when the policy is handled externally (e.g. via ORT) and only the value
+    /// estimate is needed for GAE advantage computation.
+    fn value_forward_only(&self, obs: &[TensorData], mask: &[TensorData]) -> Vec<f32>;
 }
 
 #[cfg(feature = "ndarray-backend")]
@@ -452,6 +457,24 @@ where
 }
 
 impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
+    PPOPolicyWithBaseline<B, InK, OutK>
+where
+    InK: BasicOps<B>,
+    OutK: BasicOps<B> + burn_tensor::Numeric<B>,
+{
+    /// Run only the value (baseline) head. Used when the policy inference is handled
+    /// externally (e.g. via ORT) and only the value estimate is needed per step.
+    pub fn value_forward_only<const IN_D: usize, const OUT_D: usize>(
+        &self,
+        obs: Tensor<B, IN_D, InK>,
+        mask: Tensor<B, OUT_D, OutK>,
+    ) -> Vec<f32> {
+        let v = self.baseline.forward(obs, mask);
+        v.into_data().to_vec::<f32>().unwrap_or_default()
+    }
+}
+
+impl<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>>
     StepKernelTrait<B, InK, OutK> for PPOPolicyWithBaseline<B, InK, OutK>
 where
     InK: BasicOps<B>,
@@ -566,6 +589,25 @@ where
         }
 
         0.0
+    }
+
+    fn value_forward_only(&self, obs: &[TensorData], _mask: &[TensorData]) -> Vec<f32> {
+        if obs.is_empty() {
+            return Vec::new();
+        }
+        let n = obs.len();
+        let obs_dim = obs[0].shape[0];
+        let device = <B as burn_tensor::backend::Backend>::Device::default();
+        let flat: Vec<f32> = obs.iter()
+            .flat_map(|td| td.data.chunks(4).map(|b| f32::from_le_bytes([b[0],b[1],b[2],b[3]])))
+            .collect();
+        let obs_t = burn_tensor::Tensor::<B, 2, InK>::from_data(
+            burn_tensor::TensorData::new(flat, [n, obs_dim]),
+            &device,
+        );
+        let mask_t = burn_tensor::Tensor::<B, 2, OutK>::ones([n, self.output_dim], &device);
+        let v = self.baseline.forward(obs_t, mask_t);
+        v.into_data().to_vec::<f32>().unwrap_or_default()
     }
 }
 

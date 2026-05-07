@@ -566,6 +566,20 @@ where
             Self::IPPO(algorithm) => algorithm.step_inference::<IN_D, OUT_D>(obs, mask),
         }
     }
+
+    /// Run only the value head. `obs_data`: one TensorData per env, shape [obs_dim].
+    pub fn value_inference_only(
+        &self,
+        obs_data: &[relayrl_types::data::tensor::TensorData],
+    ) -> Option<Vec<f32>>
+    where
+        K: PPOKernelTrait<B, InK, OutK>,
+    {
+        match self {
+            Self::PPO(algorithm) => algorithm.value_inference_only(obs_data),
+            Self::IPPO(algorithm) => algorithm.value_inference_only(obs_data),
+        }
+    }
 }
 
 #[cfg(feature = "ndarray-backend")]
