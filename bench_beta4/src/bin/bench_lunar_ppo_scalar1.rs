@@ -34,7 +34,7 @@ use lunarlander_rl::env::LunarLanderEnv;
 const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
-const ENV_COUNT: u32 = 1;
+const ENV_COUNT: u32 = 64;
 // ── Hyperparameters (SB3 RL Baselines3-Zoo for LunarLander-v2) ──────────────
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
@@ -45,7 +45,8 @@ const TRAIN_PI_ITERS: u64 = 10;
 const TRAIN_VF_ITERS: u64 = 80;
 const TARGET_KL: f32 = 0.1;
 const TRAJ_PER_EPOCH: u64 = 64;
-const TOTAL_STEPS: usize = 500_000;
+// 500_000 env-frames / 64 envs = ~7813 loop iterations → same total experience as 1-env run
+const TOTAL_STEPS: usize = 7_813;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
@@ -64,10 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|n| n.get())
         .unwrap_or(1);
 
+    let total_env_frames = TOTAL_STEPS * ENV_COUNT as usize;
     println!("═══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL beta.4 — PPO — LunarLander discrete — 1 env  (SB3 Zoo hparams)");
-    println!("  inference: ORT policy (categorical) + burn value-head (GAE)");
-    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  total steps={TOTAL_STEPS}");
+    println!("  RelayRL beta.4 — PPO — LunarLander discrete — {ENV_COUNT} envs  (SB3 Zoo hparams)");
+    println!("  inference: ORT policy (categorical) + ORT value-head (GAE) + OpenBLAS training");
+    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}");
     println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  traj/epoch={TRAJ_PER_EPOCH}");
     println!("  {num_cores} logical cores");
@@ -145,12 +147,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wall = t0.elapsed().as_secs_f64();
 
     // ── Final stats ──────────────────────────────────────────────────────────
-    let steps_per_sec = TOTAL_STEPS as f64 / wall;
+    let loop_steps_per_sec = TOTAL_STEPS as f64 / wall;
+    let env_frames_per_sec = loop_steps_per_sec * ENV_COUNT as f64;
 
     println!("\n═══════════════════════════════════════════════════════════════════");
     println!("  PPO training complete");
-    println!("  wall time    : {:.2}s", wall);
-    println!("  steps/sec    : {:.0}", steps_per_sec);
+    println!("  wall time         : {:.2}s", wall);
+    println!("  loop steps/sec    : {:.0}  (each step = {} env transitions)", loop_steps_per_sec, ENV_COUNT);
+    println!("  env-frames/sec    : {:.0}", env_frames_per_sec);
     println!("═══════════════════════════════════════════════════════════════════");
 
     agent.shutdown().await?;

@@ -1045,8 +1045,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         .await;
                     ns_val += t_val.elapsed().as_nanos();
 
-                    let t_traj_start = std::time::Instant::now();
                     for i in 0..n_envs {
+                        let t_traj_env = std::time::Instant::now();
                         // Per-env observation TensorData: [obs_dim] f32
                         let obs_start = i * obs_bytes_per_env;
                         let obs_i = TensorData::new(
@@ -1074,7 +1074,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             SupportedTensorBackend::NdArray,
                         );
 
-                        // Per-env value from burn value-head
+                        // Per-env value from ORT value head
                         let val_bytes = vals[i].to_le_bytes().to_vec();
                         let val_i = TensorData::new(
                             vec![1],
@@ -1113,7 +1113,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             traj.set_episode(per_env_episode[i]);
                             per_env_episode[i] += 1;
 
-                            ns_traj += t_traj_start.elapsed().as_nanos();
+                            ns_traj += t_traj_env.elapsed().as_nanos();
                             let t_train_start = std::time::Instant::now();
                             let trained = AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(&mut trainer, traj)
                                 .await
@@ -1134,7 +1134,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 }
                             }
                         } else {
-                            ns_traj += t_traj_start.elapsed().as_nanos();
+                            ns_traj += t_traj_env.elapsed().as_nanos();
                         }
                     }
                 }
