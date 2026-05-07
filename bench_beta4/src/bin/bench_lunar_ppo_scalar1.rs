@@ -45,7 +45,10 @@ const TRAIN_PI_ITERS: u64 = 10;
 const TRAIN_VF_ITERS: u64 = 80;
 const TARGET_KL: f32 = 0.1;
 const TRAJ_PER_EPOCH: u64 = 64;
-// 500_000 env-frames / 64 envs = ~7813 loop iterations → same total experience as 1-env run
+// 500_000 env-frames / 64 envs = ~7813 loop iterations → same total experience as 1-env run.
+// Note: scaling traj_per_epoch proportionally (×64) to match 1-env training cadence per step
+// causes training batch to grow 64× (368k transitions), making each epoch ~5min → impractical.
+// Async learner-worker split is required to decouple collection throughput from training cost.
 const TOTAL_STEPS: usize = 7_813;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
