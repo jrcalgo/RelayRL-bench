@@ -74,6 +74,25 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     /// Used when the policy is handled externally (e.g. via ORT) and only the value
     /// estimate is needed for GAE advantage computation.
     fn value_forward_only(&self, obs: &[TensorData], mask: &[TensorData]) -> Vec<f32>;
+
+    /// Pre-flattened variants: caller converts TensorData→flat arrays once before the
+    /// training loop; these methods skip the repeated allocation inside each gradient step.
+    fn ppo_pi_loss_flat(
+        &mut self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        act_flat: &[i64],
+        adv: &[f32],
+        logp_old: &[f32],
+        clip_ratio: f32,
+    ) -> (f32, HashMap<String, f32>);
+
+    fn ppo_vf_loss_flat(
+        &mut self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        ret: &[f32],
+    ) -> f32;
 }
 
 #[cfg(feature = "ndarray-backend")]
@@ -240,6 +259,75 @@ mod training {
             info.insert("clipfrac".to_string(), clipfrac);
             (loss_value, info)
         }
+
+        // Pre-flattened variant: obs_flat/act_flat/logp_old are already converted scalars.
+        // Eliminates per-call TensorData→Vec allocation when called in a training loop.
+        pub fn train_step_flat(
+            &mut self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[i64],
+            adv: &[f32],
+            logp_old: &[f32],
+            clip_ratio: f32,
+        ) -> (f32, HashMap<String, f32>) {
+            let n = (obs_flat.len() / obs_dim.max(1))
+                .min(act_flat.len())
+                .min(adv.len())
+                .min(logp_old.len());
+            if n == 0 {
+                return zero_pi_info();
+            }
+            let net = match self.network.take() {
+                Some(network) => network,
+                None => return zero_pi_info(),
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let logits = net.forward(obs);
+            let log_probs = log_softmax(logits, 1);
+            let act = Tensor::<TB, 2, Int>::from_data(
+                BurnTensorData::new(act_flat[..n].to_vec(), [n, 1]),
+                &device,
+            );
+            let logp = log_probs.gather(1, act).reshape([n]);
+            let adv_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(adv[..n].to_vec(), [n]),
+                &device,
+            );
+            let logp_old_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(logp_old[..n].to_vec(), [n]),
+                &device,
+            );
+            let ratio = (logp.clone() - logp_old_tensor).exp();
+            let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
+            let loss = (ratio.clone() * adv_tensor.clone())
+                .min_pair(clipped_ratio * adv_tensor)
+                .mean()
+                .neg();
+
+            let logp_values = logp.clone().into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
+            let ratio_values = ratio.clone().into_data().to_vec::<f32>().unwrap_or_else(|_| vec![1.0; n]);
+            let entropy = -logp_values.iter().sum::<f32>() / n as f32;
+            let approx_kl = logp_old[..n].iter().zip(logp_values.iter()).map(|(old, new)| old - new).sum::<f32>() / n as f32;
+            let clipfrac = ratio_values.iter().filter(|r| (**r - 1.0).abs() > clip_ratio).count() as f32 / n as f32;
+            let loss_value = scalar_from_loss(&loss);
+
+            let grads = loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let net = self.optimizer.step(self.pi_lr, net, grads_params);
+            self.network = Some(net);
+
+            let mut info = HashMap::new();
+            info.insert("kl".to_string(), approx_kl);
+            info.insert("entropy".to_string(), entropy);
+            info.insert("clipfrac".to_string(), clipfrac);
+            (loss_value, info)
+        }
     }
 
     pub struct VfTrainer {
@@ -292,6 +380,36 @@ mod training {
             let net = self.optimizer.step(self.vf_lr, net, grads_params);
             self.network = Some(net);
 
+            loss_value
+        }
+
+        // Pre-flattened variant: avoids TensorData→Vec allocation per call.
+        pub fn train_step_flat(&mut self, obs_flat: &[f32], obs_dim: usize, ret: &[f32]) -> f32 {
+            let n = (obs_flat.len() / obs_dim.max(1)).min(ret.len());
+            if n == 0 {
+                return 0.0;
+            }
+            let net = match self.network.take() {
+                Some(network) => network,
+                None => return 0.0,
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let v_pred = net.forward(obs).reshape([n]);
+            let ret_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(ret[..n].to_vec(), [n]),
+                &device,
+            );
+            let loss = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+            let loss_value = scalar_from_loss(&loss);
+            let grads = loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let net = self.optimizer.step(self.vf_lr, net, grads_params);
+            self.network = Some(net);
             loss_value
         }
     }
@@ -588,6 +706,34 @@ where
             return trainer.train_step(obs, ret);
         }
 
+        0.0
+    }
+
+    fn ppo_pi_loss_flat(
+        &mut self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        act_flat: &[i64],
+        adv: &[f32],
+        logp_old: &[f32],
+        clip_ratio: f32,
+    ) -> (f32, HashMap<String, f32>) {
+        #[cfg(feature = "ndarray-backend")]
+        if let Some(trainer) = &mut self.pi_trainer {
+            return trainer.train_step_flat(obs_flat, obs_dim, act_flat, adv, logp_old, clip_ratio);
+        }
+        let mut info = HashMap::new();
+        info.insert("kl".to_string(), 0.0);
+        info.insert("entropy".to_string(), 0.0);
+        info.insert("clipfrac".to_string(), 0.0);
+        (0.0, info)
+    }
+
+    fn ppo_vf_loss_flat(&mut self, obs_flat: &[f32], obs_dim: usize, ret: &[f32]) -> f32 {
+        #[cfg(feature = "ndarray-backend")]
+        if let Some(trainer) = &mut self.vf_trainer {
+            return trainer.train_step_flat(obs_flat, obs_dim, ret);
+        }
         0.0
     }
 

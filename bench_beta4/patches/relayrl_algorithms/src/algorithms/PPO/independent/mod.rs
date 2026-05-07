@@ -496,21 +496,20 @@ where
     }
 
     fn train_model(&mut self) {
+        use rand::seq::SliceRandom;
+        const MINI_BATCH_SIZE: usize = 256;
+
         for slot in &mut self.runtime.components.agent_slots {
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {
                 Ok(batch) => batch,
                 Err(_) => continue,
             };
 
-            let obs: &[TensorData] = match batch.get(&BatchKey::Obs) {
+            let obs_td: &[TensorData] = match batch.get(&BatchKey::Obs) {
                 Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
                 _ => continue,
             };
-            let act: &[TensorData] = match batch.get(&BatchKey::Act) {
-                Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
-                _ => continue,
-            };
-            let mask: &[TensorData] = match batch.get(&BatchKey::Mask) {
+            let act_td: &[TensorData] = match batch.get(&BatchKey::Act) {
                 Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
                 _ => continue,
             };
@@ -522,10 +521,35 @@ where
                 Some(BufferSample::Scalars(SampleScalars::F32(values))) => values.as_ref(),
                 _ => continue,
             };
-            let logp_old: &[TensorData] = match batch.get(&BatchKey::Custom("LogP".to_string())) {
+            let logp_td: &[TensorData] = match batch.get(&BatchKey::Custom("LogP".to_string())) {
                 Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
                 _ => continue,
             };
+
+            let n = obs_td.len().min(act_td.len()).min(adv.len()).min(ret.len()).min(logp_td.len());
+            if n == 0 { continue; }
+
+            // ── Pre-convert TensorData → flat arrays ONCE per epoch ──────────
+            let obs_dim = obs_td.first().and_then(|td| td.shape.first()).copied().unwrap_or(1);
+            let obs_flat: Vec<f32> = obs_td[..n].iter()
+                .flat_map(|td| bytemuck::cast_slice::<u8, f32>(&td.data).iter().copied())
+                .collect();
+            let act_flat: Vec<i64> = act_td[..n].iter()
+                .map(|td| {
+                    if td.data.len() >= 8 {
+                        bytemuck::cast_slice::<u8, i64>(&td.data[..8]).first().copied().unwrap_or(0)
+                    } else if td.data.len() >= 4 {
+                        bytemuck::cast_slice::<u8, f32>(&td.data[..4]).first().copied().unwrap_or(0.0) as i64
+                    } else { 0 }
+                })
+                .collect();
+            let logp_flat: Vec<f32> = logp_td[..n].iter()
+                .map(|td| bytemuck::cast_slice::<u8, f32>(&td.data).first().copied().unwrap_or(0.0))
+                .collect();
+
+            // ── Minibatch training ────────────────────────────────────────────
+            let mut rng = rand::rng();
+            let mut idx: Vec<usize> = (0..n).collect();
 
             let mut first_pi_loss: Option<f32> = None;
             let mut final_pi_loss = 0.0f32;
@@ -534,68 +558,91 @@ where
             let mut final_clipfrac = 0.0f32;
             let mut stop_iter = 0u64;
 
-            for i in 0..self.hyperparams.train_pi_iters {
-                let (loss, info) = slot.kernel.ppo_pi_loss(
-                    obs,
-                    act,
-                    mask,
-                    adv,
-                    logp_old,
-                    self.hyperparams.clip_ratio,
-                );
+            'pi: for i in 0..self.hyperparams.train_pi_iters {
+                idx.shuffle(&mut rng);
+                let mut epoch_loss = 0.0f32;
+                let mut epoch_kl = 0.0f32;
+                let mut epoch_entropy = 0.0f32;
+                let mut epoch_clipfrac = 0.0f32;
+                let mut mb_count = 0usize;
 
-                first_pi_loss.get_or_insert(loss);
-                final_pi_loss = loss;
-                final_kl = *info.get("kl").unwrap_or(&0.0);
-                final_entropy = *info.get("entropy").unwrap_or(&0.0);
-                final_clipfrac = *info.get("clipfrac").unwrap_or(&0.0);
+                for start in (0..n).step_by(MINI_BATCH_SIZE) {
+                    let end = (start + MINI_BATCH_SIZE).min(n);
+                    let mb = &idx[start..end];
+                    let mb_size = mb.len();
+
+                    let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
+                    let act_mb: Vec<i64> = mb.iter().map(|&j| act_flat[j]).collect();
+                    let adv_mb: Vec<f32> = mb.iter().map(|&j| adv[j]).collect();
+                    let logp_mb: Vec<f32> = mb.iter().map(|&j| logp_flat[j]).collect();
+
+                    let (loss, info) = slot.kernel.ppo_pi_loss_flat(
+                        &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
+                        self.hyperparams.clip_ratio,
+                    );
+                    epoch_loss += loss;
+                    epoch_kl += info.get("kl").copied().unwrap_or(0.0);
+                    epoch_entropy += info.get("entropy").copied().unwrap_or(0.0);
+                    epoch_clipfrac += info.get("clipfrac").copied().unwrap_or(0.0);
+                    mb_count += 1;
+
+                    let _ = mb_size;
+                }
+
+                if mb_count > 0 {
+                    epoch_loss /= mb_count as f32;
+                    epoch_kl /= mb_count as f32;
+                    epoch_entropy /= mb_count as f32;
+                    epoch_clipfrac /= mb_count as f32;
+                }
+                first_pi_loss.get_or_insert(epoch_loss);
+                final_pi_loss = epoch_loss;
+                final_kl = epoch_kl;
+                final_entropy = epoch_entropy;
+                final_clipfrac = epoch_clipfrac;
                 stop_iter = i + 1;
 
                 if final_kl > 1.5 * self.hyperparams.target_kl {
-                    break;
+                    break 'pi;
                 }
             }
 
             let mut first_vf_loss: Option<f32> = None;
             let mut final_vf_loss = 0.0f32;
+
             for _ in 0..self.hyperparams.train_vf_iters {
-                let loss = slot.kernel.ppo_vf_loss(obs, mask, ret);
-                first_vf_loss.get_or_insert(loss);
-                final_vf_loss = loss;
+                idx.shuffle(&mut rng);
+                let mut epoch_loss = 0.0f32;
+                let mut mb_count = 0usize;
+
+                for start in (0..n).step_by(MINI_BATCH_SIZE) {
+                    let end = (start + MINI_BATCH_SIZE).min(n);
+                    let mb = &idx[start..end];
+
+                    let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
+                    let ret_mb: Vec<f32> = mb.iter().map(|&j| ret[j]).collect();
+
+                    let loss = slot.kernel.ppo_vf_loss_flat(&obs_mb, obs_dim, &ret_mb);
+                    epoch_loss += loss;
+                    mb_count += 1;
+                }
+
+                if mb_count > 0 { epoch_loss /= mb_count as f32; }
+                first_vf_loss.get_or_insert(epoch_loss);
+                final_vf_loss = epoch_loss;
             }
 
             let first_pi_loss = first_pi_loss.unwrap_or(final_pi_loss);
             let first_vf_loss = first_vf_loss.unwrap_or(final_vf_loss);
 
-            self.runtime
-                .components
-                .epoch_logger
-                .store("LossPi", final_pi_loss);
-            self.runtime
-                .components
-                .epoch_logger
-                .store("DeltaLossPi", final_pi_loss - first_pi_loss);
-            self.runtime
-                .components
-                .epoch_logger
-                .store("LossV", final_vf_loss);
-            self.runtime
-                .components
-                .epoch_logger
-                .store("DeltaLossV", final_vf_loss - first_vf_loss);
+            self.runtime.components.epoch_logger.store("LossPi", final_pi_loss);
+            self.runtime.components.epoch_logger.store("DeltaLossPi", final_pi_loss - first_pi_loss);
+            self.runtime.components.epoch_logger.store("LossV", final_vf_loss);
+            self.runtime.components.epoch_logger.store("DeltaLossV", final_vf_loss - first_vf_loss);
             self.runtime.components.epoch_logger.store("KL", final_kl);
-            self.runtime
-                .components
-                .epoch_logger
-                .store("Entropy", final_entropy);
-            self.runtime
-                .components
-                .epoch_logger
-                .store("ClipFrac", final_clipfrac);
-            self.runtime
-                .components
-                .epoch_logger
-                .store("StopIter", stop_iter as f32);
+            self.runtime.components.epoch_logger.store("Entropy", final_entropy);
+            self.runtime.components.epoch_logger.store("ClipFrac", final_clipfrac);
+            self.runtime.components.epoch_logger.store("StopIter", stop_iter as f32);
         }
     }
 
