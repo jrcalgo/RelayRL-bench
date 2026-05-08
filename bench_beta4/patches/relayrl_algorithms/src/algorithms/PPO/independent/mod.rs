@@ -497,7 +497,7 @@ where
 
     fn train_model(&mut self) {
         use rand::seq::SliceRandom;
-        const MINI_BATCH_SIZE: usize = 256;
+        const MINI_BATCH_SIZE: usize = 1024;
 
         for slot in &mut self.runtime.components.agent_slots {
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {
@@ -558,6 +558,8 @@ where
             let mut final_clipfrac = 0.0f32;
             let mut stop_iter = 0u64;
 
+            let n_pi_mb = (n + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
+
             'pi: for i in 0..self.hyperparams.train_pi_iters {
                 idx.shuffle(&mut rng);
                 let mut epoch_loss = 0.0f32;
@@ -569,31 +571,30 @@ where
                 for start in (0..n).step_by(MINI_BATCH_SIZE) {
                     let end = (start + MINI_BATCH_SIZE).min(n);
                     let mb = &idx[start..end];
-                    let mb_size = mb.len();
 
                     let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
                     let act_mb: Vec<i64> = mb.iter().map(|&j| act_flat[j]).collect();
                     let adv_mb: Vec<f32> = mb.iter().map(|&j| adv[j]).collect();
                     let logp_mb: Vec<f32> = mb.iter().map(|&j| logp_flat[j]).collect();
 
+                    let is_last_mb = mb_count + 1 == n_pi_mb;
                     let (loss, info) = slot.kernel.ppo_pi_loss_flat(
                         &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
                         self.hyperparams.clip_ratio,
+                        is_last_mb,
                     );
                     epoch_loss += loss;
-                    epoch_kl += info.get("kl").copied().unwrap_or(0.0);
-                    epoch_entropy += info.get("entropy").copied().unwrap_or(0.0);
-                    epoch_clipfrac += info.get("clipfrac").copied().unwrap_or(0.0);
+                    // Only accumulate stats from last minibatch (others return empty map)
+                    if is_last_mb {
+                        epoch_kl = info.get("kl").copied().unwrap_or(0.0);
+                        epoch_entropy = info.get("entropy").copied().unwrap_or(0.0);
+                        epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(0.0);
+                    }
                     mb_count += 1;
-
-                    let _ = mb_size;
                 }
 
                 if mb_count > 0 {
                     epoch_loss /= mb_count as f32;
-                    epoch_kl /= mb_count as f32;
-                    epoch_entropy /= mb_count as f32;
-                    epoch_clipfrac /= mb_count as f32;
                 }
                 first_pi_loss.get_or_insert(epoch_loss);
                 final_pi_loss = epoch_loss;
