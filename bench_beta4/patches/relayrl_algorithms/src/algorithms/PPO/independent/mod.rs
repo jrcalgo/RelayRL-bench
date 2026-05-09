@@ -506,7 +506,9 @@ where
 
     fn train_model(&mut self) {
         use rand::seq::SliceRandom;
-        const MINI_BATCH_SIZE: usize = 64;
+        // run-9: 512 — matches SB3's ~16-22 batches/iter for our 11,520-transition epoch;
+        // 64 caused 180 batches/iter → large cumulative KL → StopIter=1 every epoch.
+        const MINI_BATCH_SIZE: usize = 512;
 
         for slot in &mut self.runtime.components.agent_slots {
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {

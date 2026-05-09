@@ -39,16 +39,18 @@ const ENV_COUNT: u32 = 64;
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
-const PI_LR: f64 = 2.5e-4;     // run-5: reduce from 1e-3; run-4 ClipFrac hit 1.0 (policy collapse)
+// run-8: restore 1e-3 (SB3 level); correct KL now correctly bounds trust region (run-4 had wrong KL)
+const PI_LR: f64 = 1e-3;
 const VF_LR: f64 = 1e-3;
-const TRAIN_PI_ITERS: u64 = 4;
-const TRAIN_VF_ITERS: u64 = 4;
-// run-6: 0.01 — correct KL approx mean((r-1)-ln(r)) now always non-negative; tighter trust region
-const TARGET_KL: f32 = 0.01;
+// run-9: 10 — SB3 Zoo default; mb=512 means ~22 batches/iter (low KL) so all iters used.
+const TRAIN_PI_ITERS: u64 = 10;
+const TRAIN_VF_ITERS: u64 = 10;
+// run-9: 0.1 — SB3 Zoo default; mb=512 lowers per-iter KL so this threshold is correct.
+const TARGET_KL: f32 = 0.1;
 // run-7: 128 — 2x larger batches (~11,520 transitions/epoch vs 5,760); VF variance halved
 const TRAJ_PER_EPOCH: u64 = 128;
-// 48_000_000 env-frames / 64 envs = 750_000 loop iterations (doubled from run 6).
-const TOTAL_STEPS: usize = 750_000;
+// 192_000_000 env-frames / 64 envs = 3_000_000 loop iterations (doubled from run 8).
+const TOTAL_STEPS: usize = 3_000_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
@@ -73,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  inference: ORT policy (categorical) + ORT value-head (GAE) + OpenBLAS training");
     println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  grad_clip_norm=0.5");
-    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=64");
+    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=512");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
