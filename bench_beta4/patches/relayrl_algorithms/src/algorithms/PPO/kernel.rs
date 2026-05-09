@@ -367,8 +367,11 @@ mod training {
         pub fn new(obs_dim: usize, hidden_sizes: &[usize], vf_lr: f64) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = TrainMlp::new(obs_dim, hidden_sizes, 1, &device);
+            // No grad clipping for VF: Burn's per-layer Norm(0.5) clips a [128×128] layer's
+            // entire gradient tensor to L2≤0.5, making effective per-weight updates ≈4e-6.
+            // This prevents VF from converging on large initial errors (~MSE 2200). Pi keeps
+            // its clipping for conservative trust-region updates.
             let optimizer = AdamConfig::new()
-                .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
                 .init::<TB, TrainMlp<TB>>();
 
             Self {

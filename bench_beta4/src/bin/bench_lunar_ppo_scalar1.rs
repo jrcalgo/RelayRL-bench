@@ -49,8 +49,8 @@ const TRAIN_VF_ITERS: u64 = 10;
 const TARGET_KL: f32 = 0.1;
 // run-7: 128 — 2x larger batches (~11,520 transitions/epoch vs 5,760); VF variance halved
 const TRAJ_PER_EPOCH: u64 = 128;
-// 192_000_000 env-frames / 64 envs = 3_000_000 loop iterations (doubled from run 8).
-const TOTAL_STEPS: usize = 3_000_000;
+// 384_000_000 env-frames / 64 envs = 6_000_000 loop iterations (doubled from run 9).
+const TOTAL_STEPS: usize = 6_000_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL beta.4 — PPO — LunarLander discrete — {ENV_COUNT} envs  (SB3 Zoo hparams)");
     println!("  inference: ORT policy (categorical) + ORT value-head (GAE) + OpenBLAS training");
-    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}");
+    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}  (run-10: VF grad-clip removed)");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  grad_clip_norm=0.5");
     println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=512");
     println!("  {num_cores} logical cores");
