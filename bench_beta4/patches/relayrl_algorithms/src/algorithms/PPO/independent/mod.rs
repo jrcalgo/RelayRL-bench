@@ -570,8 +570,6 @@ where
             let mut final_clipfrac = 0.0f32;
             let mut stop_iter = 0u64;
 
-            let n_pi_mb = (n + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
-
             'pi: for i in 0..self.hyperparams.train_pi_iters {
                 idx.shuffle(&mut rng);
                 let mut epoch_loss = 0.0f32;
@@ -579,6 +577,7 @@ where
                 let mut epoch_entropy = 0.0f32;
                 let mut epoch_clipfrac = 0.0f32;
                 let mut mb_count = 0usize;
+                let mut early_stop = false;
 
                 for start in (0..n).step_by(MINI_BATCH_SIZE) {
                     let end = (start + MINI_BATCH_SIZE).min(n);
@@ -589,21 +588,26 @@ where
                     let adv_mb: Vec<f32> = mb.iter().map(|&j| adv[j]).collect();
                     let logp_mb: Vec<f32> = mb.iter().map(|&j| logp_flat[j]).collect();
 
-                    let is_last_mb = mb_count + 1 == n_pi_mb;
+                    // Always compute stats for per-mini-batch KL early stopping.
+                    // Matches SB3/CleanRL/RL4Sys: break immediately when any mini-batch
+                    // KL exceeds 1.5 * target_kl (prevents excess policy drift).
                     let (loss, info) = slot.kernel.ppo_pi_loss_flat(
                         &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
                         self.hyperparams.clip_ratio,
                         self.hyperparams.ent_coef,
-                        is_last_mb,
+                        true,
                     );
                     epoch_loss += loss;
-                    // Only accumulate stats from last minibatch (others return empty map)
-                    if is_last_mb {
-                        epoch_kl = info.get("kl").copied().unwrap_or(0.0);
-                        epoch_entropy = info.get("entropy").copied().unwrap_or(0.0);
-                        epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(0.0);
-                    }
+                    let mb_kl = info.get("kl").copied().unwrap_or(0.0);
+                    epoch_kl = mb_kl;
+                    epoch_entropy = info.get("entropy").copied().unwrap_or(0.0);
+                    epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(0.0);
                     mb_count += 1;
+
+                    if mb_kl > 1.5 * self.hyperparams.target_kl {
+                        early_stop = true;
+                        break;
+                    }
                 }
 
                 if mb_count > 0 {
@@ -616,7 +620,7 @@ where
                 final_clipfrac = epoch_clipfrac;
                 stop_iter = i + 1;
 
-                if final_kl > 1.5 * self.hyperparams.target_kl {
+                if early_stop || final_kl > 1.5 * self.hyperparams.target_kl {
                     break 'pi;
                 }
             }

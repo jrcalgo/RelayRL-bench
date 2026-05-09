@@ -4,9 +4,10 @@
 //! environment via run_env_with_ppo. Prints per-epoch stats (mean return over last
 //! 100 episodes) to show convergence.
 //!
-//! Hyperparameters follow the SB3 n_epochs=4 balanced config for LunarLander-v2:
+//! Hyperparameters follow the RL4Sys+SB3 config for LunarLander-v2:
 //!   gamma=0.999, lam=0.98, clip=0.2, pi_lr=2.5e-4, vf_lr=2.5e-4,
-//!   train_pi_iters=4, train_vf_iters=4, target_kl=0.1, traj_per_epoch=128, mb=64
+//!   train_pi_iters=10, train_vf_iters=4, target_kl=0.015, traj_per_epoch=128, mb=64
+//!   Per-mini-batch KL early stopping (matches SB3/CleanRL/RL4Sys behavior exactly).
 //!
 //! Build & run:
 //!   cargo build --release -p bench-beta4 --bin bench_lunar_ppo_scalar1
@@ -44,17 +45,18 @@ const PI_LR: f64 = 2.5e-4;
 // run-13: 2.5e-4 — match pi_lr; run-12 VF_LR=1e-3 caused VF overfitting (880 gradient
 // steps at 4x lr vs SB3's balanced equal-lr joint update → VF reset high every epoch).
 const VF_LR: f64 = 2.5e-4;
-// run-14: 4 — SB3 Zoo uses n_epochs=4 with batch_size=64 (1024 gradient steps/epoch).
-// run-13 pi_iters=10 + mb=512 = only 220 steps/epoch = 4.6× too few gradient updates.
-const TRAIN_PI_ITERS: u64 = 4;
-// run-14: 4 — match pi_iters; equal pi/vf epochs matches SB3 balanced joint update.
+// run-15: 10 — allow many pi iters; per-mini-batch KL check controls effective count.
+// With target_kl=0.015, early stop triggers ~halfway through pi training (dynamic).
+const TRAIN_PI_ITERS: u64 = 10;
+// run-15: 4 — keep VF at 4 iters; no KL constraint for VF.
 const TRAIN_VF_ITERS: u64 = 4;
-// run-9: 0.1 — SB3 Zoo default.
-const TARGET_KL: f32 = 0.1;
+// run-15: 0.015 — matches RL4Sys (vs 0.1 in run-14). With per-mini-batch KL checking
+// this prevents excess policy drift (ClipFrac was 0.55 in run-14, now expect ~0.25).
+const TARGET_KL: f32 = 0.015;
 // run-7: 128 — 2x larger batches (~11,520 transitions/epoch vs 5,760).
 const TRAJ_PER_EPOCH: u64 = 128;
-// 6_144_000_000 env-frames / 64 envs = 96_000_000 loop iterations (doubled from run 13).
-const TOTAL_STEPS: usize = 96_000_000;
+// 12_288_000_000 env-frames / 64 envs = 192_000_000 loop iterations (doubled from run 14).
+const TOTAL_STEPS: usize = 192_000_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
@@ -77,9 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL beta.4 — PPO — LunarLander discrete — {ENV_COUNT} envs  (SB3 Zoo hparams)");
     println!("  inference: ORT policy (categorical) + ORT value-head (GAE) + OpenBLAS training");
-    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}  (run-14: mb=64, pi_iters=4, vf_iters=4)");
+    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}  (run-15: per-mb KL, target_kl=0.015, pi_iters=10)");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  grad_clip_norm=0.5 (pi only)");
-    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=64  (SB3 n_epochs=4 batch=64)");
+    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=64  (per-mb KL stop, RL4Sys target_kl=0.015)");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
