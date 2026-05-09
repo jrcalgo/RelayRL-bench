@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "lunarlander-rl"]
+members = [".", "lunarlander-rl", "gridworld-bench"]
 
 [patch.crates-io]
 # Disable tch/libtorch features that can't build in this environment.
@@ -19,6 +19,7 @@ relayrl_algorithms = { version = "=0.3.0",         default-features = false, fea
 relayrl_types      = { version = "=0.7.2",         default-features = false, features = ["ndarray-backend", "onnx-model"] }
 relayrl_env_trait  = "1.2"
 lunarlander-rl     = { path = "./lunarlander-rl" }
+gridworld-bench    = { path = "./gridworld-bench" }
 
 burn-ndarray = { version = "0.20.1", features = ["blas-openblas-system"] }
 burn-tensor  = "0.20.1"
@@ -39,3 +40,7 @@ path = "src/bin/bench_lunar_set_env_scalar1.rs"
 [[bin]]
 name = "bench_lunar_ppo_scalar1"
 path = "src/bin/bench_lunar_ppo_scalar1.rs"
+
+[[bin]]
+name = "bench_grid_ppo_scalar1"
+path = "src/bin/bench_grid_ppo_scalar1.rs"

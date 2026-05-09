@@ -99,6 +99,12 @@ pub struct IPPOParams {
     /// Set to Some(max_steps) if the environment has a step limit; None disables truncation detection.
     #[serde(default)]
     pub max_episode_steps: Option<usize>,
+    /// Mini-batch size for the policy gradient update.
+    /// None (default) = full-batch: 1 gradient step per pi_iter — matches RL4Sys/spinning-up.
+    /// KL early stopping across pi_iters controls effective update count (typically 4-7 steps).
+    /// Set to Some(64) to match SB3-style mini-batching (many more gradient steps per epoch).
+    #[serde(default)]
+    pub mini_batch_size: Option<usize>,
 }
 
 impl Default for IPPOParams {
@@ -116,6 +122,7 @@ impl Default for IPPOParams {
             traj_per_epoch: 8,
             ent_coef: 0.0,
             max_episode_steps: None,
+            mini_batch_size: None,
         }
     }
 }
@@ -506,10 +513,6 @@ where
 
     fn train_model(&mut self) {
         use rand::seq::SliceRandom;
-        // run-14: 64 — matches SB3 batch_size=64; 512 caused only ~22 batches/iter = 220
-        // gradient steps/epoch vs SB3's 1024 (4.6× fewer updates). With target_kl=0.1 and
-        // pi_iters=4 (not 10), small batches won't accumulate enough KL to trigger StopIter=1.
-        const MINI_BATCH_SIZE: usize = 64;
 
         for slot in &mut self.runtime.components.agent_slots {
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {
@@ -540,6 +543,9 @@ where
 
             let n = obs_td.len().min(act_td.len()).min(adv.len()).min(ret.len()).min(logp_td.len());
             if n == 0 { continue; }
+            // Full-batch (None) = 1 gradient step per pi_iter, matching RL4Sys/spinning-up.
+            // KL early stopping across pi_iters controls effective update count.
+            let mb_size = self.hyperparams.mini_batch_size.unwrap_or(n).clamp(1, n);
 
             // ── Pre-convert TensorData → flat arrays ONCE per epoch ──────────
             let obs_dim = obs_td.first().and_then(|td| td.shape.first()).copied().unwrap_or(1);
@@ -555,12 +561,16 @@ where
                     } else { 0 }
                 })
                 .collect();
-            // Recompute logp_old from Burn at training time (RL4Sys approach).
-            // Using stored ORT rollout logprobs causes ratio≠1 at training start when ORT
-            // refresh lags behind due to async training/rollout overlap, triggering per-mb
-            // KL early stop at iter 1 before any gradient step (StopIter=1 bug).
-            // Fresh Burn logprobs guarantee ratio=1.0 at epoch start → correct on-policy PPO.
-            let logp_flat: Vec<f32> = slot.kernel.get_pi_logprobs_flat(&obs_flat, obs_dim, &act_flat[..n]);
+            // Use stored ORT rollout logprobs as logp_old — matches Python/RL4Sys approach.
+            // Python PPO with stored logprobs converges in 10 epochs; Burn recomputation causes
+            // policy degradation (observed in gridworld run-2 and run-3, 700+ epochs, no convergence).
+            // With target_kl=0.05, 1-epoch ORT staleness won't trigger StopIter=1.
+            let logp_flat: Vec<f32> = logp_td[..n].iter()
+                .map(|td| bytemuck::cast_slice::<u8, f32>(&td.data)
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0))
+                .collect();
 
             // ── Minibatch training ────────────────────────────────────────────
             let mut rng = rand::rng();
@@ -582,8 +592,8 @@ where
                 let mut mb_count = 0usize;
                 let mut early_stop = false;
 
-                for start in (0..n).step_by(MINI_BATCH_SIZE) {
-                    let end = (start + MINI_BATCH_SIZE).min(n);
+                for start in (0..n).step_by(mb_size) {
+                    let end = (start + mb_size).min(n);
                     let mb = &idx[start..end];
 
                     let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
@@ -636,8 +646,8 @@ where
                 let mut epoch_loss = 0.0f32;
                 let mut mb_count = 0usize;
 
-                for start in (0..n).step_by(MINI_BATCH_SIZE) {
-                    let end = (start + MINI_BATCH_SIZE).min(n);
+                for start in (0..n).step_by(mb_size) {
+                    let end = (start + mb_size).min(n);
                     let mb = &idx[start..end];
 
                     let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
