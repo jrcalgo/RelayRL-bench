@@ -97,6 +97,16 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         obs_dim: usize,
         ret: &[f32],
     ) -> f32;
+
+    /// Compute log-probabilities for (obs, act) using the current Burn model — no gradient.
+    /// Recomputing logp_old at training time eliminates stale ORT logprob issues from
+    /// async training/rollout overlap (matches the RL4Sys on-policy approach).
+    fn get_pi_logprobs_flat(
+        &self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        act_flat: &[i64],
+    ) -> Vec<f32>;
 }
 
 #[cfg(feature = "ndarray-backend")]
@@ -354,6 +364,38 @@ mod training {
             info.insert("clipfrac".to_string(), clipfrac);
             let _ = act_dim;
             (loss_value, info)
+        }
+
+        /// Compute log-probabilities for (obs, act) using the current Burn model — no gradient.
+        /// Used to recompute logp_old at training time, eliminating stale ORT logprob issues
+        /// from async training/rollout overlap (matches the RL4Sys on-policy approach).
+        pub fn compute_action_logprobs_flat(
+            &self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[i64],
+        ) -> Vec<f32> {
+            let n = (obs_flat.len() / obs_dim.max(1)).min(act_flat.len());
+            if n == 0 {
+                return Vec::new();
+            }
+            let net = match self.network.as_ref() {
+                Some(network) => network,
+                None => return vec![0.0; n],
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let logits = net.forward(obs);
+            let log_probs_full = log_softmax(logits, 1);
+            let act = Tensor::<TB, 2, Int>::from_data(
+                BurnTensorData::new(act_flat[..n].to_vec(), [n, 1]),
+                &device,
+            );
+            let logp = log_probs_full.gather(1, act).reshape([n]);
+            logp.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n])
         }
     }
 
@@ -769,6 +811,14 @@ where
             return trainer.train_step_flat(obs_flat, obs_dim, ret);
         }
         0.0
+    }
+
+    fn get_pi_logprobs_flat(&self, obs_flat: &[f32], obs_dim: usize, act_flat: &[i64]) -> Vec<f32> {
+        #[cfg(feature = "ndarray-backend")]
+        if let Some(trainer) = &self.pi_trainer {
+            return trainer.compute_action_logprobs_flat(obs_flat, obs_dim, act_flat);
+        }
+        vec![0.0; act_flat.len()]
     }
 
     fn value_forward_only(&self, obs: &[TensorData], _mask: &[TensorData]) -> Vec<f32> {

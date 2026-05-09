@@ -555,9 +555,12 @@ where
                     } else { 0 }
                 })
                 .collect();
-            let logp_flat: Vec<f32> = logp_td[..n].iter()
-                .map(|td| bytemuck::cast_slice::<u8, f32>(&td.data).first().copied().unwrap_or(0.0))
-                .collect();
+            // Recompute logp_old from Burn at training time (RL4Sys approach).
+            // Using stored ORT rollout logprobs causes ratio≠1 at training start when ORT
+            // refresh lags behind due to async training/rollout overlap, triggering per-mb
+            // KL early stop at iter 1 before any gradient step (StopIter=1 bug).
+            // Fresh Burn logprobs guarantee ratio=1.0 at epoch start → correct on-policy PPO.
+            let logp_flat: Vec<f32> = slot.kernel.get_pi_logprobs_flat(&obs_flat, obs_dim, &act_flat[..n]);
 
             // ── Minibatch training ────────────────────────────────────────────
             let mut rng = rand::rng();

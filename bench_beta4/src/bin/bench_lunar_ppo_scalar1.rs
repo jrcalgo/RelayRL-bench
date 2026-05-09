@@ -7,7 +7,7 @@
 //! Hyperparameters follow the RL4Sys+SB3 config for LunarLander-v2:
 //!   gamma=0.999, lam=0.98, clip=0.2, pi_lr=2.5e-4, vf_lr=2.5e-4,
 //!   train_pi_iters=10, train_vf_iters=4, target_kl=0.015, traj_per_epoch=128, mb=64
-//!   Per-mini-batch KL early stopping (matches SB3/CleanRL/RL4Sys behavior exactly).
+//!   run-16: Per-mb KL stop + fresh logp_old from Burn (fixes async ORT staleness / StopIter=1 bug).
 //!
 //! Build & run:
 //!   cargo build --release -p bench-beta4 --bin bench_lunar_ppo_scalar1
@@ -79,9 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════════");
     println!("  RelayRL beta.4 — PPO — LunarLander discrete — {ENV_COUNT} envs  (SB3 Zoo hparams)");
     println!("  inference: ORT policy (categorical) + ORT value-head (GAE) + OpenBLAS training");
-    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}  (run-15: per-mb KL, target_kl=0.015, pi_iters=10)");
+    println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}  (run-16: fresh logp_old+per-mb KL, target_kl=0.015, pi_iters=10)");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  grad_clip_norm=0.5 (pi only)");
-    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=64  (per-mb KL stop, RL4Sys target_kl=0.015)");
+    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=64  (fresh Burn logp_old, per-mb KL, RL4Sys target_kl)");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
