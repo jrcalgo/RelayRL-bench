@@ -506,9 +506,10 @@ where
 
     fn train_model(&mut self) {
         use rand::seq::SliceRandom;
-        // run-9: 512 — matches SB3's ~16-22 batches/iter for our 11,520-transition epoch;
-        // 64 caused 180 batches/iter → large cumulative KL → StopIter=1 every epoch.
-        const MINI_BATCH_SIZE: usize = 512;
+        // run-14: 64 — matches SB3 batch_size=64; 512 caused only ~22 batches/iter = 220
+        // gradient steps/epoch vs SB3's 1024 (4.6× fewer updates). With target_kl=0.1 and
+        // pi_iters=4 (not 10), small batches won't accumulate enough KL to trigger StopIter=1.
+        const MINI_BATCH_SIZE: usize = 64;
 
         for slot in &mut self.runtime.components.agent_slots {
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {
