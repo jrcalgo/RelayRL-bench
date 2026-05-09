@@ -242,12 +242,7 @@ mod training {
                 .unwrap_or_else(|_| vec![1.0; n]);
 
             let entropy = -logp_values.iter().sum::<f32>() / n as f32;
-            let approx_kl = logp_old_values
-                .iter()
-                .zip(logp_values.iter())
-                .map(|(old, new)| old - new)
-                .sum::<f32>()
-                / n as f32;
+            let approx_kl = ratio_values.iter().map(|r| (r - 1.0) - r.ln()).sum::<f32>() / n as f32;
             let clipfrac = ratio_values
                 .iter()
                 .filter(|ratio| (**ratio - 1.0).abs() > clip_ratio)
@@ -347,7 +342,10 @@ mod training {
             let entropy_val = entropy_t.into_scalar();
             let logp_values = logp.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
             let ratio_values = ratio.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![1.0; n]);
-            let approx_kl = logp_old[..n].iter().zip(logp_values.iter()).map(|(old, new)| old - new).sum::<f32>() / n as f32;
+            // Correct, always-non-negative KL approx: mean((r-1) - log(r)) where r = π_new/π_old.
+            // The naive mean(logp_old - logp_new) can be near-zero even with high ClipFrac because
+            // positive- and negative-advantage policy changes cancel. This version never cancels.
+            let approx_kl = ratio_values.iter().map(|r| (r - 1.0) - r.ln()).sum::<f32>() / n as f32;
             let clipfrac = ratio_values.iter().filter(|r| (**r - 1.0).abs() > clip_ratio).count() as f32 / n as f32;
 
             let mut info = HashMap::new();

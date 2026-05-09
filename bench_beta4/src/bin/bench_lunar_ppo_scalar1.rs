@@ -43,10 +43,11 @@ const PI_LR: f64 = 2.5e-4;     // run-5: reduce from 1e-3; run-4 ClipFrac hit 1.
 const VF_LR: f64 = 1e-3;
 const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
-const TARGET_KL: f32 = 0.05;   // run-5: tighter; 2.5e-4 lr + grad_clip_norm=0.5 added
+// run-6: 0.01 — correct KL approx mean((r-1)-ln(r)) now always non-negative; tighter trust region
+const TARGET_KL: f32 = 0.01;
 const TRAJ_PER_EPOCH: u64 = 64;
-// 12_000_000 env-frames / 64 envs = 187_500 loop iterations (doubled from run 4).
-const TOTAL_STEPS: usize = 187_500;
+// 24_000_000 env-frames / 64 envs = 375_000 loop iterations (doubled from run 5).
+const TOTAL_STEPS: usize = 375_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
