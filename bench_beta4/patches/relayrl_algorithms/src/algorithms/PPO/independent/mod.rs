@@ -92,6 +92,13 @@ pub struct IPPOParams {
     pub train_vf_iters: u64,
     pub target_kl: f32,
     pub traj_per_epoch: u64,
+    /// Entropy regularization coefficient. Loss = -clip_obj - ent_coef * H(π).
+    #[serde(default)]
+    pub ent_coef: f32,
+    /// Max steps per episode; used to detect timeout truncations for correct GAE bootstrap.
+    /// Set to Some(max_steps) if the environment has a step limit; None disables truncation detection.
+    #[serde(default)]
+    pub max_episode_steps: Option<usize>,
 }
 
 impl Default for IPPOParams {
@@ -107,6 +114,8 @@ impl Default for IPPOParams {
             train_vf_iters: 80,
             target_kl: 0.01,
             traj_per_epoch: 8,
+            ent_coef: 0.0,
+            max_episode_steps: None,
         }
     }
 }
@@ -497,7 +506,7 @@ where
 
     fn train_model(&mut self) {
         use rand::seq::SliceRandom;
-        const MINI_BATCH_SIZE: usize = 1024;
+        const MINI_BATCH_SIZE: usize = 64;
 
         for slot in &mut self.runtime.components.agent_slots {
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {
@@ -581,6 +590,7 @@ where
                     let (loss, info) = slot.kernel.ppo_pi_loss_flat(
                         &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
                         self.hyperparams.clip_ratio,
+                        self.hyperparams.ent_coef,
                         is_last_mb,
                     );
                     epoch_loss += loss;

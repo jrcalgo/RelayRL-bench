@@ -977,6 +977,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     act_dim: act_dim_trainer,
                     buffer_size: replay_buffer_size,
                 };
+                // Extract max_episode_steps before consuming algorithm_cfg
+                let max_episode_steps: Option<usize> = match &algorithm_cfg {
+                    AlgorithmCfg::PPO(Some(p)) | AlgorithmCfg::IPPO(Some(p)) => p.max_episode_steps,
+                    _ => None,
+                };
                 let spec = match algorithm_cfg {
                     AlgorithmCfg::PPO(params) => PpoTrainerSpec::ppo(trainer_args, params),
                     AlgorithmCfg::IPPO(params) => PpoTrainerSpec::ippo(trainer_args, params),
@@ -1001,11 +1006,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             format!("[StateManager] ORT value prime failed: {}", e)
                         ))?;
                 }
-                // Async learner-worker split: collection loop sends completed trajectories
-                // non-blocking; the learner task consumes them and runs gradient updates
-                // independently, so env stepping is never stalled by training.
+                // Bounded learner-worker split: collection blocks when the learner is behind,
+                // capping data staleness to at most 2 policy versions (backpressure).
                 let (traj_tx, mut traj_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<RelayRLTrajectory>();
+                    tokio::sync::mpsc::channel::<RelayRLTrajectory>(2);
                 let epoch_count_shared =
                     Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let epoch_count_learner = Arc::clone(&epoch_count_shared);
@@ -1045,6 +1049,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .map(|_| RelayRLTrajectory::new(4096))
                     .collect();
                 let mut per_env_episode: Vec<u64> = vec![0u64; n_envs];
+                let mut per_env_step_count: Vec<usize> = vec![0usize; n_envs];
                 // Stats tracking for convergence logging
                 let mut per_env_ep_return: Vec<f32> = vec![0.0f32; n_envs];
                 let mut completed_episodes: u64 = 0;
@@ -1130,6 +1135,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         data_map.insert("val".to_string(), RelayRLData::Tensor(val_i));
 
                         per_env_ep_return[i] += rewards[i];
+                        per_env_step_count[i] += 1;
                         let action = RelayRLAction::new(
                             Some(obs_i),
                             Some(act_i),
@@ -1155,9 +1161,18 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             traj.set_episode(per_env_episode[i]);
                             per_env_episode[i] += 1;
 
+                            // Timeout truncation: if the episode hit the step cap it is NOT a
+                            // natural terminal state, so bootstrap GAE with V(s_T) rather than 0.
+                            if let Some(max_steps) = max_episode_steps {
+                                if per_env_step_count[i] >= max_steps {
+                                    traj.set_bootstrap_value(vals[i]);
+                                }
+                            }
+                            per_env_step_count[i] = 0;
+
                             ns_traj += t_traj_env.elapsed().as_nanos();
-                            // Non-blocking send to learner task (unbounded channel, never stalls collection)
-                            let _ = traj_tx.send(traj);
+                            // Bounded send: blocks collection when learner is >2 batches behind
+                            let _ = traj_tx.send(traj).await;
                             // Check if the learner completed an epoch and print convergence stats
                             let current_epoch =
                                 epoch_count_shared.load(std::sync::atomic::Ordering::Acquire);

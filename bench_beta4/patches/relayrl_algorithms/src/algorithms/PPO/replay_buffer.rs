@@ -142,8 +142,9 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
 
             if action.get_done() {
-                // Terminal: bootstrap with 0 (episode ended naturally)
-                self.finish_path(&mut buffers, 0.0);
+                // Use trajectory.bootstrap_value: 0.0 for terminal episodes (crash/landing),
+                // V(s_T) for timeout truncations (set by state_manager when step cap is hit).
+                self.finish_path(&mut buffers, trajectory.bootstrap_value);
             }
         }
 

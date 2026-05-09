@@ -46,6 +46,10 @@ pub struct RelayRLTrajectory {
     pub timestamp: u64,
     pub episode: Option<u64>,
     pub training_step: Option<u64>,
+    /// GAE bootstrap value for the state following the last step.
+    /// 0.0 for true terminal episodes (crash/landing); V(s_T) for timeout truncations.
+    #[serde(default)]
+    pub bootstrap_value: f32,
 }
 
 impl Default for RelayRLTrajectory {
@@ -60,6 +64,7 @@ impl Default for RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
+            bootstrap_value: 0.0,
         }
     }
 }
@@ -75,6 +80,7 @@ impl RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
+            bootstrap_value: 0.0,
         }
     }
 
@@ -88,6 +94,7 @@ impl RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode: None,
             training_step: None,
+            bootstrap_value: 0.0,
         }
     }
 
@@ -108,6 +115,7 @@ impl RelayRLTrajectory {
             timestamp: current_timestamp(),
             episode,
             training_step,
+            bootstrap_value: 0.0,
         }
     }
 
@@ -205,6 +213,10 @@ impl RelayRLTrajectory {
 
     pub fn set_training_step(&mut self, step: u64) {
         self.training_step = Some(step);
+    }
+
+    pub fn set_bootstrap_value(&mut self, val: f32) {
+        self.bootstrap_value = val;
     }
 }
 

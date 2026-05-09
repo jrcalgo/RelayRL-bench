@@ -87,6 +87,7 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         adv: &[f32],
         logp_old: &[f32],
         clip_ratio: f32,
+        ent_coef: f32,
         compute_stats: bool,
     ) -> (f32, HashMap<String, f32>);
 
@@ -109,6 +110,7 @@ mod training {
     use burn_ndarray::NdArray;
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
+    use burn_optim::grad_clipping::GradientClippingConfig;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 
     pub type TB = Autodiff<NdArray>;
@@ -166,7 +168,9 @@ mod training {
         pub fn new(obs_dim: usize, hidden_sizes: &[usize], act_dim: usize, pi_lr: f64) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = TrainMlp::new(obs_dim, hidden_sizes, act_dim, &device);
-            let optimizer = AdamConfig::new().init::<TB, TrainMlp<TB>>();
+            let optimizer = AdamConfig::new()
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+                .init::<TB, TrainMlp<TB>>();
 
             Self {
                 network: Some(network),
@@ -274,6 +278,7 @@ mod training {
             adv: &[f32],
             logp_old: &[f32],
             clip_ratio: f32,
+            ent_coef: f32,
             compute_stats: bool,
         ) -> (f32, HashMap<String, f32>) {
             let n = (obs_flat.len() / obs_dim.max(1))
@@ -294,12 +299,14 @@ mod training {
                 &device,
             );
             let logits = net.forward(obs);
-            let log_probs = log_softmax(logits, 1);
+            // Full log-softmax distribution: [n, act_dim]
+            let log_probs_full = log_softmax(logits, 1);
             let act = Tensor::<TB, 2, Int>::from_data(
                 BurnTensorData::new(act_flat[..n].to_vec(), [n, 1]),
                 &device,
             );
-            let logp = log_probs.gather(1, act).reshape([n]);
+            // Selected action log-probs: [n]
+            let logp = log_probs_full.clone().gather(1, act).reshape([n]);
             let adv_tensor = Tensor::<TB, 1, Float>::from_data(
                 BurnTensorData::new(adv[..n].to_vec(), [n]),
                 &device,
@@ -310,10 +317,21 @@ mod training {
             );
             let ratio = (logp.clone() - logp_old_tensor).exp();
             let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
-            let loss = (ratio.clone() * adv_tensor.clone())
+            let clip_obj = (ratio.clone() * adv_tensor.clone())
                 .min_pair(clipped_ratio * adv_tensor)
-                .mean()
-                .neg();
+                .mean();
+
+            // Entropy H(π) = -sum_a π(a|s) log π(a|s), averaged over batch [scalar]
+            // Included in the loss gradient: maximising entropy encourages exploration.
+            let act_dim = log_probs_full.dims()[1];
+            let entropy_t = (log_probs_full.clone().exp() * log_probs_full)
+                .neg()
+                .sum_dim(1)
+                .reshape([n])
+                .mean();
+
+            // Loss = -clip_obj - ent_coef * H(π)  (minimising → maximising both)
+            let loss = -(clip_obj + ent_coef * entropy_t.clone());
             let loss_value = scalar_from_loss(&loss);
 
             let grads = loss.backward();
@@ -322,19 +340,21 @@ mod training {
             self.network = Some(net);
 
             if !compute_stats {
+                let _ = act_dim;
                 return (loss_value, HashMap::new());
             }
 
+            let entropy_val = entropy_t.into_scalar();
             let logp_values = logp.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
             let ratio_values = ratio.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![1.0; n]);
-            let entropy = -logp_values.iter().sum::<f32>() / n as f32;
             let approx_kl = logp_old[..n].iter().zip(logp_values.iter()).map(|(old, new)| old - new).sum::<f32>() / n as f32;
             let clipfrac = ratio_values.iter().filter(|r| (**r - 1.0).abs() > clip_ratio).count() as f32 / n as f32;
 
             let mut info = HashMap::new();
             info.insert("kl".to_string(), approx_kl);
-            info.insert("entropy".to_string(), entropy);
+            info.insert("entropy".to_string(), entropy_val);
             info.insert("clipfrac".to_string(), clipfrac);
+            let _ = act_dim;
             (loss_value, info)
         }
     }
@@ -349,7 +369,9 @@ mod training {
         pub fn new(obs_dim: usize, hidden_sizes: &[usize], vf_lr: f64) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = TrainMlp::new(obs_dim, hidden_sizes, 1, &device);
-            let optimizer = AdamConfig::new().init::<TB, TrainMlp<TB>>();
+            let optimizer = AdamConfig::new()
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+                .init::<TB, TrainMlp<TB>>();
 
             Self {
                 network: Some(network),
@@ -726,11 +748,12 @@ where
         adv: &[f32],
         logp_old: &[f32],
         clip_ratio: f32,
+        ent_coef: f32,
         compute_stats: bool,
     ) -> (f32, HashMap<String, f32>) {
         #[cfg(feature = "ndarray-backend")]
         if let Some(trainer) = &mut self.pi_trainer {
-            return trainer.train_step_flat(obs_flat, obs_dim, act_flat, adv, logp_old, clip_ratio, compute_stats);
+            return trainer.train_step_flat(obs_flat, obs_dim, act_flat, adv, logp_old, clip_ratio, ent_coef, compute_stats);
         }
         let mut info = HashMap::new();
         info.insert("kl".to_string(), 0.0);

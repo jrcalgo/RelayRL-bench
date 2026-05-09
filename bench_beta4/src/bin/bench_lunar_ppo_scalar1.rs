@@ -39,17 +39,14 @@ const ENV_COUNT: u32 = 64;
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
-const PI_LR: f64 = 2.5e-4;
+const PI_LR: f64 = 2.5e-4;     // run-5: reduce from 1e-3; run-4 ClipFrac hit 1.0 (policy collapse)
 const VF_LR: f64 = 1e-3;
-const TRAIN_PI_ITERS: u64 = 10;
-const TRAIN_VF_ITERS: u64 = 10; // SB3 Zoo config; was erroneously set to 80
-const TARGET_KL: f32 = 0.1;
+const TRAIN_PI_ITERS: u64 = 4;
+const TRAIN_VF_ITERS: u64 = 4;
+const TARGET_KL: f32 = 0.05;   // run-5: tighter; 2.5e-4 lr + grad_clip_norm=0.5 added
 const TRAJ_PER_EPOCH: u64 = 64;
-// 500_000 env-frames / 64 envs = ~7813 loop iterations → same total experience as 1-env run.
-// Note: scaling traj_per_epoch proportionally (×64) to match 1-env training cadence per step
-// causes training batch to grow 64× (368k transitions), making each epoch ~5min → impractical.
-// Async learner-worker split is required to decouple collection throughput from training cost.
-const TOTAL_STEPS: usize = 7_813;
+// 12_000_000 env-frames / 64 envs = 187_500 loop iterations (doubled from run 4).
+const TOTAL_STEPS: usize = 187_500;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
@@ -73,8 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  RelayRL beta.4 — PPO — LunarLander discrete — {ENV_COUNT} envs  (SB3 Zoo hparams)");
     println!("  inference: ORT policy (categorical) + ORT value-head (GAE) + OpenBLAS training");
     println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  loop steps={TOTAL_STEPS}  env-frames={total_env_frames}");
-    println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}");
-    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  traj/epoch={TRAJ_PER_EPOCH}");
+    println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  grad_clip_norm=0.5");
+    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=64");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
@@ -139,6 +136,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 train_vf_iters: TRAIN_VF_ITERS,
                 target_kl: TARGET_KL,
                 traj_per_epoch: TRAJ_PER_EPOCH,
+                ent_coef: 0.01,
+                max_episode_steps: Some(MAX_STEPS),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo"),

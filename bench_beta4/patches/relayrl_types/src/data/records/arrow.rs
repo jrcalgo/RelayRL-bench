@@ -115,6 +115,7 @@ impl ArrowTrajectory {
             timestamp: 0,
             episode,
             training_step,
+            bootstrap_value: 0.0,
         });
 
         for index in 0..batch.num_rows() {
