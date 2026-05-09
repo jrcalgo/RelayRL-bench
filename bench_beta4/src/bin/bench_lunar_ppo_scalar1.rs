@@ -45,9 +45,10 @@ const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
 // run-6: 0.01 — correct KL approx mean((r-1)-ln(r)) now always non-negative; tighter trust region
 const TARGET_KL: f32 = 0.01;
-const TRAJ_PER_EPOCH: u64 = 64;
-// 24_000_000 env-frames / 64 envs = 375_000 loop iterations (doubled from run 5).
-const TOTAL_STEPS: usize = 375_000;
+// run-7: 128 — 2x larger batches (~11,520 transitions/epoch vs 5,760); VF variance halved
+const TRAJ_PER_EPOCH: u64 = 128;
+// 48_000_000 env-frames / 64 envs = 750_000 loop iterations (doubled from run 6).
+const TOTAL_STEPS: usize = 750_000;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
