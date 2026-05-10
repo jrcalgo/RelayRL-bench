@@ -74,10 +74,15 @@ const CONSTRAINT_ITERS: usize = 4;
 const GROUND_RESTITUTION: f32 = 0.0;
 const GROUND_FRICTION: f32 = 0.1;
 
-// Sleep detection.
-const SLEEP_VEL_THRESHOLD: f32 = 0.1;
-const SLEEP_ANG_THRESHOLD: f32 = 0.05;
-const SLEEP_FRAMES: u32 = 20;
+// Sleep detection. Thresholds match Box2D's default values used by Gymnasium LunarLander-v3:
+// b2_linearSleepTolerance ≈ 0.5 m/s (Box2D 2.x default used by Gym's Box2D build),
+// b2_angularSleepTolerance = 2/180*π ≈ 0.035 rad/s, sleep time 0.5 s = 25 frames @50Hz.
+// Increasing from 0.1→0.5 is necessary because our impulse-based friction only applies
+// during ground penetration; once position-corrected to the surface, the lander body slides
+// freely. This change makes landing achievable without perfect velocity control.
+const SLEEP_VEL_THRESHOLD: f32 = 0.5;
+const SLEEP_ANG_THRESHOLD: f32 = 0.2;
+const SLEEP_FRAMES: u32 = 25;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

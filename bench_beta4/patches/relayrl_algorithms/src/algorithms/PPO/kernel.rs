@@ -172,6 +172,9 @@ mod training {
         pub network: Option<TrainMlp<TB>>,
         pub optimizer: OptimizerAdaptor<Adam, TrainMlp<TB>, TB>,
         pub pi_lr: f64,
+        /// Total gradient steps for linear LR decay (None = fixed LR).
+        pub lr_schedule_steps: Option<u64>,
+        pub grad_step_count: u64,
     }
 
     impl DiscretePpoTrainer {
@@ -186,6 +189,18 @@ mod training {
                 network: Some(network),
                 optimizer,
                 pi_lr,
+                lr_schedule_steps: None,
+                grad_step_count: 0,
+            }
+        }
+
+        fn effective_lr(&self) -> f64 {
+            match self.lr_schedule_steps {
+                Some(total) if total > 0 => {
+                    let frac = 1.0 - (self.grad_step_count as f64 / total as f64).min(1.0);
+                    self.pi_lr * frac.max(0.0)
+                }
+                _ => self.pi_lr,
             }
         }
 
@@ -341,8 +356,10 @@ mod training {
 
             let grads = loss.backward();
             let grads_params = GradientsParams::from_grads(grads, &net);
-            let net = self.optimizer.step(self.pi_lr, net, grads_params);
+            let lr = self.effective_lr();
+            let net = self.optimizer.step(lr, net, grads_params);
             self.network = Some(net);
+            self.grad_step_count += 1;
 
             if !compute_stats {
                 let _ = act_dim;
@@ -403,6 +420,8 @@ mod training {
         pub network: Option<TrainMlp<TB>>,
         pub optimizer: OptimizerAdaptor<Adam, TrainMlp<TB>, TB>,
         pub vf_lr: f64,
+        pub lr_schedule_steps: Option<u64>,
+        pub grad_step_count: u64,
     }
 
     impl VfTrainer {
@@ -420,6 +439,18 @@ mod training {
                 network: Some(network),
                 optimizer,
                 vf_lr,
+                lr_schedule_steps: None,
+                grad_step_count: 0,
+            }
+        }
+
+        fn effective_lr(&self) -> f64 {
+            match self.lr_schedule_steps {
+                Some(total) if total > 0 => {
+                    let frac = 1.0 - (self.grad_step_count as f64 / total as f64).min(1.0);
+                    self.vf_lr * frac.max(0.0)
+                }
+                _ => self.vf_lr,
             }
         }
 
@@ -482,8 +513,10 @@ mod training {
             let loss_value = scalar_from_loss(&loss);
             let grads = loss.backward();
             let grads_params = GradientsParams::from_grads(grads, &net);
-            let net = self.optimizer.step(self.vf_lr, net, grads_params);
+            let lr = self.effective_lr();
+            let net = self.optimizer.step(lr, net, grads_params);
             self.network = Some(net);
+            self.grad_step_count += 1;
             loss_value
         }
     }
@@ -582,6 +615,20 @@ where
         vf_lr: f64,
         device: &B::Device,
     ) -> Self {
+        Self::new_with_schedule(obs_dim, act_dim, discrete, hidden_sizes, activation, pi_lr, vf_lr, None, device)
+    }
+
+    pub fn new_with_schedule(
+        obs_dim: usize,
+        act_dim: usize,
+        discrete: bool,
+        hidden_sizes: &[usize],
+        activation: ActivationKind,
+        pi_lr: f64,
+        vf_lr: f64,
+        lr_schedule_steps: Option<u64>,
+        device: &B::Device,
+    ) -> Self {
         let policy = if discrete {
             PolicyHead::Discrete(DiscretePolicyNetwork::new(
                 obs_dim,
@@ -601,18 +648,19 @@ where
 
         #[cfg(feature = "ndarray-backend")]
         let pi_trainer = if discrete {
-            Some(training::DiscretePpoTrainer::new(
-                obs_dim,
-                hidden_sizes,
-                act_dim,
-                pi_lr,
-            ))
+            let mut t = training::DiscretePpoTrainer::new(obs_dim, hidden_sizes, act_dim, pi_lr);
+            t.lr_schedule_steps = lr_schedule_steps;
+            Some(t)
         } else {
             None
         };
 
         #[cfg(feature = "ndarray-backend")]
-        let vf_trainer = Some(training::VfTrainer::new(obs_dim, hidden_sizes, vf_lr));
+        let vf_trainer = {
+            let mut t = training::VfTrainer::new(obs_dim, hidden_sizes, vf_lr);
+            t.lr_schedule_steps = lr_schedule_steps;
+            Some(t)
+        };
 
         Self {
             policy,

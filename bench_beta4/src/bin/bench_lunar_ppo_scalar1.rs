@@ -45,12 +45,23 @@ const PI_LR: f64 = 2.5e-4;
 const VF_LR: f64 = 2.5e-4;
 const TRAIN_PI_ITERS: u64 = 10;
 const TRAIN_VF_ITERS: u64 = 10;
-// 0.05: loose enough for full-batch (1 grad step/pi_iter); KL stops at ~3-7 iters.
+// 0.05: higher target_kl allows larger policy updates to escape local optima.
+// SB3 Zoo exact value is 0.015, but that causes StopIter=1 (essentially no training)
+// when the policy is near a local optimum. Relaxed to 0.05 to allow exploration.
 const TARGET_KL: f32 = 0.05;
 const TRAJ_PER_EPOCH: u64 = 128;
-// 2M env-frames / 64 envs = 31_250 loop steps — enough to see clear convergence trend.
-const TOTAL_STEPS: usize = 31_250;
+// 6.4M env-frames / 64 envs = 100_000 loop steps — enough to reach solved threshold (+200).
+const TOTAL_STEPS: usize = 100_000;
+// SB3 Zoo mini-batch size — matches the 64-sample batches from SB3 LunarLander-v2 config.
+// With 128 traj × ~100 steps/ep = ~12,800 transitions/epoch and 10 pi_iters:
+//   12,800 / 64 = 200 mini-batches per pi_iter → up to 2,000 grad steps/epoch.
+//   target_kl=0.015 early stopping keeps it to ~3-5 pi_iters (~600-1,000 grad steps/epoch).
+const MINI_BATCH_SIZE: usize = 64;
 const BUFFER_SIZE: ReplayBufferSize = 100_000;
+// Linear LR decay: SB3 Zoo uses `lin_2.5e-4` (decay to 0 over training).
+// With target_kl=0.05 and ent_coef=0.05, expect more pi_iters per epoch (~6-8).
+// Estimated ~200k pi grad steps total: ~500 epochs × 6 pi_iters × 200 mini-batches × 0.33.
+const LR_SCHEDULE_STEPS: u64 = 200_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
 
@@ -74,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  obs={OBS_DIM}  act={ACT_DIM}  MLP=[128,128]  max_steps={MAX_STEPS}");
     println!("  loop_steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}");
-    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.01  traj/epoch={TRAJ_PER_EPOCH}  mb=FULL-BATCH");
+    println!("  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef=0.05  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  lr_sched={LR_SCHEDULE_STEPS}");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
@@ -106,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── PPO kernel: [128, 128] MLP for obs=8, act=4 ─────────────────────────
     let burn_device = <B as burn_tensor::backend::Backend>::Device::default();
-    let kernel = PPOKernel::<B, Float, Float>::new(
+    let kernel = PPOKernel::<B, Float, Float>::new_with_schedule(
         OBS_DIM,
         ACT_DIM,
         true, // discrete actions
@@ -114,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ActivationKind::ReLU,
         PI_LR,
         VF_LR,
+        Some(LR_SCHEDULE_STEPS),
         &burn_device,
     );
 
@@ -139,9 +151,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 train_vf_iters: TRAIN_VF_ITERS,
                 target_kl: TARGET_KL,
                 traj_per_epoch: TRAJ_PER_EPOCH,
-                ent_coef: 0.01,
+                ent_coef: 0.05, // 5× SB3 default to prevent entropy collapse before landing is discovered
                 max_episode_steps: Some(MAX_STEPS),
-                mini_batch_size: None, // full-batch: 1 grad step per pi_iter
+                mini_batch_size: Some(MINI_BATCH_SIZE), // SB3: 64-sample batches, KL early stop
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo"),
