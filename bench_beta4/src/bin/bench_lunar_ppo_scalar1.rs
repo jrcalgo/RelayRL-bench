@@ -50,8 +50,9 @@ const TRAIN_VF_ITERS: u64 = 10;
 // when the policy is near a local optimum. Relaxed to 0.05 to allow exploration.
 const TARGET_KL: f32 = 0.05;
 const TRAJ_PER_EPOCH: u64 = 128;
-// 6.4M env-frames / 64 envs = 100_000 loop steps — enough to reach solved threshold (+200).
-const TOTAL_STEPS: usize = 100_000;
+// ~20 epochs: 128 traj × avg ~180 steps / 64 envs ≈ 360 steps/epoch × 20 = 7200.
+// Early epochs are shorter (~180 avg EpLen); set to 7500 to get exactly 20+ epochs.
+const TOTAL_STEPS: usize = 7_500;
 // SB3 Zoo mini-batch size — matches the 64-sample batches from SB3 LunarLander-v2 config.
 // With 128 traj × ~100 steps/ep = ~12,800 transitions/epoch and 10 pi_iters:
 //   12,800 / 64 = 200 mini-batches per pi_iter → up to 2,000 grad steps/epoch.

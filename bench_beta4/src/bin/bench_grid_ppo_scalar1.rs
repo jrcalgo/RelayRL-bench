@@ -51,9 +51,9 @@ const TRAIN_VF_ITERS: u64 = 10;
 // target_kl=0.05: each full-batch step produces larger KL than mini-batch; KL stops at 3-7 iters.
 const TARGET_KL: f32 = 0.05;
 const TRAJ_PER_EPOCH: u64 = 64;
-// Enough steps for well over 100 epochs (each epoch ~20 loop steps at avg EpLen≈20).
-const TOTAL_STEPS: usize = 50_000;
-const BUFFER_SIZE: ReplayBufferSize = 50_000;
+// ~20 epochs: 64 traj × avg ~100 steps (early: timeout-heavy) / 64 envs = 100 steps/epoch × 20 = 2000.
+const TOTAL_STEPS: usize = 2_500;
+const BUFFER_SIZE: ReplayBufferSize = 10_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
 
