@@ -51,8 +51,9 @@ const TRAIN_VF_ITERS: u64 = 10;
 // target_kl=0.05: each full-batch step produces larger KL than mini-batch; KL stops at 3-7 iters.
 const TARGET_KL: f32 = 0.05;
 const TRAJ_PER_EPOCH: u64 = 64;
-// ~20 epochs: 64 traj × avg ~100 steps (early: timeout-heavy) / 64 envs = 100 steps/epoch × 20 = 2000.
-const TOTAL_STEPS: usize = 2_500;
+// 500,000 env-frames / 64 envs ≈ 7,813 loop steps — sufficient for full convergence
+// (GridWorld is much simpler than LunarLander; expect convergence by epoch 10-20).
+const TOTAL_STEPS: usize = 7_813;
 const BUFFER_SIZE: ReplayBufferSize = 10_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
