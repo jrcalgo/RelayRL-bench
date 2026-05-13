@@ -4,9 +4,24 @@ import numpy as np
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
 
-CONVERGENCE_THRESHOLD = 200.0
-WINDOW = 100
-MAX_STEPS = 2_000_000
+# ── Shared hyperparameters (match RelayRL bench_lunar_ppo_scalar1) ───────────
+SEED       = 42
+GAMMA      = 0.999
+LAM        = 0.98
+CLIP       = 0.2
+LR         = 2.5e-4
+ENT_COEF   = 0.05
+VF_COEF    = 0.5
+MAX_GRAD   = 0.5
+N_STEPS    = 1024
+BATCH_SIZE = 64
+N_EPOCHS   = 10
+TARGET_KL  = 0.05
+NET        = [128, 128]
+# ─────────────────────────────────────────────────────────────────────────────
+CONVERGENCE = 200.0
+WINDOW      = 100
+MAX_STEPS_ENV = 100_000
 
 ray.init(num_cpus=2, num_gpus=0, log_to_driver=False, ignore_reinit_error=True,
          _temp_dir="/tmp/ray_bench")
@@ -15,17 +30,20 @@ config = (
     PPOConfig()
     .environment("LunarLander-v3")
     .env_runners(num_env_runners=0, num_envs_per_env_runner=1)
+    .debugging(seed=SEED)
     .training(
-        train_batch_size=1024,
-        minibatch_size=64,
-        num_epochs=4,
-        gamma=0.999,
-        lambda_=0.98,
-        entropy_coeff=0.01,
-        vf_loss_coeff=0.5,
-        grad_clip=0.5,
-        lr=2.5e-4,
-        model={"fcnet_hiddens": [128, 128], "fcnet_activation": "relu"},
+        train_batch_size=N_STEPS,
+        minibatch_size=BATCH_SIZE,
+        num_epochs=N_EPOCHS,
+        gamma=GAMMA,
+        lambda_=LAM,
+        clip_param=CLIP,
+        entropy_coeff=ENT_COEF,
+        vf_loss_coeff=VF_COEF,
+        grad_clip=MAX_GRAD,
+        kl_target=TARGET_KL,
+        lr=LR,
+        model={"fcnet_hiddens": NET, "fcnet_activation": "relu"},
     )
     .framework("torch")
     .checkpointing(export_native_model_files=False)
@@ -35,8 +53,10 @@ algo = config.build()
 
 print("=" * 60)
 print("  RLlib PPO — LunarLander-v3 — 1 env (num_env_runners=0)")
-print(f"  train_batch=1024  minibatch=64  epochs=4  lr=2.5e-4")
-print(f"  net=[128,128]  gamma=0.999  lam=0.98  ent=0.01")
+print(f"  lr={LR}  n_steps={N_STEPS}  batch={BATCH_SIZE}  epochs={N_EPOCHS}")
+print(f"  gamma={GAMMA}  lam={LAM}  clip={CLIP}  ent={ENT_COEF}"
+      f"  vf={VF_COEF}  grad_clip={MAX_GRAD}  target_kl={TARGET_KL}")
+print(f"  net={NET}  seed={SEED}")
 print("=" * 60)
 
 ep_returns = []
@@ -46,7 +66,7 @@ t0 = time.perf_counter()
 total_steps = 0
 iteration = 0
 
-while total_steps < MAX_STEPS:
+while total_steps < MAX_STEPS_ENV:
     result = algo.train()
     iteration += 1
     total_steps = result.get("num_env_steps_sampled_lifetime", total_steps)
@@ -79,7 +99,7 @@ while total_steps < MAX_STEPS:
 
     if (converged_step is None
             and len(ep_returns) >= WINDOW
-            and mean_ret >= CONVERGENCE_THRESHOLD):
+            and mean_ret >= CONVERGENCE):
         converged_step = total_steps
         converged_time = elapsed
         print(f"  *** CONVERGED at step={converged_step:,}  t={converged_time:.1f}s  mean_ret={mean_ret:.1f} ***")
@@ -103,7 +123,7 @@ if converged_step:
     print(f"  time to converge : {converged_time:.1f}s")
     print(f"  fps at convergence: {converged_step/converged_time:.0f}")
 else:
-    print(f"  did NOT converge within {MAX_STEPS:,} steps")
+    print(f"  did NOT converge within {MAX_STEPS_ENV:,} steps")
 
 algo.stop()
 ray.shutdown()
