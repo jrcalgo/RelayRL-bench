@@ -1,5 +1,6 @@
-"""SB3 PPO benchmark on LunarLander-v3 — 1 env, matching RelayRL hyperparams."""
+"""SB3 PPO benchmark on LunarLander-v3 — 64 envs, matching RelayRL hyperparams."""
 import time
+import resource
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -62,7 +63,8 @@ class Tracker(BaseCallback):
             print(f"  step={self.num_timesteps:>8,}  mean_ret(100)={np.mean(win):>8.1f}"
                   f"  fps={fps:>6.0f}  t={elapsed:.1f}s")
 
-env = make_vec_env("LunarLander-v3", n_envs=1, seed=SEED)
+N_ENVS = 64
+env = make_vec_env("LunarLander-v3", n_envs=N_ENVS, seed=SEED)
 
 model = PPO(
     "MlpPolicy", env,
@@ -83,7 +85,7 @@ model = PPO(
 )
 
 print("=" * 60)
-print("  SB3 PPO — LunarLander-v3 — 1 env")
+print(f"  SB3 PPO — LunarLander-v3 — {N_ENVS} envs")
 print(f"  lr={LR}  n_steps={N_STEPS}  batch={BATCH_SIZE}  epochs={N_EPOCHS}")
 print(f"  gamma={GAMMA}  lam={LAM}  clip={CLIP}  ent={ENT_COEF}"
       f"  vf={VF_COEF}  grad_clip={MAX_GRAD}  target_kl={TARGET_KL}")
@@ -101,14 +103,20 @@ final_mean = (float(np.mean(cb.ep_returns[-WINDOW:])) if len(cb.ep_returns) >= W
               else float(np.mean(cb.ep_returns)) if cb.ep_returns else 0.0)
 
 print()
+rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+rss_mb = rss_kb / 1024
+
+print()
 print("=" * 60)
 print("  SB3 RESULTS")
 print("=" * 60)
+print(f"  n_envs            : {N_ENVS}")
 print(f"  total steps       : {total:,}")
 print(f"  wall time         : {wall:.1f}s")
 print(f"  steps/sec         : {fps_overall:.0f}")
 print(f"  total episodes    : {len(cb.ep_returns)}")
 print(f"  final mean_ret    : {final_mean:.1f}")
+print(f"  peak RSS (driver) : {rss_mb:.0f} MB")
 if cb.converged_step:
     print(f"  converged at step : {cb.converged_step:,}")
     print(f"  time to converge  : {cb.converged_time:.1f}s")

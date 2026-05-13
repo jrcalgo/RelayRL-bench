@@ -48,3 +48,7 @@ path = "src/bin/bench_grid_ppo_scalar1.rs"
 [[bin]]
 name = "bench_lunar_ppo_1env"
 path = "src/bin/bench_lunar_ppo_1env.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_64env"
+path = "src/bin/bench_lunar_ppo_64env.rs"

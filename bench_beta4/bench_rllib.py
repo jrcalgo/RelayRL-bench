@@ -1,5 +1,6 @@
-"""RLlib PPO benchmark on LunarLander-v3 — 1 env (num_env_runners=0), until convergence."""
+"""RLlib PPO benchmark on LunarLander-v3 — 64 envs (num_env_runners=0), 100k steps."""
 import time
+import resource
 import numpy as np
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -29,7 +30,7 @@ ray.init(num_cpus=2, num_gpus=0, log_to_driver=False, ignore_reinit_error=True,
 config = (
     PPOConfig()
     .environment("LunarLander-v3")
-    .env_runners(num_env_runners=0, num_envs_per_env_runner=1)
+    .env_runners(num_env_runners=0, num_envs_per_env_runner=64)
     .debugging(seed=SEED)
     .training(
         train_batch_size=N_STEPS,
@@ -52,7 +53,7 @@ config = (
 algo = config.build()
 
 print("=" * 60)
-print("  RLlib PPO — LunarLander-v3 — 1 env (num_env_runners=0)")
+print("  RLlib PPO — LunarLander-v3 — 64 envs (num_env_runners=0)")
 print(f"  lr={LR}  n_steps={N_STEPS}  batch={BATCH_SIZE}  epochs={N_EPOCHS}")
 print(f"  gamma={GAMMA}  lam={LAM}  clip={CLIP}  ent={ENT_COEF}"
       f"  vf={VF_COEF}  grad_clip={MAX_GRAD}  target_kl={TARGET_KL}")
@@ -109,15 +110,20 @@ wall = time.perf_counter() - t0
 final_mean = float(np.mean(ep_returns[-WINDOW:])) if len(ep_returns) >= WINDOW else float(np.mean(ep_returns)) if ep_returns else 0.0
 fps_overall = total_steps / wall
 
+rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+rss_mb = rss_kb / 1024
+
 print()
 print("=" * 60)
 print("  RLlib RESULTS")
 print("=" * 60)
+print(f"  n_envs           : 64")
 print(f"  total steps      : {total_steps:,}")
 print(f"  wall time        : {wall:.1f}s")
 print(f"  steps/sec        : {fps_overall:.0f}")
 print(f"  total iterations : {iteration}")
 print(f"  final mean_ret   : {final_mean:.1f}")
+print(f"  peak RSS (driver): {rss_mb:.0f} MB")
 if converged_step:
     print(f"  converged at step: {converged_step:,}")
     print(f"  time to converge : {converged_time:.1f}s")

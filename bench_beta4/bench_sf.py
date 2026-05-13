@@ -1,8 +1,8 @@
-"""Sample Factory sync-PPO (APPO serial_mode) benchmark on LunarLander-v3 — 1 worker, 1 env.
+"""Sample Factory sync-PPO (APPO serial_mode) benchmark on LunarLander-v3 — 1 worker, 64 envs.
 
 Note: async_rl=True crashes with numpy>=2.0 (SF 2.1.1 bug). serial_mode=True is synchronous PPO.
 """
-import os, sys, time
+import os, sys, time, resource
 os.environ["SF_DISABLE_TENSORBOARD"] = "1"
 os.environ["SF_SAVE_EVERY_SEC"] = "99999"
 
@@ -35,14 +35,14 @@ if __name__ == "__main__":
     argv = [
         "--algo=APPO",
         "--env=lunarlander_v3",
-        "--experiment=bench_sf_lunar",
-        "--train_dir=/tmp/sf_bench",
+        "--experiment=bench_sf_lunar_64env",
+        "--train_dir=/tmp/sf_bench_64",
         "--num_workers=1",
-        "--num_envs_per_worker=1",
+        "--num_envs_per_worker=64",
         "--worker_num_splits=1",
         f"--rollout={N_STEPS}",
         f"--batch_size={N_STEPS}",
-        f"--num_batches_per_epoch=1",
+        f"--num_batches_per_epoch=64",
         f"--num_epochs={N_EPOCHS}",
         f"--gamma={GAMMA}",
         f"--gae_lambda={LAM}",
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     ]
 
     print("=" * 60)
-    print("  Sample Factory APPO serial — LunarLander-v3 — 1 worker/1 env")
+    print("  Sample Factory APPO serial — LunarLander-v3 — 1 worker/64 envs")
     print(f"  lr={LR}  rollout={N_STEPS}  batch={BATCH_SIZE}  epochs={N_EPOCHS}")
     print(f"  gamma={GAMMA}  lam={LAM}  ent={ENT_COEF}  hidden={HIDDEN}  serial_mode  seed={SEED}")
     print("=" * 60)
@@ -75,4 +75,7 @@ if __name__ == "__main__":
     t0 = time.perf_counter()
     status = run_rl(cfg)
     wall = time.perf_counter() - t0
+    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_mb = rss_kb / 1024
     print(f"\nSample Factory finished in {wall:.1f}s  status={status}")
+    print(f"  peak RSS (driver) : {rss_mb:.0f} MB")
