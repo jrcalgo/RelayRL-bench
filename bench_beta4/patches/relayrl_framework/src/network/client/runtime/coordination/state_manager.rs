@@ -977,10 +977,14 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     act_dim: act_dim_trainer,
                     buffer_size: replay_buffer_size,
                 };
-                // Extract max_episode_steps before consuming algorithm_cfg
+                // Extract fields before consuming algorithm_cfg
                 let max_episode_steps: Option<usize> = match &algorithm_cfg {
                     AlgorithmCfg::PPO(Some(p)) | AlgorithmCfg::IPPO(Some(p)) => p.max_episode_steps,
                     _ => None,
+                };
+                let traj_per_epoch: usize = match &algorithm_cfg {
+                    AlgorithmCfg::PPO(Some(p)) | AlgorithmCfg::IPPO(Some(p)) => p.traj_per_epoch as usize,
+                    _ => 2,
                 };
                 let spec = match algorithm_cfg {
                     AlgorithmCfg::PPO(params) => PpoTrainerSpec::ppo(trainer_args, params),
@@ -1006,10 +1010,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             format!("[StateManager] ORT value prime failed: {}", e)
                         ))?;
                 }
-                // Bounded learner-worker split: collection blocks when the learner is behind,
-                // capping data staleness to at most 2 policy versions (backpressure).
+                // Size channel to traj_per_epoch so collection can prefill a full epoch
+                // while the learner trains the previous one (true pipeline, no backpressure).
                 let (traj_tx, mut traj_rx) =
-                    tokio::sync::mpsc::channel::<RelayRLTrajectory>(2);
+                    tokio::sync::mpsc::channel::<RelayRLTrajectory>(traj_per_epoch);
                 let epoch_count_shared =
                     Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let epoch_count_learner = Arc::clone(&epoch_count_shared);
