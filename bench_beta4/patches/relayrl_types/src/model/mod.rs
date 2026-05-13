@@ -323,6 +323,15 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Ok(Self { model, metadata })
     }
 
+    /// Return the inner `Arc<CModule>` if this module uses TorchScript inference.
+    #[cfg(feature = "tch-model")]
+    pub fn as_cmodule(&self) -> Option<Arc<CModule>> {
+        match &self.model.inference {
+            InferenceModel::Pt(m) => Some(Arc::clone(m)),
+            _ => None,
+        }
+    }
+
     /// Build a `ModelModule` from TorchScript bytes via a temporary file.
     #[cfg(feature = "tch-model")]
     pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {

@@ -611,6 +611,24 @@ where
     }
 }
 
+#[cfg(all(feature = "tch-backend", feature = "tch-model"))]
+impl<B, InK, OutK, K> PpoTrainer<B, InK, OutK, K>
+where
+    B: Backend + BackendMatcher<Backend = B>,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    K: PPOKernelTrait<B, InK, OutK> + WeightProvider + Default,
+{
+    /// Build a single fused TorchScript model containing both the policy and value networks.
+    /// Output shape is `[batch, act_dim + 1]`; the last column is the value estimate.
+    pub fn acquire_fused_pt_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
+        match self {
+            Self::PPO(algorithm) => algorithm.acquire_fused_pt_module(),
+            Self::IPPO(algorithm) => algorithm.acquire_fused_pt_module(),
+        }
+    }
+}
+
 /// Runtime wrapper for **independent** REINFORCE-family algorithms with kernel `K`.
 ///
 /// `K` must support stepping ([`StepKernelTrait`]) and the scalar training hooks ([`REINFORCEKernelTrait`]),
