@@ -1213,10 +1213,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let total_ns = ns_flat_obs + ns_ort + ns_val + ns_traj;
                 let pct = |n: u128| if total_ns > 0 { n as f64 / total_ns as f64 * 100.0 } else { 0.0 };
                 let ms = |n: u128| n as f64 / 1_000_000.0;
-                println!("\n── PPO step-loop time breakdown ({} steps, async learner) ────────", step_count);
+                #[cfg(feature = "tch-backend")]
+                let infer_engine = "TorchScript (.pt)";
+                #[cfg(not(feature = "tch-backend"))]
+                let infer_engine = "ORT (ONNX)";
+
+                println!("\n── PPO step-loop time breakdown ({} steps, async learner, inference={}) ────────", step_count, infer_engine);
                 println!("  flat_observation_bytes (get obs)           : {:>8.0} ms  ({:.1}%)", ms(ns_flat_obs), pct(ns_flat_obs));
-                println!("  ORT policy inference (logits+sample+step) : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
-                println!("  ORT value-head inference (GAE val)        : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
+                println!("  policy inference (logits+sample+step)      : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
+                println!("  value-head inference (GAE val)             : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
                 println!("  trajectory building (TensorData/per-env)  : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
                 println!("  PPO training (learner task, concurrent)    : not measured (overlapped with collection)");
                 println!("  collection wall time                       : {:>8.0} ms", collection_wall_ns as f64 / 1e6);
