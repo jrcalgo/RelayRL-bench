@@ -451,38 +451,6 @@ where
             None,
         )
     }
-
-    /// Build a single fused TorchScript model containing both the policy and value networks.
-    /// Output shape is `[batch, act_dim + 1]`; the last column is the value estimate.
-    /// Only available with `tch-backend` + `tch-model` features.
-    #[cfg(all(feature = "tch-backend", feature = "tch-model"))]
-    pub fn acquire_fused_pt_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
-        use relayrl_types::data::tensor::{DType, NdArrayDType};
-        use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
-        use crate::algorithms::pt_builder::build_pt_fused_mlp_temp;
-
-        let slot = self.runtime.components.agent_slots.first()?;
-        let pi_specs = slot.kernel.get_pi_layer_specs()?;
-        let vf_specs = slot.kernel.get_vf_layer_specs()?;
-
-        let (bytes, _temp_path) = build_pt_fused_mlp_temp(&pi_specs, &vf_specs).ok()?;
-        if bytes.is_empty() { return None; }
-
-        let obs_dim = self.runtime.args.obs_dim;
-        let act_dim = self.runtime.args.act_dim;
-
-        let metadata = ModelMetadata {
-            model_file: "ppo_fused.pt".to_string(),
-            model_type: ModelFileType::Pt,
-            input_dtype: DType::NdArray(NdArrayDType::F32),
-            output_dtype: DType::NdArray(NdArrayDType::F32),
-            input_shape: vec![1, obs_dim],
-            output_shape: vec![1, act_dim + 1],
-            default_device: None,
-        };
-
-        ModelModule::from_pt_bytes(bytes, metadata).ok()
-    }
 }
 
 impl<B, InK, OutK, KN, T> AlgorithmTrait<T> for IndependentPPOAlgorithm<B, InK, OutK, KN>

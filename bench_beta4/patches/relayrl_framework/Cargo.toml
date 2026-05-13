@@ -87,7 +87,6 @@ profile = [
 tch-backend = [
     "relayrl_types/tch-backend",
     "relayrl_types/tch-model",
-    "dep:tch",
 ]
 training-server = []
 zmq-transport = [
@@ -231,11 +230,6 @@ features = ["full"]
 
 [dependencies.tokio-stream]
 version = "0.1.18"
-optional = true
-
-[dependencies.tch]
-version = "=0.22.0"
-default-features = false
 optional = true
 
 [dependencies.zmq]

@@ -994,35 +994,22 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut trainer = PpoTrainer::new(spec, kernel).map_err(StateManagerError::from)?;
                 // Pre-register slot so the kernel is ready for inference immediately
                 trainer.register_first_slot_with_key(actor_id.to_string());
-
-                // Build initial fused TorchScript model (tch-backend fast path).
-                // Shared between learner task (writer) and collection loop (reader).
-                #[cfg(feature = "tch-backend")]
-                let fused_module_shared: Arc<std::sync::Mutex<Option<Arc<tch::CModule>>>> = {
-                    let initial = trainer.acquire_fused_pt_module()
-                        .and_then(|m| m.as_cmodule());
-                    Arc::new(std::sync::Mutex::new(initial))
-                };
-
-                // Prime ORT policy/value heads (used by NdArray fallback path).
-                #[cfg(not(feature = "tch-backend"))]
-                {
-                    if let Some(model_module) = trainer.acquire_model_module() {
-                        runtime.perform_refresh_model(model_module, device.clone())
-                            .await
-                            .map_err(|e| StateManagerError::TrainerError(
-                                format!("[StateManager] ORT policy prime failed: {}", e)
-                            ))?;
-                    }
-                    if let Some(vf_module) = trainer.acquire_value_module() {
-                        runtime.perform_refresh_value_model(vf_module, device.clone())
-                            .await
-                            .map_err(|e| StateManagerError::TrainerError(
-                                format!("[StateManager] ORT value prime failed: {}", e)
-                            ))?;
-                    }
+                // Prime ORT policy head
+                if let Some(model_module) = trainer.acquire_model_module() {
+                    runtime.perform_refresh_model(model_module, device.clone())
+                        .await
+                        .map_err(|e| StateManagerError::TrainerError(
+                            format!("[StateManager] ORT policy prime failed: {}", e)
+                        ))?;
                 }
-
+                // Prime ORT value head
+                if let Some(vf_module) = trainer.acquire_value_module() {
+                    runtime.perform_refresh_value_model(vf_module, device.clone())
+                        .await
+                        .map_err(|e| StateManagerError::TrainerError(
+                            format!("[StateManager] ORT value prime failed: {}", e)
+                        ))?;
+                }
                 // Size channel to traj_per_epoch so collection can prefill a full epoch
                 // while the learner trains the previous one (true pipeline, no backpressure).
                 let (traj_tx, mut traj_rx) =
@@ -1032,8 +1019,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let epoch_count_learner = Arc::clone(&epoch_count_shared);
                 let runtime_learner = Arc::clone(&runtime);
                 let device_learner = device.clone();
-                #[cfg(feature = "tch-backend")]
-                let fused_module_learner = Arc::clone(&fused_module_shared);
                 // trainer moves into the learner task; collection loop only holds traj_tx
                 let learner_handle: tokio::task::JoinHandle<Result<(), StateManagerError>> =
                     tokio::spawn(async move {
@@ -1048,32 +1033,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             if trained {
                                 epoch_count_learner
                                     .fetch_add(1, std::sync::atomic::Ordering::Release);
-
-                                // Fast path: update shared fused CModule for tch-backend.
-                                #[cfg(feature = "tch-backend")]
-                                if let Some(fused) = trainer.acquire_fused_pt_module() {
-                                    if let Some(cmodule) = fused.as_cmodule() {
-                                        *fused_module_learner.lock().unwrap() = Some(cmodule);
-                                    }
-                                }
-
-                                // Fallback: refresh ORT models for NdArray path.
-                                #[cfg(not(feature = "tch-backend"))]
-                                {
-                                    let pi_module = trainer.acquire_model_module();
-                                    let vf_module = trainer.acquire_value_module();
-                                    if pi_module.is_some() || vf_module.is_some() {
-                                        let rt = Arc::clone(&runtime_learner);
-                                        let dev = device_learner.clone();
-                                        tokio::spawn(async move {
-                                            if let Some(m) = pi_module {
-                                                let _ = rt.perform_refresh_model(m, dev.clone()).await;
-                                            }
-                                            if let Some(v) = vf_module {
-                                                let _ = rt.perform_refresh_value_model(v, dev).await;
-                                            }
-                                        });
-                                    }
+                                let pi_module = trainer.acquire_model_module();
+                                let vf_module = trainer.acquire_value_module();
+                                if pi_module.is_some() || vf_module.is_some() {
+                                    let rt = Arc::clone(&runtime_learner);
+                                    let dev = device_learner.clone();
+                                    tokio::spawn(async move {
+                                        if let Some(m) = pi_module {
+                                            let _ = rt.perform_refresh_model(m, dev.clone()).await;
+                                        }
+                                        if let Some(v) = vf_module {
+                                            let _ = rt.perform_refresh_value_model(v, dev).await;
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -1099,40 +1071,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let obs_bytes_per_env = obs_dim * 4; // f32
                 let act_bytes_per_env = 8usize;      // i64
 
-                // Pre-allocate persistent buffers for fused inference (tch-backend).
-                #[cfg(feature = "tch-backend")]
-                let mut acts_vec_buf  = vec![0i64; n_envs];
-                #[cfg(feature = "tch-backend")]
-                let mut logps_vec_buf = vec![0f32; n_envs];
-                #[cfg(feature = "tch-backend")]
-                let mut vals_vec_buf  = vec![0f32; n_envs];
-                // Pre-allocated obs tensor for zero-copy writes each step.
-                #[cfg(feature = "tch-backend")]
-                let obs_buf = tch::Tensor::zeros(
-                    [n_envs as i64, obs_dim as i64],
-                    (tch::Kind::Float, tch::Device::Cpu),
-                );
-                // Limit LibTorch intra-op threads to 1: on a 4-core machine, small inference
-                // batches (64 envs × 8 obs) don't benefit from multi-threading, and reducing
-                // from 4 threads eliminates contention with the concurrent learner's LibTorch ops.
-                #[cfg(feature = "tch-backend")]
-                tch::set_num_threads(1);
-
-                // Warm up the TorchScript JIT kernel to trigger compilation before timing.
-                #[cfg(feature = "tch-backend")]
-                {
-                    let cmod_init = fused_module_shared.lock().unwrap().clone();
-                    if let Some(ref cm) = cmod_init {
-                        let warmup_t = tch::Tensor::zeros(
-                            [n_envs as i64, obs_dim as i64],
-                            (tch::Kind::Float, tch::Device::Cpu),
-                        );
-                        for _ in 0..3 {
-                            let _ = tch::no_grad(|| cm.forward_ts(&[warmup_t.shallow_clone()]));
-                        }
-                    }
-                }
-
                 let t_collection_start = std::time::Instant::now();
                 let mut ns_flat_obs: u128 = 0;
                 for _ in 0..step_count {
@@ -1142,64 +1080,25 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     })?;
                     ns_flat_obs += t_flat.elapsed().as_nanos();
 
+                    // ORT inference: policy logits → categorical sample → (action i64 bytes, logp f32 bytes)
                     let t_ort = std::time::Instant::now();
-
-                    // Fast path: single fused TorchScript forward pass (tch-backend).
-                    // All tensor ops in one no_grad block to avoid repeated guard construction.
-                    #[cfg(feature = "tch-backend")]
-                    let (action_bytes_i64, logp_bytes, vals) = {
-                        let cmodule = fused_module_shared.lock().unwrap().clone();
-                        let cmodule = cmodule.ok_or_else(|| StateManagerError::InferenceRequestError(
-                            "[StateManager] fused CModule not initialized".to_string(),
-                        ))?;
-                        let obs_f32: &[f32] = bytemuck::cast_slice(&obs_bytes);
-
-                        tch::no_grad(|| -> Result<_, StateManagerError> {
-                            // Zero-copy: write obs bytes directly into pre-allocated tensor storage.
-                            unsafe {
-                                let dst = obs_buf.data_ptr() as *mut f32;
-                                std::ptr::copy_nonoverlapping(obs_f32.as_ptr(), dst, obs_f32.len());
-                            }
-                            let output = cmodule.forward_ts(&[obs_buf.shallow_clone()])
-                                .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-                            let logits = output.narrow(1, 0, act_dim as i64);
-                            let values = output.narrow(1, act_dim as i64, 1).squeeze_dim(1);
-                            let log_probs = logits.log_softmax(-1, tch::Kind::Float);
-                            let actions = log_probs.exp().multinomial(1, true).squeeze_dim(1);
-                            let logps = log_probs.gather(1, &actions.unsqueeze(1), false).squeeze_dim(1);
-                            actions.copy_data(&mut acts_vec_buf,  n_envs);
-                            logps  .copy_data(&mut logps_vec_buf, n_envs);
-                            values .copy_data(&mut vals_vec_buf,  n_envs);
-                            Ok(())
-                        })?;
-
-                        ns_ort += t_ort.elapsed().as_nanos();
-                        let action_bytes_i64: Vec<u8> = bytemuck::cast_slice(&acts_vec_buf).to_vec();
-                        let logp_bytes:       Vec<u8> = bytemuck::cast_slice(&logps_vec_buf).to_vec();
-                        (action_bytes_i64, logp_bytes, vals_vec_buf.clone())
-                    };
-
-                    // Fallback path: two separate ORT calls (NdArray / non-tch-backend).
-                    #[cfg(not(feature = "tch-backend"))]
-                    let (action_bytes_i64, logp_bytes, vals) = {
-                        let (abytes, lbytes) = runtime
-                            .perform_local_ppo_inference(&obs_bytes, n_envs, obs_dim, act_dim)
-                            .await
-                            .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-                        ns_ort += t_ort.elapsed().as_nanos();
-
-                        let t_val = std::time::Instant::now();
-                        let v = runtime.perform_local_value_inference(&obs_bytes, n_envs, obs_dim).await;
-                        ns_val += t_val.elapsed().as_nanos();
-                        (abytes, lbytes, v)
-                    };
-
-                    // Step the environment.
+                    let (action_bytes_i64, logp_bytes) = runtime
+                        .perform_local_ppo_inference(&obs_bytes, n_envs, obs_dim, act_dim)
+                        .await
+                        .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
                     let act_i64: &[i64] = bytemuck::cast_slice(&action_bytes_i64);
                     let action_bytes_for_env: Vec<u8> = act_i64.iter().map(|&a| a as u8).collect();
                     let (_, rewards, dones) = env_interface.step_bytes(&action_bytes_for_env).ok_or_else(|| {
                         StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string())
                     })?;
+                    ns_ort += t_ort.elapsed().as_nanos();
+
+                    // ORT value-head inference for GAE advantage estimates
+                    let t_val = std::time::Instant::now();
+                    let vals: Vec<f32> = runtime
+                        .perform_local_value_inference(&obs_bytes, n_envs, obs_dim)
+                        .await;
+                    ns_val += t_val.elapsed().as_nanos();
 
                     for i in 0..n_envs {
                         let t_traj_env = std::time::Instant::now();
