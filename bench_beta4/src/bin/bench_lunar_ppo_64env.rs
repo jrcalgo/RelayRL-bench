@@ -38,7 +38,8 @@ const MINI_BATCH_SIZE: usize = 64;
 const ENT_COEF: f32 = 0.05;
 
 const TRAJ_PER_EPOCH: u64 = 5;
-const TOTAL_STEPS: usize = 100_000;
+// 1_563 loop iterations × 64 envs ≈ 100,032 total env frames
+const TOTAL_STEPS: usize = 1_563;
 const BUFFER_SIZE: ReplayBufferSize = 200_000;
 
 const CONVERGENCE: f64 = 200.0;
@@ -95,7 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &burn_device,
     );
 
-    println!("Starting PPO training ({TOTAL_STEPS} steps, {ENV_COUNT} envs)...\n");
+    let total_frames = TOTAL_STEPS * ENV_COUNT as usize;
+    println!("Starting PPO training ({TOTAL_STEPS} loop iters × {ENV_COUNT} envs = {total_frames} env frames)...\n");
 
     let t0 = Instant::now();
     agent
@@ -124,14 +126,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let wall = t0.elapsed().as_secs_f64();
 
-    let env_frames_per_sec = TOTAL_STEPS as f64 / wall;
+    let total_env_frames = TOTAL_STEPS * ENV_COUNT as usize;
+    let env_frames_per_sec = total_env_frames as f64 / wall;
 
     println!();
     println!("============================================================");
     println!("  RelayRL RESULTS");
     println!("============================================================");
     println!("  n_envs            : {}", ENV_COUNT);
-    println!("  total steps       : {}", TOTAL_STEPS);
+    println!("  loop iterations   : {}", TOTAL_STEPS);
+    println!("  total env frames  : {}", total_env_frames);
     println!("  wall time         : {:.1}s", wall);
     println!("  steps/sec         : {:.0}", env_frames_per_sec);
     println!("============================================================");
