@@ -4,11 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+[features]
+tch-backend = ["burn-tch"]
+
 [dependencies]
 relayrl_env_trait = "1.2"
 relayrl_types     = { version = "0.7", default-features = false, features = ["ndarray-backend"] }
 burn-tensor  = "0.20.1"
 burn-ndarray = "0.20.1"
+burn-tch     = { version = "0.20.1", optional = true }
 glam = "0.25"
 rand = "0.9"
 rayon    = "1"

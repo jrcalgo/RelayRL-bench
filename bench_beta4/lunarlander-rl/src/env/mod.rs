@@ -777,3 +777,106 @@ impl relayrl_env_trait::ScalarEnvironment for LunarLanderEnv<NdArray>
         Ok(ScalarEnvReset { observation, info: None })
     }
 }
+
+// ── LibTorch backend impls ───────────────────────────────────────────────────
+
+#[cfg(feature = "tch-backend")]
+mod tch_impls {
+    use super::*;
+    use burn_tch::LibTorch;
+    use relayrl_env_trait::{
+        DynScalarEnvironment, EnvDType, EnvNdArrayDType, EnvironmentHandle, EnvironmentKind,
+        ScalarEnvReset,
+    };
+
+    impl Clone for LunarLanderEnv<LibTorch> {
+        fn clone(&self) -> Self {
+            let new_seed = self.state.lock().unwrap().rng.random::<u64>();
+            LunarLanderEnv {
+                max_steps:  self.max_steps,
+                device:     self.device.clone(),
+                state:      Mutex::new(PhysicsState::build(new_seed)),
+                step_count: Mutex::new(0),
+                running:    AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl relayrl_env_trait::Environment for LunarLanderEnv<LibTorch> {
+        fn run_environment(&self) -> Result<(), relayrl_env_trait::EnvironmentError> {
+            Ok(())
+        }
+
+        fn build_observation(&self) -> Result<Box<dyn std::any::Any>, relayrl_env_trait::EnvironmentError> {
+            Ok(Box::new(self.state.lock().unwrap().last_obs.to_vec()))
+        }
+
+        fn observation_dtype(&self) -> EnvDType {
+            EnvDType::NdArray(EnvNdArrayDType::F32)
+        }
+
+        fn action_dtype(&self) -> EnvDType {
+            EnvDType::NdArray(EnvNdArrayDType::F32)
+        }
+
+        fn observation_dim(&self) -> usize { 8 }
+
+        fn action_dim(&self) -> usize { 4 }
+
+        fn flat_observation_bytes(&self) -> Vec<u8> {
+            let obs = self.state.lock().unwrap().last_obs;
+            bytemuck::cast_slice::<f32, u8>(&obs).to_vec()
+        }
+
+        fn action_is_discrete(&self) -> bool { true }
+
+        fn kind(&self) -> EnvironmentKind {
+            EnvironmentKind::Scalar
+        }
+
+        fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+            EnvironmentHandle::Scalar(self as Box<dyn DynScalarEnvironment>)
+        }
+    }
+
+    impl relayrl_env_trait::ScalarEnvironment for LunarLanderEnv<LibTorch> {
+        fn step_bytes(&self, action: &[u8]) -> Option<(Vec<u8>, f32, bool)> {
+            let act = *action.first()?;
+            let sc = {
+                let mut sc = self.step_count.lock().unwrap();
+                *sc += 1;
+                *sc
+            };
+            let (reward, obs_arr, done) = {
+                let mut state = self.state.lock().unwrap();
+                state.step_physics(act);
+                let done = state.done || sc >= self.max_steps;
+                (state.last_reward, state.last_obs, done)
+            };
+            if done {
+                let new_seed = self.state.lock().unwrap().rng.random::<u64>();
+                *self.state.lock().unwrap() = PhysicsState::build(new_seed);
+                *self.step_count.lock().unwrap() = 0;
+            }
+            let obs = if done {
+                self.state.lock().unwrap().last_obs
+            } else {
+                obs_arr
+            };
+            Some((bytemuck::cast_slice::<f32, u8>(&obs).to_vec(), reward, done))
+        }
+
+        fn reset(&self) -> Result<ScalarEnvReset, relayrl_env_trait::EnvironmentError> {
+            let new_seed = {
+                let mut state = self.state.lock().unwrap();
+                state.rng.random::<u64>()
+            };
+            *self.state.lock().unwrap() = PhysicsState::build(new_seed);
+            *self.step_count.lock().unwrap() = 0;
+
+            let obs_arr = self.state.lock().unwrap().last_obs;
+            let observation = bytemuck::cast_slice::<f32, u8>(&obs_arr).to_vec();
+            Ok(ScalarEnvReset { observation, info: None })
+        }
+    }
+}

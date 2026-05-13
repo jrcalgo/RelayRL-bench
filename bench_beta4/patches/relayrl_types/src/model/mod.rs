@@ -323,6 +323,42 @@ impl<B: Backend + BackendMatcher<Backend = B>> ModelModule<B> {
         Ok(Self { model, metadata })
     }
 
+    /// Build a `ModelModule` from TorchScript bytes via a temporary file.
+    #[cfg(feature = "tch-model")]
+    pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        use std::io::Write;
+        let mut temp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| ModelError::BackendError(format!("Failed to create temp file: {}", e)))?;
+        temp_file.write_all(&bytes)
+            .map_err(|e| ModelError::BackendError(format!("Failed to write temp file: {}", e)))?;
+        let module = CModule::load(temp_file.path())
+            .map_err(|e| ModelError::BackendError(format!("Failed to load CModule: {}", e)))?;
+        let raw_bytes: Arc<[u8]> = bytes.into();
+        Ok(Self {
+            model: Model {
+                file_type: ModelFileType::Pt,
+                raw_bytes,
+                inference: InferenceModel::Pt(Arc::new(module)),
+                _phantom: std::marker::PhantomData,
+            },
+            metadata,
+        })
+    }
+
+    #[cfg(not(feature = "tch-model"))]
+    pub fn from_pt_bytes(bytes: Vec<u8>, metadata: ModelMetadata) -> Result<Self, ModelError> {
+        let raw_bytes: Arc<[u8]> = bytes.into();
+        Ok(Self {
+            model: Model {
+                file_type: ModelFileType::Pt,
+                raw_bytes,
+                inference: InferenceModel::Unsupported,
+                _phantom: std::marker::PhantomData,
+            },
+            metadata,
+        })
+    }
+
     /// Generic forward; dispatches to ONNX or LibTorch paths based on metadata.
     #[cfg(all(
         any(feature = "tch-model", feature = "onnx-model"),

@@ -46,7 +46,7 @@ pub fn build_pt_mlp_temp(
     }
 
     // Create a variable store for building the model
-    let vs = nn::VarStore::new(Device::Cpu);
+    let mut vs = nn::VarStore::new(Device::Cpu);
     let root = vs.root();
 
     // Build sequential layers
@@ -90,6 +90,9 @@ pub fn build_pt_mlp_temp(
             seq = seq.add_fn(|x| x.relu());
         }
     }
+
+    // Freeze all parameters so the trace treats them as constants (no grad)
+    vs.freeze();
 
     // Create a temporary file for saving the model
     let temp_file = tempfile::Builder::new()
