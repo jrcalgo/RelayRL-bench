@@ -1029,15 +1029,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             if trained {
                                 epoch_count_learner
                                     .fetch_add(1, std::sync::atomic::Ordering::Release);
-                                if let Some(model_module) = trainer.acquire_model_module() {
-                                    let _ = runtime_learner
-                                        .perform_refresh_model(model_module, device_learner.clone())
-                                        .await;
-                                }
-                                if let Some(vf_module) = trainer.acquire_value_module() {
-                                    let _ = runtime_learner
-                                        .perform_refresh_value_model(vf_module, device_learner.clone())
-                                        .await;
+                                let pi_module = trainer.acquire_model_module();
+                                let vf_module = trainer.acquire_value_module();
+                                if pi_module.is_some() || vf_module.is_some() {
+                                    let rt = Arc::clone(&runtime_learner);
+                                    let dev = device_learner.clone();
+                                    tokio::spawn(async move {
+                                        if let Some(m) = pi_module {
+                                            let _ = rt.perform_refresh_model(m, dev.clone()).await;
+                                        }
+                                        if let Some(v) = vf_module {
+                                            let _ = rt.perform_refresh_value_model(v, dev).await;
+                                        }
+                                    });
                                 }
                             }
                         }
