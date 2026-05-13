@@ -33,6 +33,10 @@ class Tracker(BaseCallback):
                             and np.mean(self.ep_returns[-WINDOW:]) >= CONVERGENCE_THRESHOLD):
                         self.converged_step = self.num_timesteps
                         self.converged_time = time.perf_counter() - self.start_time
+                        print(f"  *** CONVERGED at step={self.converged_step:,}"
+                              f"  t={self.converged_time:.1f}s"
+                              f"  mean_ret={np.mean(self.ep_returns[-WINDOW:]):.1f} ***")
+                        return False  # stops training
         return True
 
     def _on_rollout_end(self):
