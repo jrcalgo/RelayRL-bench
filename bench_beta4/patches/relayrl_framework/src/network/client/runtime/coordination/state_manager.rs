@@ -1065,7 +1065,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut last_printed_epoch: u64 = 0;
                 // Timing accumulators (nanoseconds) — training runs concurrently, not measured here
                 let mut ns_ort: u128 = 0;
-                let mut ns_val: u128 = 0;
                 let mut ns_traj: u128 = 0;
 
                 let obs_bytes_per_env = obs_dim * 4; // f32
@@ -1092,13 +1091,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                         StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string())
                     })?;
                     ns_ort += t_ort.elapsed().as_nanos();
-
-                    // ORT value-head inference for GAE advantage estimates
-                    let t_val = std::time::Instant::now();
-                    let vals: Vec<f32> = runtime
-                        .perform_local_value_inference(obs_bytes.clone(), n_envs, obs_dim)
-                        .await;
-                    ns_val += t_val.elapsed().as_nanos();
 
                     for i in 0..n_envs {
                         let t_traj_env = std::time::Instant::now();
@@ -1129,18 +1121,8 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             SupportedTensorBackend::NdArray,
                         );
 
-                        // Per-env value from ORT value head
-                        let val_bytes = vals[i].to_le_bytes().to_vec();
-                        let val_i = TensorData::new(
-                            vec![1],
-                            DType::NdArray(NdArrayDType::F32),
-                            val_bytes,
-                            SupportedTensorBackend::NdArray,
-                        );
-
                         let mut data_map: HashMap<String, RelayRLData> = HashMap::new();
                         data_map.insert("logp_a".to_string(), RelayRLData::Tensor(logp_i));
-                        data_map.insert("val".to_string(), RelayRLData::Tensor(val_i));
 
                         per_env_ep_return[i] += rewards[i];
                         per_env_step_count[i] += 1;
@@ -1173,7 +1155,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             // natural terminal state, so bootstrap GAE with V(s_T) rather than 0.
                             if let Some(max_steps) = max_episode_steps {
                                 if per_env_step_count[i] >= max_steps {
-                                    traj.set_bootstrap_value(vals[i]);
+                                    traj.set_truncated();
                                 }
                             }
                             per_env_step_count[i] = 0;
@@ -1210,7 +1192,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 // Print timing breakdown (training ran concurrently with collection)
                 let collection_fps =
                     step_count as f64 * n_envs as f64 / (collection_wall_ns as f64 / 1e9);
-                let total_ns = ns_flat_obs + ns_ort + ns_val + ns_traj;
+                let total_ns = ns_flat_obs + ns_ort + ns_traj;
                 let pct = |n: u128| if total_ns > 0 { n as f64 / total_ns as f64 * 100.0 } else { 0.0 };
                 let ms = |n: u128| n as f64 / 1_000_000.0;
                 #[cfg(feature = "tch-backend")]
@@ -1221,7 +1203,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 println!("\n── PPO step-loop time breakdown ({} steps, async learner, inference={}) ────────", step_count, infer_engine);
                 println!("  flat_observation_bytes (get obs)           : {:>8.0} ms  ({:.1}%)", ms(ns_flat_obs), pct(ns_flat_obs));
                 println!("  policy inference (logits+sample+step)      : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
-                println!("  value-head inference (GAE val)             : {:>8.0} ms  ({:.1}%)", ms(ns_val), pct(ns_val));
                 println!("  trajectory building (TensorData/per-env)  : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
                 println!("  PPO training (learner task, concurrent)    : not measured (overlapped with collection)");
                 println!("  collection wall time                       : {:>8.0} ms", collection_wall_ns as f64 / 1e6);

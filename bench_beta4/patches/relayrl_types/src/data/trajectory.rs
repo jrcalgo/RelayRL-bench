@@ -50,6 +50,11 @@ pub struct RelayRLTrajectory {
     /// 0.0 for true terminal episodes (crash/landing); V(s_T) for timeout truncations.
     #[serde(default)]
     pub bootstrap_value: f32,
+    /// True when the episode ended because the step cap was reached (truncation),
+    /// not because of a natural terminal state.  Used by the replay buffer to
+    /// determine the GAE bootstrap: 0 for terminals, V(s_T) for truncations.
+    #[serde(default)]
+    pub is_truncated: bool,
 }
 
 impl Default for RelayRLTrajectory {
@@ -65,6 +70,7 @@ impl Default for RelayRLTrajectory {
             episode: None,
             training_step: None,
             bootstrap_value: 0.0,
+            is_truncated: false,
         }
     }
 }
@@ -81,6 +87,7 @@ impl RelayRLTrajectory {
             episode: None,
             training_step: None,
             bootstrap_value: 0.0,
+            is_truncated: false,
         }
     }
 
@@ -95,6 +102,7 @@ impl RelayRLTrajectory {
             episode: None,
             training_step: None,
             bootstrap_value: 0.0,
+            is_truncated: false,
         }
     }
 
@@ -116,6 +124,7 @@ impl RelayRLTrajectory {
             episode,
             training_step,
             bootstrap_value: 0.0,
+            is_truncated: false,
         }
     }
 
@@ -217,6 +226,10 @@ impl RelayRLTrajectory {
 
     pub fn set_bootstrap_value(&mut self, val: f32) {
         self.bootstrap_value = val;
+    }
+
+    pub fn set_truncated(&mut self) {
+        self.is_truncated = true;
     }
 }
 

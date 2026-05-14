@@ -22,6 +22,8 @@ struct Buffers {
     returns: Vec<f32>,
     logprobs: BufferTensors,
     values: Vec<f32>,
+    // Episode boundaries for deferred GAE: (path_start, path_end, is_truncated)
+    episode_boundaries: Vec<(usize, usize, bool)>,
 }
 
 struct BufferMetadata {
@@ -54,6 +56,7 @@ impl PPOReplayBuffer {
             returns: Vec::with_capacity(buffer_size),
             logprobs: Vec::with_capacity(buffer_size),
             values: Vec::with_capacity(buffer_size),
+            episode_boundaries: Vec::new(),
         };
         Self {
             buffers: Arc::new(Mutex::new(buffers)),
@@ -72,32 +75,102 @@ impl PPOReplayBuffer {
         values.first().copied().unwrap_or(0.0)
     }
 
-    fn finish_path(&self, buffers: &mut Buffers, last_val: f32) {
-        let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
-        let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
+    /// Compute GAE for one episode [start, end) using values already in buffers.values.
+    /// bootstrap: 0.0 for terminal episodes, V(s_T) for truncated.
+    fn compute_gae_episode(
+        buffers: &mut Buffers,
+        gamma: f32,
+        lam: f32,
+        start: usize,
+        end: usize,
+        bootstrap: f32,
+    ) {
         if start >= end {
             return;
         }
-        let slice = start..end;
-
-        let mut rews = buffers.rewards[slice.clone()].to_vec();
-        let mut vals = buffers.values[slice.clone()].to_vec();
-        rews.push(last_val);
-        vals.push(last_val);
+        let mut rews = buffers.rewards[start..end].to_vec();
+        let mut vals = buffers.values[start..end].to_vec();
+        rews.push(bootstrap);
+        vals.push(bootstrap);
 
         let deltas: Vec<f32> = (0..rews.len() - 1)
-            .map(|i| rews[i] + self.metadata.gamma * vals[i + 1] - vals[i])
+            .map(|i| rews[i] + gamma * vals[i + 1] - vals[i])
             .collect();
-        let advantages = discounted_cumsum(&deltas, self.metadata.gamma * self.metadata.lam);
-        buffers.advantages[slice.clone()].copy_from_slice(&advantages);
+        let advantages = discounted_cumsum(&deltas, gamma * lam);
+        buffers.advantages[start..end].copy_from_slice(&advantages);
 
-        // Returns: G_t = discount_cumsum(rews, gamma)[:-1]
-        let full_returns = discounted_cumsum(&rews, self.metadata.gamma);
-        buffers.returns[slice.clone()].copy_from_slice(&full_returns[..full_returns.len() - 1]);
+        let full_returns = discounted_cumsum(&rews, gamma);
+        buffers.returns[start..end].copy_from_slice(&full_returns[..full_returns.len() - 1]);
+    }
 
-        self.metadata
-            .buffer_path_start_idx
-            .store(end, Ordering::Relaxed);
+    /// Return flat f32 observations for all buffered steps, used for deferred GAE value inference.
+    /// Called from train_model (sync context) before sample_buffer.
+    pub fn get_obs_flat_for_gae_blocking(&self) -> (Vec<f32>, usize) {
+        let buffers_arc = Arc::clone(&self.buffers);
+        let ptr = self.metadata.buffer_pointer.load(Ordering::Relaxed);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move {
+                        let buffers = buffers_arc.lock().await;
+                        let obs_dim = buffers
+                            .observations
+                            .iter()
+                            .find_map(|o| o.as_ref())
+                            .map(|td| td.shape[0])
+                            .unwrap_or(1);
+                        let flat: Vec<f32> = buffers.observations[..ptr]
+                            .iter()
+                            .filter_map(|opt| opt.as_ref())
+                            .flat_map(|td| {
+                                bytemuck::cast_slice::<u8, f32>(&td.data).iter().copied()
+                            })
+                            .collect();
+                        (flat, obs_dim)
+                    })
+            })
+            .join()
+            .unwrap_or_else(|_| (Vec::new(), 1))
+        })
+    }
+
+    /// Fill values buffer and compute GAE for all recorded episode boundaries.
+    /// Must be called after get_obs_flat_for_gae_blocking + value inference, before sample_buffer.
+    pub fn finalize_gae_blocking(&self, values: Vec<f32>) {
+        let buffers_arc = Arc::clone(&self.buffers);
+        let gamma = self.metadata.gamma;
+        let lam = self.metadata.lam;
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move {
+                        let mut buffers = buffers_arc.lock().await;
+
+                        // Pre-fill values with batch-inferred results
+                        let fill_len = values.len().min(buffers.values.len());
+                        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+
+                        // Compute GAE for each completed episode
+                        let boundaries: Vec<_> = buffers.episode_boundaries.clone();
+                        for (start, end, is_truncated) in boundaries {
+                            let bootstrap = if is_truncated {
+                                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                            Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
+                        }
+                    })
+            })
+            .join()
+            .ok();
+        });
     }
 }
 
@@ -123,28 +196,27 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             buffers.rewards.push(reward);
             buffers.advantages.push(0.0);
             buffers.returns.push(0.0);
+            // Placeholder value — overwritten by finalize_gae_blocking at epoch end
+            buffers.values.push(0.0);
 
-            // Extract logp_a and val from auxiliary data
-            let mut val = 0.0f32;
+            // Extract logp_a from auxiliary data (val removed — deferred to training time)
             if let Some(map) = action.get_data() {
                 if let Some(RelayRLData::Tensor(logp)) = map.get("logp_a") {
                     if let Some(slot) = buffers.logprobs.last_mut() {
                         *slot = Some(logp.clone());
                     }
                 }
-                if let Some(RelayRLData::Tensor(v)) = map.get("val") {
-                    val = Self::tensor_scalar_f32(v);
-                }
             }
-            buffers.values.push(val);
 
             let next = self.metadata.buffer_pointer.load(Ordering::Relaxed) + 1;
             self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
 
             if action.get_done() {
-                // Use trajectory.bootstrap_value: 0.0 for terminal episodes (crash/landing),
-                // V(s_T) for timeout truncations (set by state_manager when step cap is hit).
-                self.finish_path(&mut buffers, trajectory.bootstrap_value);
+                let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
+                let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
+                // Record episode boundary for deferred GAE; is_truncated from trajectory flag
+                buffers.episode_boundaries.push((start, end, trajectory.is_truncated));
+                self.metadata.buffer_path_start_idx.store(end, Ordering::Relaxed);
             }
         }
 
@@ -199,6 +271,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         buffers.returns.clear();
         buffers.logprobs.clear();
         buffers.values.clear();
+        buffers.episode_boundaries.clear();
 
         let mut batch: HashMap<BatchKey, BufferSample> = HashMap::new();
         batch.insert(BatchKey::Obs, BufferSample::Tensors(obs.into_boxed_slice()));

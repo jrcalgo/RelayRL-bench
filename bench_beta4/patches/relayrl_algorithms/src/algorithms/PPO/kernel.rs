@@ -98,6 +98,9 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         ret: &[f32],
     ) -> f32;
 
+    /// Batched value inference on flat obs; used for deferred GAE at epoch end.
+    fn value_forward_only_flat(&self, obs_flat: &[f32], obs_dim: usize) -> Vec<f32>;
+
     /// Compute log-probabilities for (obs, act) using the current Burn model — no gradient.
     /// Recomputing logp_old at training time eliminates stale ORT logprob issues from
     /// async training/rollout overlap (matches the RL4Sys on-policy approach).
@@ -886,6 +889,21 @@ where
         let mask_t = burn_tensor::Tensor::<B, 2, OutK>::ones([n, self.output_dim], &device);
         let v = self.baseline.forward(obs_t, mask_t);
         v.into_data().to_vec::<f32>().unwrap_or_default()
+    }
+
+    fn value_forward_only_flat(&self, obs_flat: &[f32], obs_dim: usize) -> Vec<f32> {
+        let n = if obs_dim > 0 { obs_flat.len() / obs_dim } else { 0 };
+        if n == 0 {
+            return Vec::new();
+        }
+        let device = <B as burn_tensor::backend::Backend>::Device::default();
+        let obs_t = burn_tensor::Tensor::<B, 2, InK>::from_data(
+            burn_tensor::TensorData::new(obs_flat.to_vec(), [n, obs_dim]),
+            &device,
+        );
+        let mask_t = burn_tensor::Tensor::<B, 2, OutK>::ones([n, self.output_dim], &device);
+        let v = self.baseline.forward(obs_t, mask_t);
+        v.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n])
     }
 }
 

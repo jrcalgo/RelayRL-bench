@@ -515,6 +515,13 @@ where
         use rand::seq::SliceRandom;
 
         for slot in &mut self.runtime.components.agent_slots {
+            // Deferred GAE: batch value inference over all epoch obs, then compute advantages
+            let (obs_flat_gae, obs_dim_gae) = slot.replay_buffer.get_obs_flat_for_gae_blocking();
+            if !obs_flat_gae.is_empty() {
+                let values = slot.kernel.value_forward_only_flat(&obs_flat_gae, obs_dim_gae);
+                slot.replay_buffer.finalize_gae_blocking(values);
+            }
+
             let batch = match sample_buffer_blocking(&slot.replay_buffer) {
                 Ok(batch) => batch,
                 Err(_) => continue,
