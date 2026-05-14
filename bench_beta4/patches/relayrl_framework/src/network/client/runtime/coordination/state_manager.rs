@@ -1096,7 +1096,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     // ORT value-head inference for GAE advantage estimates
                     let t_val = std::time::Instant::now();
                     let vals: Vec<f32> = runtime
-                        .perform_local_value_inference(&obs_bytes, n_envs, obs_dim)
+                        .perform_local_value_inference(obs_bytes.clone(), n_envs, obs_dim)
                         .await;
                     ns_val += t_val.elapsed().as_nanos();
 

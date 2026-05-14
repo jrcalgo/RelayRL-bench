@@ -35,6 +35,7 @@ use relayrl_types::model::utils::{deserialize_model_module, validate_module};
 use relayrl_types::model::{HotReloadableModel, ModelError, ModelModule};
 use relayrl_types::prelude::tensor::relayrl::AnyBurnTensor;
 
+use rand::RngExt;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -683,9 +684,9 @@ impl<
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
 
+        let mut rng = rand::rng();
         let mut action_bytes = Vec::with_capacity(n_envs * 8);
         let mut logp_bytes   = Vec::with_capacity(n_envs * 4);
-        let mut rng = rand::rng();
 
         for i in 0..n_envs {
             let start = i * act_dim;
@@ -697,18 +698,15 @@ impl<
             let sum_exp: f64 = exps.iter().sum();
             let probs: Vec<f64> = exps.iter().map(|&x| x / sum_exp).collect();
 
-            // categorical sample
-            let act_idx: i64 = match rand::distr::weighted::WeightedIndex::new(&probs) {
-                Ok(dist) => {
-                    use rand::distr::Distribution;
-                    dist.sample(&mut rng) as i64
-                }
-                Err(_) => 0,
-            };
+            // allocation-free categorical sample via linear CDF scan
+            let u: f64 = rng.random::<f64>();
+            let mut cumsum = 0.0f64;
+            let act_idx: i64 = probs.iter().enumerate()
+                .find(|(_, p)| { cumsum += *p; cumsum >= u })
+                .map(|(i, _)| i as i64)
+                .unwrap_or((act_dim - 1) as i64);
 
-            // logp of sampled action
             let logp = (probs[act_idx as usize] as f32).ln();
-
             action_bytes.extend_from_slice(&act_idx.to_le_bytes());
             logp_bytes.extend_from_slice(&logp.to_le_bytes());
         }
@@ -801,7 +799,7 @@ impl<
     /// Falls back to zeros if the value model is not yet loaded.
     pub(crate) async fn perform_local_value_inference(
         &self,
-        obs_bytes: &[u8],
+        obs_bytes: Vec<u8>,
         n_envs: usize,
         obs_dim: usize,
     ) -> Vec<f32> {
@@ -815,7 +813,7 @@ impl<
         let input = TensorData::new(
             vec![n_envs, obs_dim],
             DType::NdArray(NdArrayDType::F32),
-            obs_bytes.to_vec(),
+            obs_bytes,
             SupportedTensorBackend::NdArray,
         );
         let output = module
