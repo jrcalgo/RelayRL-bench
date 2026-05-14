@@ -1064,63 +1064,95 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut return_window: Vec<f32> = Vec::with_capacity(100);
                 let mut last_printed_epoch: u64 = 0;
                 // Timing accumulators (nanoseconds) — training runs concurrently, not measured here
-                let mut ns_ort: u128 = 0;
+                let mut ns_inf_wait: u128 = 0;   // time blocked waiting for inference result
+                let mut ns_step: u128 = 0;        // vectorized env step (rayon)
                 let mut ns_traj: u128 = 0;
 
                 let obs_bytes_per_env = obs_dim * 4; // f32
                 let act_bytes_per_env = 8usize;      // i64
 
+                // ── Inference pipeline: dedicated tokio task ──────────────────────────
+                // obs channel: collection → inference worker (capacity 2)
+                // act channel: inference worker → collection
+                let (inf_obs_tx, mut inf_obs_rx) =
+                    tokio::sync::mpsc::channel::<Vec<u8>>(2);
+                let (inf_act_tx, mut inf_act_rx) =
+                    tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>)>(2);
+                let inf_runtime = Arc::clone(&runtime);
+                tokio::spawn(async move {
+                    while let Some(obs) = inf_obs_rx.recv().await {
+                        match inf_runtime
+                            .perform_local_ppo_inference(&obs, n_envs, obs_dim, act_dim)
+                            .await
+                        {
+                            Ok(r) => { if inf_act_tx.send(r).await.is_err() { break; } }
+                            Err(_) => break,
+                        }
+                    }
+                });
+
+                // Bootstrap: get initial obs, block on first inference (no stale action yet)
+                let init_obs = env_interface.flat_observation_bytes().ok_or_else(|| {
+                    StateManagerError::StepEnvError(
+                        "[StateManager] flat_observation_bytes returned None (bootstrap)".to_string()
+                    )
+                })?;
+                inf_obs_tx.send(init_obs.clone()).await
+                    .map_err(|_| StateManagerError::InferenceRequestError(
+                        "inference worker died at bootstrap".to_string()
+                    ))?;
+                let (mut cur_action_bytes_i64, mut cur_logp_bytes) =
+                    inf_act_rx.recv().await
+                        .ok_or_else(|| StateManagerError::InferenceRequestError(
+                            "inference worker closed at bootstrap".to_string()
+                        ))?;
+                let mut cur_obs_bytes: Vec<u8> = init_obs;
+                // ─────────────────────────────────────────────────────────────────────
+
                 let t_collection_start = std::time::Instant::now();
-                let mut ns_flat_obs: u128 = 0;
                 for _ in 0..step_count {
-                    let t_flat = std::time::Instant::now();
-                    let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
-                        StateManagerError::StepEnvError("[StateManager] flat_observation_bytes returned None".to_string())
-                    })?;
-                    ns_flat_obs += t_flat.elapsed().as_nanos();
-
-                    // ORT inference: policy logits → categorical sample → (action i64 bytes, logp f32 bytes)
-                    let t_ort = std::time::Instant::now();
-                    let (action_bytes_i64, logp_bytes) = runtime
-                        .perform_local_ppo_inference(&obs_bytes, n_envs, obs_dim, act_dim)
-                        .await
-                        .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-                    let act_i64: &[i64] = bytemuck::cast_slice(&action_bytes_i64);
+                    // Step envs with LAST inference result (stale by 1 step after bootstrap)
+                    let t_step = std::time::Instant::now();
+                    let act_i64: &[i64] = bytemuck::cast_slice(&cur_action_bytes_i64);
                     let action_bytes_for_env: Vec<u8> = act_i64.iter().map(|&a| a as u8).collect();
-                    let (_, rewards, dones) = env_interface.step_bytes(&action_bytes_for_env).ok_or_else(|| {
-                        StateManagerError::GetEnvInfoError("[StateManager] step_bytes returned None".to_string())
-                    })?;
-                    ns_ort += t_ort.elapsed().as_nanos();
+                    let (new_obs_bytes, rewards, dones) = env_interface
+                        .step_bytes(&action_bytes_for_env)
+                        .ok_or_else(|| StateManagerError::GetEnvInfoError(
+                            "[StateManager] step_bytes returned None".to_string()
+                        ))?;
+                    ns_step += t_step.elapsed().as_nanos();
 
+                    // Fire new obs to inference IMMEDIATELY — don't wait (capacity=2 absorbs jitter)
+                    inf_obs_tx.send(new_obs_bytes.clone()).await
+                        .map_err(|_| StateManagerError::InferenceRequestError(
+                            "inference worker died during collection".to_string()
+                        ))?;
+
+                    // Process trajectory data for (cur_obs, cur_action, cur_logp, rewards, dones)
+                    // while inference runs on new_obs concurrently in the inference task
                     for i in 0..n_envs {
                         let t_traj_env = std::time::Instant::now();
-                        // Per-env observation TensorData: [obs_dim] f32
                         let obs_start = i * obs_bytes_per_env;
                         let obs_i = TensorData::new(
                             vec![obs_dim],
                             DType::NdArray(NdArrayDType::F32),
-                            obs_bytes[obs_start..obs_start + obs_bytes_per_env].to_vec(),
+                            cur_obs_bytes[obs_start..obs_start + obs_bytes_per_env].to_vec(),
                             SupportedTensorBackend::NdArray,
                         );
-
-                        // Per-env action TensorData: [1] i64
                         let act_start = i * act_bytes_per_env;
                         let act_i = TensorData::new(
                             vec![1],
                             DType::NdArray(NdArrayDType::I64),
-                            action_bytes_i64[act_start..act_start + act_bytes_per_env].to_vec(),
+                            cur_action_bytes_i64[act_start..act_start + act_bytes_per_env].to_vec(),
                             SupportedTensorBackend::NdArray,
                         );
-
-                        // Per-env logp_a from ORT categorical sample (f32, 4 bytes)
                         let logp_start = i * 4;
                         let logp_i = TensorData::new(
                             vec![1],
                             DType::NdArray(NdArrayDType::F32),
-                            logp_bytes[logp_start..logp_start + 4].to_vec(),
+                            cur_logp_bytes[logp_start..logp_start + 4].to_vec(),
                             SupportedTensorBackend::NdArray,
                         );
-
                         let mut data_map: HashMap<String, RelayRLData> = HashMap::new();
                         data_map.insert("logp_a".to_string(), RelayRLData::Tensor(logp_i));
 
@@ -1151,8 +1183,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             traj.set_episode(per_env_episode[i]);
                             per_env_episode[i] += 1;
 
-                            // Timeout truncation: if the episode hit the step cap it is NOT a
-                            // natural terminal state, so bootstrap GAE with V(s_T) rather than 0.
                             if let Some(max_steps) = max_episode_steps {
                                 if per_env_step_count[i] >= max_steps {
                                     traj.set_truncated();
@@ -1161,9 +1191,9 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             per_env_step_count[i] = 0;
 
                             ns_traj += t_traj_env.elapsed().as_nanos();
-                            // Bounded send: blocks collection when learner is >2 batches behind
+                            // Bounded send: may block when learner is behind —
+                            // now overlaps with inference running in background
                             let _ = traj_tx.send(traj).await;
-                            // Check if the learner completed an epoch and print convergence stats
                             let current_epoch =
                                 epoch_count_shared.load(std::sync::atomic::Ordering::Acquire);
                             if current_epoch > last_printed_epoch {
@@ -1177,9 +1207,26 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             ns_traj += t_traj_env.elapsed().as_nanos();
                         }
                     }
+
+                    // Receive next inference result — only blocks if ORT isn't done yet (gap time)
+                    let t_wait = std::time::Instant::now();
+                    let (next_action, next_logp) = inf_act_rx.recv().await
+                        .ok_or_else(|| StateManagerError::InferenceRequestError(
+                            "inference worker closed during collection".to_string()
+                        ))?;
+                    ns_inf_wait += t_wait.elapsed().as_nanos();
+
+                    // Advance stale state: cur_obs was used for inference, cur_action for step
+                    cur_obs_bytes = new_obs_bytes;
+                    cur_action_bytes_i64 = next_action;
+                    cur_logp_bytes = next_logp;
                 }
                 // Snapshot collection time BEFORE waiting for the learner to drain
                 let collection_wall_ns = t_collection_start.elapsed().as_nanos();
+
+                // Close inference obs channel — worker sees None and exits cleanly
+                // (sends and recvs are balanced: step_count+1 each, loop leaves none pending)
+                drop(inf_obs_tx);
 
                 // Signal learner to drain remaining trajectories and shut down cleanly
                 drop(traj_tx);
@@ -1192,7 +1239,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 // Print timing breakdown (training ran concurrently with collection)
                 let collection_fps =
                     step_count as f64 * n_envs as f64 / (collection_wall_ns as f64 / 1e9);
-                let total_ns = ns_flat_obs + ns_ort + ns_traj;
+                let total_ns = ns_step + ns_traj + ns_inf_wait;
                 let pct = |n: u128| if total_ns > 0 { n as f64 / total_ns as f64 * 100.0 } else { 0.0 };
                 let ms = |n: u128| n as f64 / 1_000_000.0;
                 #[cfg(feature = "tch-backend")]
@@ -1200,10 +1247,10 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 #[cfg(not(feature = "tch-backend"))]
                 let infer_engine = "ORT (ONNX)";
 
-                println!("\n── PPO step-loop time breakdown ({} steps, async learner, inference={}) ────────", step_count, infer_engine);
-                println!("  flat_observation_bytes (get obs)           : {:>8.0} ms  ({:.1}%)", ms(ns_flat_obs), pct(ns_flat_obs));
-                println!("  policy inference (logits+sample+step)      : {:>8.0} ms  ({:.1}%)", ms(ns_ort), pct(ns_ort));
+                println!("\n── PPO step-loop time breakdown ({} steps, pipelined inference={}) ────────", step_count, infer_engine);
+                println!("  env step (rayon vectorized)                : {:>8.0} ms  ({:.1}%)", ms(ns_step), pct(ns_step));
                 println!("  trajectory building (TensorData/per-env)  : {:>8.0} ms  ({:.1}%)", ms(ns_traj), pct(ns_traj));
+                println!("  inference pipeline wait (gap only)         : {:>8.0} ms  ({:.1}%)", ms(ns_inf_wait), pct(ns_inf_wait));
                 println!("  PPO training (learner task, concurrent)    : not measured (overlapped with collection)");
                 println!("  collection wall time                       : {:>8.0} ms", collection_wall_ns as f64 / 1e6);
                 println!("  collection env-frames/sec                  : {:>8.0}", collection_fps);
