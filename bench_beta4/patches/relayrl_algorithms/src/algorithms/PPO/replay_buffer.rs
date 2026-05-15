@@ -1,26 +1,20 @@
 use crate::algorithms::{compute_normed_advantages, discounted_cumsum, scalar_stats};
-use crate::templates::base_replay_buffer::{
-    Batch, BatchKey, BufferSample, BufferTensors, GenericReplayBuffer, ReplayBufferError,
-    SampleScalars,
-};
+use crate::templates::base_replay_buffer::{Batch, GenericReplayBuffer, ReplayBufferError};
 use async_trait::async_trait;
 use relayrl_types::prelude::action::RelayRLData;
-use relayrl_types::prelude::tensor::relayrl::TensorData;
 use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::Mutex;
 
 struct Buffers {
-    observations: BufferTensors,
-    actions: BufferTensors,
-    masks: BufferTensors,
+    obs_flat: Vec<f32>,
+    obs_dim: usize,
+    act_flat: Vec<i64>,
+    logp_flat: Vec<f32>,
     rewards: Vec<f32>,
     advantages: Vec<f32>,
     returns: Vec<f32>,
-    logprobs: BufferTensors,
     values: Vec<f32>,
     // Episode boundaries for deferred GAE: (path_start, path_end, is_truncated)
     episode_boundaries: Vec<(usize, usize, bool)>,
@@ -32,6 +26,16 @@ struct BufferMetadata {
     buffer_size: usize,
     buffer_pointer: AtomicUsize,
     buffer_path_start_idx: AtomicUsize,
+}
+
+pub struct PPOFlatBatch {
+    pub obs_flat: Vec<f32>,
+    pub obs_dim: usize,
+    pub act_flat: Vec<i64>,
+    pub logp_flat: Vec<f32>,
+    pub adv_norm: Vec<f32>,
+    pub ret_flat: Vec<f32>,
+    pub val_flat: Vec<f32>,
 }
 
 pub struct PPOReplayBuffer {
@@ -48,13 +52,13 @@ impl Default for PPOReplayBuffer {
 impl PPOReplayBuffer {
     pub fn new(buffer_size: usize, gamma: f32, lam: f32) -> Self {
         let buffers = Buffers {
-            observations: Vec::with_capacity(buffer_size),
-            actions: Vec::with_capacity(buffer_size),
-            masks: Vec::with_capacity(buffer_size),
+            obs_flat: Vec::with_capacity(buffer_size * 8),
+            obs_dim: 0,
+            act_flat: Vec::with_capacity(buffer_size),
+            logp_flat: Vec::with_capacity(buffer_size),
             rewards: Vec::with_capacity(buffer_size),
             advantages: Vec::with_capacity(buffer_size),
             returns: Vec::with_capacity(buffer_size),
-            logprobs: Vec::with_capacity(buffer_size),
             values: Vec::with_capacity(buffer_size),
             episode_boundaries: Vec::new(),
         };
@@ -68,11 +72,6 @@ impl PPOReplayBuffer {
                 buffer_path_start_idx: AtomicUsize::new(0),
             }),
         }
-    }
-
-    fn tensor_scalar_f32(data: &TensorData) -> f32 {
-        let values: &[f32] = bytemuck::cast_slice(&data.data);
-        values.first().copied().unwrap_or(0.0)
     }
 
     /// Compute GAE for one episode [start, end) using values already in buffers.values.
@@ -104,73 +103,98 @@ impl PPOReplayBuffer {
     }
 
     /// Return flat f32 observations for all buffered steps, used for deferred GAE value inference.
-    /// Called from train_model (sync context) before sample_buffer.
     pub fn get_obs_flat_for_gae_blocking(&self) -> (Vec<f32>, usize) {
-        let buffers_arc = Arc::clone(&self.buffers);
+        let buffers = self.buffers.lock().unwrap();
         let ptr = self.metadata.buffer_pointer.load(Ordering::Relaxed);
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async move {
-                        let buffers = buffers_arc.lock().await;
-                        let obs_dim = buffers
-                            .observations
-                            .iter()
-                            .find_map(|o| o.as_ref())
-                            .map(|td| td.shape[0])
-                            .unwrap_or(1);
-                        let flat: Vec<f32> = buffers.observations[..ptr]
-                            .iter()
-                            .filter_map(|opt| opt.as_ref())
-                            .flat_map(|td| {
-                                bytemuck::cast_slice::<u8, f32>(&td.data).iter().copied()
-                            })
-                            .collect();
-                        (flat, obs_dim)
-                    })
-            })
-            .join()
-            .unwrap_or_else(|_| (Vec::new(), 1))
-        })
+        let obs_dim = buffers.obs_dim;
+        if obs_dim == 0 || ptr == 0 {
+            return (Vec::new(), 1);
+        }
+        (buffers.obs_flat[..ptr * obs_dim].to_vec(), obs_dim)
     }
 
     /// Fill values buffer and compute GAE for all recorded episode boundaries.
-    /// Must be called after get_obs_flat_for_gae_blocking + value inference, before sample_buffer.
     pub fn finalize_gae_blocking(&self, values: Vec<f32>) {
-        let buffers_arc = Arc::clone(&self.buffers);
+        let mut buffers = self.buffers.lock().unwrap();
         let gamma = self.metadata.gamma;
         let lam = self.metadata.lam;
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async move {
-                        let mut buffers = buffers_arc.lock().await;
 
-                        // Pre-fill values with batch-inferred results
-                        let fill_len = values.len().min(buffers.values.len());
-                        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+        let fill_len = values.len().min(buffers.values.len());
+        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
 
-                        // Compute GAE for each completed episode
-                        let boundaries: Vec<_> = buffers.episode_boundaries.clone();
-                        for (start, end, is_truncated) in boundaries {
-                            let bootstrap = if is_truncated {
-                                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
-                            } else {
-                                0.0
-                            };
-                            Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
-                        }
-                    })
-            })
-            .join()
-            .ok();
-        });
+        let boundaries: Vec<_> = buffers.episode_boundaries.clone();
+        for (start, end, is_truncated) in boundaries {
+            let bootstrap = if is_truncated {
+                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
+        }
+    }
+
+    /// Single-lock combine: fill values + GAE + normalize adv + drain buffer.
+    /// Replaces separate finalize_gae_blocking + sample_buffer_blocking calls.
+    pub fn finalize_and_drain_blocking(&self, values: Vec<f32>) -> Option<PPOFlatBatch> {
+        let mut buffers = self.buffers.lock().unwrap();
+        let gamma = self.metadata.gamma;
+        let lam = self.metadata.lam;
+        let capacity = self.metadata.buffer_pointer.load(Ordering::Relaxed);
+        if capacity == 0 {
+            return None;
+        }
+        let obs_dim = buffers.obs_dim;
+
+        // Fill values
+        let fill_len = values.len().min(buffers.values.len());
+        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+
+        // Compute GAE for each completed episode
+        let boundaries: Vec<_> = buffers.episode_boundaries.clone();
+        for (start, end, is_truncated) in boundaries {
+            let bootstrap = if is_truncated {
+                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
+        }
+
+        // Normalize advantages across the full epoch batch
+        let adv_raw = &buffers.advantages[..capacity];
+        let (adv_mean, adv_std) = scalar_stats(adv_raw);
+        let adv_norm = compute_normed_advantages(adv_raw, adv_mean, adv_std.max(1e-8));
+
+        // Extract flat arrays (clone out before clearing)
+        let obs_end = (capacity * obs_dim).min(buffers.obs_flat.len());
+        let obs_flat = buffers.obs_flat[..obs_end].to_vec();
+        let act_flat = buffers.act_flat[..capacity.min(buffers.act_flat.len())].to_vec();
+        let logp_flat = buffers.logp_flat[..capacity.min(buffers.logp_flat.len())].to_vec();
+        let ret_flat = buffers.returns[..capacity].to_vec();
+        let val_flat = buffers.values[..capacity].to_vec();
+
+        // Clear for next epoch
+        self.metadata.buffer_pointer.store(0, Ordering::Relaxed);
+        self.metadata.buffer_path_start_idx.store(0, Ordering::Relaxed);
+        buffers.obs_flat.clear();
+        buffers.obs_dim = 0;
+        buffers.act_flat.clear();
+        buffers.logp_flat.clear();
+        buffers.rewards.clear();
+        buffers.advantages.clear();
+        buffers.returns.clear();
+        buffers.values.clear();
+        buffers.episode_boundaries.clear();
+
+        Some(PPOFlatBatch {
+            obs_flat,
+            obs_dim,
+            act_flat,
+            logp_flat,
+            adv_norm,
+            ret_flat,
+            val_flat,
+        })
     }
 }
 
@@ -180,7 +204,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         &self,
         trajectory: RelayRLTrajectory,
     ) -> Result<Box<dyn Any>, ReplayBufferError> {
-        let mut buffers = self.buffers.lock().await;
+        let mut buffers = self.buffers.lock().unwrap();
         let mut episode_return = 0.0f32;
         let mut episode_length = 0i32;
 
@@ -189,24 +213,54 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             let reward = action.get_rew();
             episode_return += reward;
 
-            buffers.observations.push(action.get_obs().cloned());
-            buffers.actions.push(action.get_act().cloned());
-            buffers.masks.push(action.get_mask().cloned());
-            buffers.logprobs.push(None);
+            // Obs: bytemuck cast bytes → f32, extend flat buffer
+            if let Some(obs_td) = action.get_obs() {
+                let floats: &[f32] = bytemuck::cast_slice(&obs_td.data);
+                buffers.obs_flat.extend_from_slice(floats);
+                if buffers.obs_dim == 0 {
+                    buffers.obs_dim = floats.len();
+                }
+            }
+
+            // Act: extract as i64 (stored as i64 bytes or f32 bytes depending on backend)
+            let act_i64 = if let Some(act_td) = action.get_act() {
+                if act_td.data.len() >= 8 {
+                    bytemuck::cast_slice::<u8, i64>(&act_td.data[..8])
+                        .first()
+                        .copied()
+                        .unwrap_or(0)
+                } else if act_td.data.len() >= 4 {
+                    bytemuck::cast_slice::<u8, f32>(&act_td.data[..4])
+                        .first()
+                        .copied()
+                        .unwrap_or(0.0) as i64
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            buffers.act_flat.push(act_i64);
+
+            // LogP: extract f32 scalar from auxiliary data map
+            let logp = if let Some(map) = action.get_data() {
+                if let Some(RelayRLData::Tensor(logp_td)) = map.get("logp_a") {
+                    bytemuck::cast_slice::<u8, f32>(&logp_td.data)
+                        .first()
+                        .copied()
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            buffers.logp_flat.push(logp);
+
             buffers.rewards.push(reward);
             buffers.advantages.push(0.0);
             buffers.returns.push(0.0);
-            // Placeholder value — overwritten by finalize_gae_blocking at epoch end
             buffers.values.push(0.0);
-
-            // Extract logp_a from auxiliary data (val removed — deferred to training time)
-            if let Some(map) = action.get_data() {
-                if let Some(RelayRLData::Tensor(logp)) = map.get("logp_a") {
-                    if let Some(slot) = buffers.logprobs.last_mut() {
-                        *slot = Some(logp.clone());
-                    }
-                }
-            }
 
             let next = self.metadata.buffer_pointer.load(Ordering::Relaxed) + 1;
             self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
@@ -214,7 +268,6 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             if action.get_done() {
                 let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
                 let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
-                // Record episode boundary for deferred GAE; is_truncated from trajectory flag
                 buffers.episode_boundaries.push((start, end, trajectory.is_truncated));
                 self.metadata.buffer_path_start_idx.store(end, Ordering::Relaxed);
             }
@@ -223,80 +276,10 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         Ok(Box::new((episode_return, episode_length)))
     }
 
-    /// Returns normalized advantages and the full batch for training.
-    /// After sampling, buffer is cleared (epoch-level buffer, not replay).
+    /// Not used in the optimized training path — callers use finalize_and_drain_blocking.
     async fn sample_buffer(&self) -> Result<Batch, ReplayBufferError> {
-        let mut buffers = self.buffers.lock().await;
-        let capacity = self.metadata.buffer_pointer.load(Ordering::Relaxed);
-        if capacity == 0 {
-            return Err(ReplayBufferError::BufferSamplingError(
-                "PPO replay buffer is empty".to_string(),
-            ));
-        }
-
-        // Normalize advantages across the full epoch batch
-        let adv_raw = &buffers.advantages[..capacity];
-        let (adv_mean, adv_std) = scalar_stats(adv_raw);
-        let adv_norm = compute_normed_advantages(adv_raw, adv_mean, adv_std.max(1e-8));
-
-        let obs: Vec<TensorData> = buffers.observations[..capacity]
-            .iter()
-            .filter_map(|x| x.clone())
-            .collect();
-        let act: Vec<TensorData> = buffers.actions[..capacity]
-            .iter()
-            .filter_map(|x| x.clone())
-            .collect();
-        let mask: Vec<TensorData> = buffers.masks[..capacity]
-            .iter()
-            .filter_map(|x| x.clone())
-            .collect();
-        let logp: Vec<TensorData> = buffers.logprobs[..capacity]
-            .iter()
-            .filter_map(|x| x.clone())
-            .collect();
-        let ret: Vec<f32> = buffers.returns[..capacity].to_vec();
-        let vals: Vec<f32> = buffers.values[..capacity].to_vec();
-
-        // Reset buffer for next epoch
-        self.metadata.buffer_pointer.store(0, Ordering::Relaxed);
-        self.metadata
-            .buffer_path_start_idx
-            .store(0, Ordering::Relaxed);
-        buffers.observations.clear();
-        buffers.actions.clear();
-        buffers.masks.clear();
-        buffers.rewards.clear();
-        buffers.advantages.clear();
-        buffers.returns.clear();
-        buffers.logprobs.clear();
-        buffers.values.clear();
-        buffers.episode_boundaries.clear();
-
-        let mut batch: HashMap<BatchKey, BufferSample> = HashMap::new();
-        batch.insert(BatchKey::Obs, BufferSample::Tensors(obs.into_boxed_slice()));
-        batch.insert(BatchKey::Act, BufferSample::Tensors(act.into_boxed_slice()));
-        batch.insert(
-            BatchKey::Mask,
-            BufferSample::Tensors(mask.into_boxed_slice()),
-        );
-        batch.insert(
-            BatchKey::Custom("Adv".to_string()),
-            BufferSample::Scalars(SampleScalars::F32(adv_norm.into_boxed_slice())),
-        );
-        batch.insert(
-            BatchKey::Custom("Ret".to_string()),
-            BufferSample::Scalars(SampleScalars::F32(ret.into_boxed_slice())),
-        );
-        batch.insert(
-            BatchKey::Custom("LogP".to_string()),
-            BufferSample::Tensors(logp.into_boxed_slice()),
-        );
-        batch.insert(
-            BatchKey::Custom("VVals".to_string()),
-            BufferSample::Scalars(SampleScalars::F32(vals.into_boxed_slice())),
-        );
-
-        Ok(batch)
+        Err(ReplayBufferError::BufferSamplingError(
+            "PPOReplayBuffer: use finalize_and_drain_blocking instead of sample_buffer".to_string(),
+        ))
     }
 }

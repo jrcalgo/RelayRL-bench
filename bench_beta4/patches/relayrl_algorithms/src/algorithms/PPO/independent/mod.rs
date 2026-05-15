@@ -8,13 +8,11 @@ use crate::logging::{EpochLogger, SessionLogger};
 use crate::templates::base_algorithm::{
     AlgorithmError, AlgorithmTrait, StepKernelTrait, TrajectoryData,
 };
-use crate::templates::base_replay_buffer::{
-    Batch, BatchKey, BufferSample, GenericReplayBuffer, ReplayBufferError, SampleScalars,
-};
+use crate::templates::base_replay_buffer::GenericReplayBuffer;
 
 use burn_tensor::TensorKind;
 use burn_tensor::backend::Backend;
-use relayrl_types::prelude::tensor::relayrl::{BackendMatcher, TensorData};
+use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use relayrl_types::prelude::trajectory::RelayRLTrajectory;
 
 use std::any::Any;
@@ -38,27 +36,6 @@ fn resolve_agent_key(trajectory: &RelayRLTrajectory) -> AgentKey {
         .unwrap_or_else(|| DEFAULT_AGENT_KEY.to_string())
 }
 
-fn sample_buffer_blocking<RB: GenericReplayBuffer>(
-    buffer: &RB,
-) -> Result<Batch, ReplayBufferError> {
-    // Spawn a scoped OS thread with a fresh single-thread Tokio runtime so this
-    // function is safe to call from an async context.  A plain `Handle::block_on`
-    // panics with "cannot start a runtime from within a runtime" when the caller is
-    // already inside a Tokio executor.
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| ReplayBufferError::BufferSamplingError(e.to_string()))?
-                .block_on(buffer.sample_buffer())
-        })
-        .join()
-        .map_err(|_| {
-            ReplayBufferError::BufferSamplingError("sampler thread panicked".to_string())
-        })?
-    })
-}
 
 #[derive(Default)]
 struct AgentRegistry {
@@ -517,67 +494,26 @@ where
         for slot in &mut self.runtime.components.agent_slots {
             // Deferred GAE: batch value inference over all epoch obs, then compute advantages
             let (obs_flat_gae, obs_dim_gae) = slot.replay_buffer.get_obs_flat_for_gae_blocking();
-            if !obs_flat_gae.is_empty() {
-                let values = slot.kernel.value_forward_only_flat(&obs_flat_gae, obs_dim_gae);
-                slot.replay_buffer.finalize_gae_blocking(values);
+            if obs_flat_gae.is_empty() {
+                continue;
             }
+            let values = slot.kernel.value_forward_only_flat(&obs_flat_gae, obs_dim_gae);
 
-            let batch = match sample_buffer_blocking(&slot.replay_buffer) {
-                Ok(batch) => batch,
-                Err(_) => continue,
-            };
-
-            let obs_td: &[TensorData] = match batch.get(&BatchKey::Obs) {
-                Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
-                _ => continue,
-            };
-            let act_td: &[TensorData] = match batch.get(&BatchKey::Act) {
-                Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
-                _ => continue,
-            };
-            let adv: &[f32] = match batch.get(&BatchKey::Custom("Adv".to_string())) {
-                Some(BufferSample::Scalars(SampleScalars::F32(values))) => values.as_ref(),
-                _ => continue,
-            };
-            let ret: &[f32] = match batch.get(&BatchKey::Custom("Ret".to_string())) {
-                Some(BufferSample::Scalars(SampleScalars::F32(values))) => values.as_ref(),
-                _ => continue,
-            };
-            let logp_td: &[TensorData] = match batch.get(&BatchKey::Custom("LogP".to_string())) {
-                Some(BufferSample::Tensors(tensors)) => tensors.as_ref(),
-                _ => continue,
+            // Single lock: fill values + GAE + normalize adv + drain buffer
+            let batch_flat = match slot.replay_buffer.finalize_and_drain_blocking(values) {
+                Some(b) => b,
+                None => continue,
             };
 
-            let n = obs_td.len().min(act_td.len()).min(adv.len()).min(ret.len()).min(logp_td.len());
-            if n == 0 { continue; }
+            let n = batch_flat.act_flat.len();
+            let obs_dim = batch_flat.obs_dim;
+            if n == 0 || obs_dim == 0 {
+                continue;
+            }
             // Full-batch (None) = 1 gradient step per pi_iter, matching RL4Sys/spinning-up.
             // KL early stopping across pi_iters controls effective update count.
             let mb_size = self.hyperparams.mini_batch_size.unwrap_or(n).clamp(1, n);
-
-            // ── Pre-convert TensorData → flat arrays ONCE per epoch ──────────
-            let obs_dim = obs_td.first().and_then(|td| td.shape.first()).copied().unwrap_or(1);
-            let obs_flat: Vec<f32> = obs_td[..n].iter()
-                .flat_map(|td| bytemuck::cast_slice::<u8, f32>(&td.data).iter().copied())
-                .collect();
-            let act_flat: Vec<i64> = act_td[..n].iter()
-                .map(|td| {
-                    if td.data.len() >= 8 {
-                        bytemuck::cast_slice::<u8, i64>(&td.data[..8]).first().copied().unwrap_or(0)
-                    } else if td.data.len() >= 4 {
-                        bytemuck::cast_slice::<u8, f32>(&td.data[..4]).first().copied().unwrap_or(0.0) as i64
-                    } else { 0 }
-                })
-                .collect();
-            // Use stored ORT rollout logprobs as logp_old — matches Python/RL4Sys approach.
-            // Python PPO with stored logprobs converges in 10 epochs; Burn recomputation causes
-            // policy degradation (observed in gridworld run-2 and run-3, 700+ epochs, no convergence).
-            // With target_kl=0.05, 1-epoch ORT staleness won't trigger StopIter=1.
-            let logp_flat: Vec<f32> = logp_td[..n].iter()
-                .map(|td| bytemuck::cast_slice::<u8, f32>(&td.data)
-                    .first()
-                    .copied()
-                    .unwrap_or(0.0))
-                .collect();
+            let full_batch = mb_size >= n;
 
             // ── Minibatch training ────────────────────────────────────────────
             let mut rng = rand::rng();
@@ -603,20 +539,32 @@ where
                     let end = (start + mb_size).min(n);
                     let mb = &idx[start..end];
 
-                    let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
-                    let act_mb: Vec<i64> = mb.iter().map(|&j| act_flat[j]).collect();
-                    let adv_mb: Vec<f32> = mb.iter().map(|&j| adv[j]).collect();
-                    let logp_mb: Vec<f32> = mb.iter().map(|&j| logp_flat[j]).collect();
-
                     // Always compute stats for per-mini-batch KL early stopping.
                     // Matches SB3/CleanRL/RL4Sys: break immediately when any mini-batch
                     // KL exceeds 1.5 * target_kl (prevents excess policy drift).
-                    let (loss, info) = slot.kernel.ppo_pi_loss_flat(
-                        &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
-                        self.hyperparams.clip_ratio,
-                        self.hyperparams.ent_coef,
-                        true,
-                    );
+                    let (loss, info) = if full_batch {
+                        // Full-batch: use flat slices directly — no gather allocation
+                        slot.kernel.ppo_pi_loss_flat(
+                            &batch_flat.obs_flat, obs_dim,
+                            &batch_flat.act_flat,
+                            &batch_flat.adv_norm,
+                            &batch_flat.logp_flat,
+                            self.hyperparams.clip_ratio,
+                            self.hyperparams.ent_coef,
+                            true,
+                        )
+                    } else {
+                        let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| batch_flat.obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
+                        let act_mb: Vec<i64> = mb.iter().map(|&j| batch_flat.act_flat[j]).collect();
+                        let adv_mb: Vec<f32> = mb.iter().map(|&j| batch_flat.adv_norm[j]).collect();
+                        let logp_mb: Vec<f32> = mb.iter().map(|&j| batch_flat.logp_flat[j]).collect();
+                        slot.kernel.ppo_pi_loss_flat(
+                            &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
+                            self.hyperparams.clip_ratio,
+                            self.hyperparams.ent_coef,
+                            true,
+                        )
+                    };
                     epoch_loss += loss;
                     let mb_kl = info.get("kl").copied().unwrap_or(0.0);
                     epoch_kl = mb_kl;
@@ -657,10 +605,13 @@ where
                     let end = (start + mb_size).min(n);
                     let mb = &idx[start..end];
 
-                    let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
-                    let ret_mb: Vec<f32> = mb.iter().map(|&j| ret[j]).collect();
-
-                    let loss = slot.kernel.ppo_vf_loss_flat(&obs_mb, obs_dim, &ret_mb);
+                    let loss = if full_batch {
+                        slot.kernel.ppo_vf_loss_flat(&batch_flat.obs_flat, obs_dim, &batch_flat.ret_flat)
+                    } else {
+                        let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| batch_flat.obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
+                        let ret_mb: Vec<f32> = mb.iter().map(|&j| batch_flat.ret_flat[j]).collect();
+                        slot.kernel.ppo_vf_loss_flat(&obs_mb, obs_dim, &ret_mb)
+                    };
                     epoch_loss += loss;
                     mb_count += 1;
                 }

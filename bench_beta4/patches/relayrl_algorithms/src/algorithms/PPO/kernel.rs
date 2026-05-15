@@ -370,12 +370,10 @@ mod training {
             }
 
             let entropy_val = entropy_t.into_scalar();
-            let logp_values = logp.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
-            let ratio_values = ratio.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![1.0; n]);
             // Correct, always-non-negative KL approx: mean((r-1) - log(r)) where r = π_new/π_old.
-            // The naive mean(logp_old - logp_new) can be near-zero even with high ClipFrac because
-            // positive- and negative-advantage policy changes cancel. This version never cancels.
-            let approx_kl = ratio_values.iter().map(|r| (r - 1.0) - r.ln()).sum::<f32>() / n as f32;
+            // Computed in-tensor to avoid pulling the full logp buffer to CPU.
+            let approx_kl = ((ratio.clone() - 1.0) - ratio.clone().log()).mean().into_scalar();
+            let ratio_values = ratio.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![1.0; n]);
             let clipfrac = ratio_values.iter().filter(|r| (**r - 1.0).abs() > clip_ratio).count() as f32 / n as f32;
 
             let mut info = HashMap::new();
