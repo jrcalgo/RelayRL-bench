@@ -38,8 +38,8 @@ const MINI_BATCH_SIZE: usize = 64;
 const ENT_COEF: f32 = 0.05;
 
 const TRAJ_PER_EPOCH: u64 = 320;
-// 1_563 loop iterations × 64 envs ≈ 100,032 total env frames
-const TOTAL_STEPS: usize = 1_563;
+// 5_500 loop iterations × 64 envs ≈ 352,000 total env frames (~10 training epochs)
+const TOTAL_STEPS: usize = 5_500;
 const BUFFER_SIZE: ReplayBufferSize = 200_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
