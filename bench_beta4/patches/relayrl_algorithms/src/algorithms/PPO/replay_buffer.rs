@@ -185,7 +185,9 @@ impl PPOReplayBuffer {
         let obs_flat = buffers.obs_flat[..obs_end].to_vec();
         let act_flat = buffers.act_flat[..capacity.min(buffers.act_flat.len())].to_vec();
         let logp_flat = buffers.logp_flat[..capacity.min(buffers.logp_flat.len())].to_vec();
-        let ret_flat = buffers.returns[..capacity].to_vec();
+        let ret_raw = &buffers.returns[..capacity];
+        let (ret_mean, ret_std) = scalar_stats(ret_raw);
+        let ret_flat = compute_normed_advantages(ret_raw, ret_mean, ret_std.max(1e-8));
         let val_flat = buffers.values[..capacity].to_vec();
 
         // Clear for next epoch
@@ -249,7 +251,9 @@ impl PPOReplayBuffer {
         let obs_flat  = buffers.obs_flat[..obs_end].to_vec();
         let act_flat  = buffers.act_flat[..cut_step].to_vec();
         let logp_flat = buffers.logp_flat[..cut_step].to_vec();
-        let ret_flat  = buffers.returns[..cut_step].to_vec();
+        let ret_raw = &buffers.returns[..cut_step];
+        let (ret_mean, ret_std) = scalar_stats(ret_raw);
+        let ret_flat  = compute_normed_advantages(ret_raw, ret_mean, ret_std.max(1e-8));
         let val_flat  = buffers.values[..cut_step].to_vec();
 
         // Shift remaining data to front of buffer
