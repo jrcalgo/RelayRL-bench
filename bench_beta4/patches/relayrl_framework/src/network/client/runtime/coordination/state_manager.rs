@@ -1147,6 +1147,49 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let mut ns_step: u128 = 0;        // vectorized env step (rayon)
                 let mut ns_traj: u128 = 0;
 
+                // ── Online observation normalizer (Welford) ───────────────────────
+                struct ObsNormalizer {
+                    mean:  Vec<f64>,
+                    var:   Vec<f64>,
+                    count: u64,
+                }
+                impl ObsNormalizer {
+                    fn new(obs_dim: usize) -> Self {
+                        ObsNormalizer { mean: vec![0.0; obs_dim], var: vec![1.0; obs_dim], count: 0 }
+                    }
+                    fn update(&mut self, obs_bytes: &[u8]) {
+                        let floats: &[f32] = bytemuck::cast_slice(obs_bytes);
+                        let obs_dim = self.mean.len();
+                        let n_envs = floats.len() / obs_dim;
+                        for env_i in 0..n_envs {
+                            self.count += 1;
+                            let start = env_i * obs_dim;
+                            for d in 0..obs_dim {
+                                let x = floats[start + d] as f64;
+                                let delta  = x - self.mean[d];
+                                self.mean[d] += delta / self.count as f64;
+                                let delta2 = x - self.mean[d];
+                                self.var[d]  += delta * delta2;
+                            }
+                        }
+                    }
+                    fn normalize_inplace(&self, bytes: &mut [u8]) {
+                        let obs_dim = self.mean.len();
+                        let floats: &mut [f32] = bytemuck::cast_slice_mut(bytes);
+                        let n = floats.len() / obs_dim;
+                        for i in 0..n {
+                            for d in 0..obs_dim {
+                                let std = ((self.var[d] / self.count.max(1) as f64) as f32)
+                                    .sqrt().max(1e-4);
+                                floats[i * obs_dim + d] =
+                                    (floats[i * obs_dim + d] - self.mean[d] as f32) / std;
+                            }
+                        }
+                    }
+                }
+                let mut obs_norm = ObsNormalizer::new(obs_dim);
+                // ─────────────────────────────────────────────────────────────────
+
                 let obs_bytes_per_env = obs_dim * 4; // f32
                 let act_bytes_per_env = 8usize;      // i64
 
@@ -1172,11 +1215,13 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 });
 
                 // Bootstrap: get initial obs, block on first inference (no stale action yet)
-                let init_obs = env_interface.flat_observation_bytes().ok_or_else(|| {
+                let mut init_obs = env_interface.flat_observation_bytes().ok_or_else(|| {
                     StateManagerError::StepEnvError(
                         "[StateManager] flat_observation_bytes returned None (bootstrap)".to_string()
                     )
                 })?;
+                obs_norm.update(&init_obs);
+                obs_norm.normalize_inplace(&mut init_obs);
                 inf_obs_tx.send(init_obs.clone()).await
                     .map_err(|_| StateManagerError::InferenceRequestError(
                         "inference worker died at bootstrap".to_string()
@@ -1195,12 +1240,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     let t_step = std::time::Instant::now();
                     let act_i64: &[i64] = bytemuck::cast_slice(&cur_action_bytes_i64);
                     let action_bytes_for_env: Vec<u8> = act_i64.iter().map(|&a| a as u8).collect();
-                    let (new_obs_bytes, rewards, dones) = env_interface
+                    let (mut new_obs_bytes, rewards, dones) = env_interface
                         .step_bytes(&action_bytes_for_env)
                         .ok_or_else(|| StateManagerError::GetEnvInfoError(
                             "[StateManager] step_bytes returned None".to_string()
                         ))?;
                     ns_step += t_step.elapsed().as_nanos();
+
+                    // Normalize obs in-place before inference and trajectory storage
+                    obs_norm.update(&new_obs_bytes);
+                    obs_norm.normalize_inplace(&mut new_obs_bytes);
 
                     // Fire new obs to inference IMMEDIATELY — don't wait (capacity=2 absorbs jitter)
                     inf_obs_tx.send(new_obs_bytes.clone()).await

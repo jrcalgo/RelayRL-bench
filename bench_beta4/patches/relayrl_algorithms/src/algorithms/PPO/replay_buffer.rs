@@ -7,6 +7,30 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Online Welford mean/variance accumulator for return normalization.
+/// Persists across epochs so the scale stays stable as the policy improves.
+#[derive(Default)]
+struct RunningMeanStd {
+    mean:  f64,
+    m2:    f64,
+    count: u64,
+}
+impl RunningMeanStd {
+    fn update_batch(&mut self, xs: &[f32]) {
+        for &x in xs {
+            self.count += 1;
+            let delta = x as f64 - self.mean;
+            self.mean += delta / self.count as f64;
+            self.m2   += delta * (x as f64 - self.mean);
+        }
+    }
+    fn std(&self) -> f32 {
+        if self.count < 2 { return 1.0; }
+        ((self.m2 / (self.count - 1) as f64) as f32).sqrt().max(1e-8)
+    }
+    fn mean_f32(&self) -> f32 { self.mean as f32 }
+}
+
 struct Buffers {
     obs_flat: Vec<f32>,
     obs_dim: usize,
@@ -41,6 +65,7 @@ pub struct PPOFlatBatch {
 pub struct PPOReplayBuffer {
     buffers: Arc<Mutex<Buffers>>,
     metadata: Arc<BufferMetadata>,
+    return_running: Mutex<RunningMeanStd>,
 }
 
 impl Default for PPOReplayBuffer {
@@ -71,6 +96,7 @@ impl PPOReplayBuffer {
                 buffer_pointer: AtomicUsize::new(0),
                 buffer_path_start_idx: AtomicUsize::new(0),
             }),
+            return_running: Mutex::new(RunningMeanStd::default()),
         }
     }
 
@@ -188,8 +214,11 @@ impl PPOReplayBuffer {
         let act_flat = buffers.act_flat[..capacity.min(buffers.act_flat.len())].to_vec();
         let logp_flat = buffers.logp_flat[..capacity.min(buffers.logp_flat.len())].to_vec();
         let ret_raw = &buffers.returns[..capacity];
-        let (ret_mean, ret_std) = scalar_stats(ret_raw);
-        let ret_flat = compute_normed_advantages(ret_raw, ret_mean, ret_std.max(1e-8));
+        let ret_flat = {
+            let mut rrs = self.return_running.lock().unwrap();
+            rrs.update_batch(ret_raw);
+            compute_normed_advantages(ret_raw, rrs.mean_f32(), rrs.std())
+        };
         let val_flat = buffers.values[..capacity].to_vec();
 
         // Clear for next epoch
@@ -256,8 +285,11 @@ impl PPOReplayBuffer {
         let act_flat  = buffers.act_flat[..cut_step].to_vec();
         let logp_flat = buffers.logp_flat[..cut_step].to_vec();
         let ret_raw = &buffers.returns[..cut_step];
-        let (ret_mean, ret_std) = scalar_stats(ret_raw);
-        let ret_flat  = compute_normed_advantages(ret_raw, ret_mean, ret_std.max(1e-8));
+        let ret_flat = {
+            let mut rrs = self.return_running.lock().unwrap();
+            rrs.update_batch(ret_raw);
+            compute_normed_advantages(ret_raw, rrs.mean_f32(), rrs.std())
+        };
         let val_flat  = buffers.values[..cut_step].to_vec();
 
         // Shift remaining data to front of buffer

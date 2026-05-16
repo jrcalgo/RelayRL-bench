@@ -437,9 +437,16 @@ where
             if n == 0 {
                 continue;
             }
-            // Values stored inline from per-step inference; pass Vec::new() to use stored values.
-            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(Vec::new(), n)?;
+            // Take kernel first so we can recompute V(s_t) from the current Burn model,
+            // eliminating stale-value bias in GAE (stored values came from the old TorchScript model).
             let kernel = slot.kernel.take()?;
+            let (obs_flat, obs_dim_peek) = slot.replay_buffer.get_obs_flat_for_first_n_episodes(n);
+            let fresh_values = if !obs_flat.is_empty() {
+                kernel.value_forward_only_flat(&obs_flat, obs_dim_peek)
+            } else {
+                Vec::new()
+            };
+            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(fresh_values, n)?;
             jobs.push((kernel, batch));
         }
         if jobs.is_empty() {
