@@ -29,21 +29,21 @@ const ENV_COUNT: u32 = 64;
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
-const PI_LR: f64 = 3e-4;  // standard PPO LR; lower LR → smaller per-step KL → full 4 iters used
-const VF_LR: f64 = 3e-4; // kept for reference; kernel uses PI_LR for shared optimizer
+const PI_LR: f64 = 5e-4;  // raised from 3e-4: more frequent smaller-batch updates can use higher LR
+const VF_LR: f64 = 5e-4; // kept for reference; kernel uses PI_LR for shared optimizer
 const VF_COEF: f32 = 2.0;  // raised: restores ~4× VF/PI effective update ratio vs old separate optimizers
 const TRAIN_PI_ITERS: u64 = 10;
 const TRAIN_VF_ITERS: u64 = 10;
 const TARGET_KL: f32 = 0.05;  // loosened: 0.01 stopped after ~15/144 gradient steps per epoch
-const MINI_BATCH_SIZE: usize = 16384;
+const MINI_BATCH_SIZE: usize = 8192;  // lowered from 16384: full-batch per epoch at min_steps=8192
 const ENT_COEF: f32 = 0.01;
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
-// Step-count epoch trigger: guarantees epoch buffer > MINI_BATCH_SIZE (2× → 2 mini-batches/iter)
-const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64 * 2; // 32768
-// ~90 steps/ep → drain ~365 eps/epoch; cap at ~2 drain-epochs to bound off-policy lag
-const MAX_BUFFERED_EPISODES: u64 = 800;
+// Step-count epoch trigger: ~91 eps/drain, closer to SF's 64-ep rollout cadence
+const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64; // 8192
+// 2× drain-epoch cap: 2 × ~91 eps = ~182 eps max in buffer
+const MAX_BUFFERED_EPISODES: u64 = 180;
 // 600_000 loop iterations × 64 envs ≈ 38.4M total env frames
 const TOTAL_STEPS: usize = 600_000;
 const BUFFER_SIZE: ReplayBufferSize = 500_000;
