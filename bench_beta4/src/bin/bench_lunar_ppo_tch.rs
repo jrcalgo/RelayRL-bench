@@ -30,19 +30,19 @@ const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4;
-const VF_LR: f64 = 2.5e-4;
-const TRAIN_PI_ITERS: u64 = 1;
-const TRAIN_VF_ITERS: u64 = 1;
-const TARGET_KL: f32 = 0.05;
-const MINI_BATCH_SIZE: usize = 64;
-const ENT_COEF: f32 = 0.05;
+const VF_LR: f64 = 1e-3;
+const TRAIN_PI_ITERS: u64 = 4;
+const TRAIN_VF_ITERS: u64 = 4;
+const TARGET_KL: f32 = 0.01;
+// Full-batch: mb_size > batch → 4 gradient steps per epoch (one pass per iter)
+const MINI_BATCH_SIZE: usize = 16384;
+const ENT_COEF: f32 = 0.01;
 
-// 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~61 collection epochs in 5500 steps.
-// With 1 pi + 1 vf iter, training ~400ms vs ~182ms collection → ~15 training updates per run.
+// 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
-// 5_500 loop iterations × 64 envs ≈ 352,000 total env frames
-const TOTAL_STEPS: usize = 5_500;
-const BUFFER_SIZE: ReplayBufferSize = 200_000;
+// 300_000 loop iterations × 64 envs ≈ 19.2M total env frames (extended convergence run)
+const TOTAL_STEPS: usize = 300_000;
+const BUFFER_SIZE: ReplayBufferSize = 500_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
 
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let total_frames = TOTAL_STEPS * ENV_COUNT as usize;
-    println!("Starting PPO training ({TOTAL_STEPS} loop iters × {ENV_COUNT} envs = {total_frames} env frames)...\n");
+    println!("Starting PPO convergence run ({TOTAL_STEPS} loop iters × {ENV_COUNT} envs = {total_frames} env frames)...\n");
 
     let t0 = Instant::now();
     agent
