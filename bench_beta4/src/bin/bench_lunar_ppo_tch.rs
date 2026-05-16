@@ -31,15 +31,15 @@ const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4;
 const VF_LR: f64 = 2.5e-4;
-const TRAIN_PI_ITERS: u64 = 3;
-const TRAIN_VF_ITERS: u64 = 3;
+const TRAIN_PI_ITERS: u64 = 1;
+const TRAIN_VF_ITERS: u64 = 1;
 const TARGET_KL: f32 = 0.05;
 const MINI_BATCH_SIZE: usize = 64;
 const ENT_COEF: f32 = 0.05;
 
-// 32 trajs/epoch × 64 envs → ~45 loop iters/epoch → ~122 collection epochs in 5500 steps.
-// With 1 pi + 1 vf iter, training ~200ms vs ~91ms collection → ~55 training updates per run.
-const TRAJ_PER_EPOCH: u64 = 32;
+// 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~61 collection epochs in 5500 steps.
+// With 1 pi + 1 vf iter, training ~400ms vs ~182ms collection → ~15 training updates per run.
+const TRAJ_PER_EPOCH: u64 = 64;
 // 5_500 loop iterations × 64 envs ≈ 352,000 total env frames
 const TOTAL_STEPS: usize = 5_500;
 const BUFFER_SIZE: ReplayBufferSize = 200_000;
