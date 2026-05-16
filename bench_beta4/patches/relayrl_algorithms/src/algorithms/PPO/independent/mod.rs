@@ -102,6 +102,13 @@ pub struct IPPOParams {
     /// Set to Some(64) to match SB3-style mini-batching (many more gradient steps per epoch).
     #[serde(default)]
     pub mini_batch_size: Option<usize>,
+    /// VF loss coefficient in combined loss: total = pi_loss + vf_coef * vf_loss.
+    #[serde(default = "default_vf_coef")]
+    pub vf_coef: f32,
+}
+
+fn default_vf_coef() -> f32 {
+    0.5
 }
 
 impl Default for IPPOParams {
@@ -120,6 +127,7 @@ impl Default for IPPOParams {
             ent_coef: 0.0,
             max_episode_steps: None,
             mini_batch_size: None,
+            vf_coef: 0.5,
         }
     }
 }
@@ -426,8 +434,8 @@ where
         let ent_coef = self.hyperparams.ent_coef;
         let target_kl = self.hyperparams.target_kl;
         let train_pi_iters = self.hyperparams.train_pi_iters;
-        let train_vf_iters = self.hyperparams.train_vf_iters;
         let mb_size_opt = self.hyperparams.mini_batch_size;
+        let vf_coef = self.hyperparams.vf_coef;
 
         Some(tokio::task::spawn_blocking(move || {
             let slot_results = jobs
@@ -440,8 +448,8 @@ where
                         ent_coef,
                         target_kl,
                         train_pi_iters,
-                        train_vf_iters,
                         mb_size_opt,
+                        vf_coef,
                     )
                 })
                 .collect();
@@ -531,9 +539,9 @@ fn run_ppo_sgd_flat<B, InK, OutK, KN>(
     clip_ratio: f32,
     ent_coef: f32,
     target_kl: f32,
-    train_pi_iters: u64,
-    train_vf_iters: u64,
+    train_iters: u64,
     mb_size_opt: Option<usize>,
+    vf_coef: f32,
 ) -> SlotTrainResult<KN>
 where
     B: Backend + BackendMatcher,
@@ -567,34 +575,34 @@ where
     let mut idx: Vec<usize> = (0..n).collect();
 
     let mut first_pi_loss: Option<f32> = None;
+    let mut first_vf_loss: Option<f32> = None;
     let mut final_pi_loss = 0.0f32;
+    let mut final_vf_loss = 0.0f32;
     let mut final_kl = 0.0f32;
     let mut final_entropy = 0.0f32;
     let mut final_clipfrac = 0.0f32;
     let mut stop_iter = 0u64;
 
-    'pi: for i in 0..train_pi_iters {
+    'outer: for i in 0..train_iters {
         idx.shuffle(&mut rng);
-        let mut epoch_loss = 0.0f32;
+        let mut epoch_pi_loss = 0.0f32;
+        let mut epoch_vf_loss = 0.0f32;
         let mut epoch_kl = 0.0f32;
         let mut epoch_entropy = 0.0f32;
         let mut epoch_clipfrac = 0.0f32;
         let mut mb_count = 0usize;
         let mut early_stop = false;
+        let is_last_mb = i == train_iters - 1;
 
         for start in (0..n).step_by(mb_size) {
             let end = (start + mb_size).min(n);
             let mb = &idx[start..end];
-            let (loss, info) = if full_batch {
-                kernel.ppo_pi_loss_flat(
-                    &batch.obs_flat,
-                    obs_dim,
-                    &batch.act_flat,
-                    &batch.adv_norm,
-                    &batch.logp_flat,
-                    clip_ratio,
-                    ent_coef,
-                    true,
+            let compute_stats = is_last_mb || mb_count == 0;
+            let (pi_loss, vf_loss, info) = if full_batch {
+                kernel.ppo_combined_loss_flat(
+                    &batch.obs_flat, obs_dim,
+                    &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &batch.ret_flat,
+                    clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             } else {
                 let obs_mb: Vec<f32> = mb
@@ -604,15 +612,18 @@ where
                 let act_mb: Vec<i64> = mb.iter().map(|&j| batch.act_flat[j]).collect();
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp_flat[j]).collect();
-                kernel.ppo_pi_loss_flat(
-                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, clip_ratio, ent_coef, true,
+                let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
+                kernel.ppo_combined_loss_flat(
+                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb,
+                    clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             };
-            epoch_loss += loss;
+            epoch_pi_loss += pi_loss;
+            epoch_vf_loss += vf_loss;
             let mb_kl = info.get("kl").copied().unwrap_or(0.0);
             epoch_kl = mb_kl;
-            epoch_entropy = info.get("entropy").copied().unwrap_or(0.0);
-            epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(0.0);
+            epoch_entropy = info.get("entropy").copied().unwrap_or(epoch_entropy);
+            epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(epoch_clipfrac);
             mb_count += 1;
             if mb_kl > 1.5 * target_kl {
                 early_stop = true;
@@ -620,47 +631,20 @@ where
             }
         }
         if mb_count > 0 {
-            epoch_loss /= mb_count as f32;
+            epoch_pi_loss /= mb_count as f32;
+            epoch_vf_loss /= mb_count as f32;
         }
-        first_pi_loss.get_or_insert(epoch_loss);
-        final_pi_loss = epoch_loss;
+        first_pi_loss.get_or_insert(epoch_pi_loss);
+        first_vf_loss.get_or_insert(epoch_vf_loss);
+        final_pi_loss = epoch_pi_loss;
+        final_vf_loss = epoch_vf_loss;
         final_kl = epoch_kl;
         final_entropy = epoch_entropy;
         final_clipfrac = epoch_clipfrac;
         stop_iter = i + 1;
         if early_stop || final_kl > 1.5 * target_kl {
-            break 'pi;
+            break 'outer;
         }
-    }
-
-    let mut first_vf_loss: Option<f32> = None;
-    let mut final_vf_loss = 0.0f32;
-
-    for _ in 0..train_vf_iters {
-        idx.shuffle(&mut rng);
-        let mut epoch_loss = 0.0f32;
-        let mut mb_count = 0usize;
-        for start in (0..n).step_by(mb_size) {
-            let end = (start + mb_size).min(n);
-            let mb = &idx[start..end];
-            let loss = if full_batch {
-                kernel.ppo_vf_loss_flat(&batch.obs_flat, obs_dim, &batch.ret_flat)
-            } else {
-                let obs_mb: Vec<f32> = mb
-                    .iter()
-                    .flat_map(|&j| batch.obs_flat[j * obs_dim..(j + 1) * obs_dim].iter().copied())
-                    .collect();
-                let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
-                kernel.ppo_vf_loss_flat(&obs_mb, obs_dim, &ret_mb)
-            };
-            epoch_loss += loss;
-            mb_count += 1;
-        }
-        if mb_count > 0 {
-            epoch_loss /= mb_count as f32;
-        }
-        first_vf_loss.get_or_insert(epoch_loss);
-        final_vf_loss = epoch_loss;
     }
 
     SlotTrainResult {

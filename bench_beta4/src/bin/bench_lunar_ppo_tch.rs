@@ -30,7 +30,8 @@ const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4;
-const VF_LR: f64 = 1e-3;
+const VF_LR: f64 = 1e-3; // kept for reference; kernel uses PI_LR for shared optimizer
+const VF_COEF: f32 = 0.5;
 const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 0.01;
@@ -90,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[128, 128],
         ActivationKind::ReLU,
         PI_LR,
-        VF_LR,
+        VF_COEF,
         None,
         &burn_device,
     );
@@ -115,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ent_coef: ENT_COEF,
                 max_episode_steps: Some(MAX_STEPS),
                 mini_batch_size: Some(MINI_BATCH_SIZE),
+                vf_coef: VF_COEF,
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_tch"),
