@@ -406,14 +406,15 @@ where
         OutK: Send + 'static,
         KN: super::kernel::PPOKernelTrait<B, InK, OutK> + Send + 'static,
     {
+        let traj_per_epoch = self.hyperparams.traj_per_epoch as usize;
         let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
         for slot in &mut self.runtime.components.agent_slots {
-            let (obs_flat, obs_dim) = slot.replay_buffer.get_obs_flat_for_gae_blocking();
+            let (obs_flat, obs_dim) = slot.replay_buffer.get_obs_flat_for_first_n_episodes(traj_per_epoch);
             if obs_flat.is_empty() {
                 continue;
             }
             let values = slot.kernel.as_ref()?.value_forward_only_flat(&obs_flat, obs_dim);
-            let batch = slot.replay_buffer.finalize_and_drain_blocking(values)?;
+            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(values, traj_per_epoch)?;
             let kernel = slot.kernel.take()?;
             jobs.push((kernel, batch));
         }

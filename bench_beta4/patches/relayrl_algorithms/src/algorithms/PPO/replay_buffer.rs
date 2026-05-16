@@ -113,6 +113,21 @@ impl PPOReplayBuffer {
         (buffers.obs_flat[..ptr * obs_dim].to_vec(), obs_dim)
     }
 
+    /// Return obs for exactly the first `n` complete episodes.
+    /// Returns empty if fewer than `n` complete episodes exist in the buffer.
+    pub fn get_obs_flat_for_first_n_episodes(&self, n: usize) -> (Vec<f32>, usize) {
+        let buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n {
+            return (Vec::new(), 1);
+        }
+        let obs_dim = buffers.obs_dim;
+        if obs_dim == 0 {
+            return (Vec::new(), 1);
+        }
+        let cut_step = buffers.episode_boundaries[n - 1].1;
+        (buffers.obs_flat[..cut_step * obs_dim].to_vec(), obs_dim)
+    }
+
     /// Fill values buffer and compute GAE for all recorded episode boundaries.
     pub fn finalize_gae_blocking(&self, values: Vec<f32>) {
         let mut buffers = self.buffers.lock().unwrap();
@@ -185,6 +200,98 @@ impl PPOReplayBuffer {
         buffers.returns.clear();
         buffers.values.clear();
         buffers.episode_boundaries.clear();
+
+        Some(PPOFlatBatch {
+            obs_flat,
+            obs_dim,
+            act_flat,
+            logp_flat,
+            adv_norm,
+            ret_flat,
+            val_flat,
+        })
+    }
+
+    /// Drain exactly the first `n` complete episodes: compute GAE, extract batch, shift
+    /// remainder to front of buffer. Returns None if fewer than `n` episodes are complete.
+    pub fn finalize_and_drain_first_n_blocking(&self, values: Vec<f32>, n: usize) -> Option<PPOFlatBatch> {
+        let mut buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n {
+            return None;
+        }
+        let gamma = self.metadata.gamma;
+        let lam = self.metadata.lam;
+        let obs_dim = buffers.obs_dim;
+        let cut_step = buffers.episode_boundaries[n - 1].1;
+
+        // Fill values for steps 0..cut_step
+        let fill_len = values.len().min(cut_step).min(buffers.values.len());
+        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+
+        // Compute GAE for the first n episodes only
+        let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
+        for (start, end, is_truncated) in &boundaries_n {
+            let bootstrap = if *is_truncated {
+                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+        }
+
+        // Normalize advantages across these n episodes only
+        let adv_raw = &buffers.advantages[..cut_step];
+        let (adv_mean, adv_std) = scalar_stats(adv_raw);
+        let adv_norm = compute_normed_advantages(adv_raw, adv_mean, adv_std.max(1e-8));
+
+        // Extract batch for 0..cut_step
+        let obs_end = cut_step * obs_dim;
+        let obs_flat  = buffers.obs_flat[..obs_end].to_vec();
+        let act_flat  = buffers.act_flat[..cut_step].to_vec();
+        let logp_flat = buffers.logp_flat[..cut_step].to_vec();
+        let ret_flat  = buffers.returns[..cut_step].to_vec();
+        let val_flat  = buffers.values[..cut_step].to_vec();
+
+        // Shift remaining data to front of buffer
+        let total_steps = self.metadata.buffer_pointer.load(Ordering::Relaxed);
+        let remaining = total_steps - cut_step;
+
+        let obs_total = obs_end + remaining * obs_dim;
+        buffers.obs_flat.copy_within(obs_end..obs_total, 0);
+        buffers.obs_flat.truncate(remaining * obs_dim);
+
+        buffers.act_flat.copy_within(cut_step..total_steps, 0);
+        buffers.act_flat.truncate(remaining);
+
+        buffers.logp_flat.copy_within(cut_step..total_steps, 0);
+        buffers.logp_flat.truncate(remaining);
+
+        buffers.rewards.copy_within(cut_step..total_steps, 0);
+        buffers.rewards.truncate(remaining);
+
+        buffers.advantages.copy_within(cut_step..total_steps, 0);
+        buffers.advantages.truncate(remaining);
+
+        buffers.returns.copy_within(cut_step..total_steps, 0);
+        buffers.returns.truncate(remaining);
+
+        buffers.values.copy_within(cut_step..total_steps, 0);
+        buffers.values.truncate(remaining);
+
+        // Remove first n episode boundaries and re-offset the rest
+        let remaining_boundaries: Vec<_> = buffers.episode_boundaries[n..]
+            .iter()
+            .map(|&(s, e, trunc)| (s - cut_step, e - cut_step, trunc))
+            .collect();
+        buffers.episode_boundaries = remaining_boundaries;
+
+        // Update atomics
+        self.metadata.buffer_pointer.store(remaining, Ordering::Relaxed);
+        let old_path_start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
+        self.metadata.buffer_path_start_idx.store(
+            old_path_start.saturating_sub(cut_step),
+            Ordering::Relaxed,
+        );
 
         Some(PPOFlatBatch {
             obs_flat,
