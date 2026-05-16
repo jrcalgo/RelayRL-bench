@@ -130,6 +130,47 @@ impl PPOReplayBuffer {
         buffers.returns[start..end].copy_from_slice(&full_returns[..full_returns.len() - 1]);
     }
 
+    /// V-trace return targets and advantages for one episode [start, end).
+    /// is_ratios: per-step π_θ(a|s)/μ(a|s) importance sampling ratios (indexed globally).
+    fn compute_vtrace_episode(
+        buffers: &mut Buffers,
+        gamma: f32,
+        start: usize,
+        end: usize,
+        bootstrap: f32,
+        is_ratios: &[f32],
+    ) {
+        const RHO_BAR: f32 = 1.0;
+        const C_BAR:   f32 = 1.0;
+        let n = end - start;
+        if n == 0 { return; }
+
+        // Backward pass: v_t = V(s_t) + ρ̄_t*δ_t + γ*c_t*(v_{t+1} - V(s_{t+1}))
+        let mut vtrace = vec![0.0f32; n];
+        let mut v_next = bootstrap;
+        for t in (0..n).rev() {
+            let abs_t = start + t;
+            let r_t  = buffers.rewards[abs_t];
+            let v_t  = buffers.values[abs_t];
+            let v_t1 = if t + 1 < n { buffers.values[start + t + 1] } else { bootstrap };
+            let rho  = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(RHO_BAR);
+            let c    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(C_BAR);
+            let delta = rho * (r_t + gamma * v_t1 - v_t);
+            vtrace[t] = v_t + delta + gamma * c * (v_next - v_t1);
+            v_next = vtrace[t];
+        }
+
+        // Advantages: ρ̄_t*(r_t + γ*v_{t+1} - V(s_t));  Returns: v-trace target
+        for t in 0..n {
+            let abs_t  = start + t;
+            let v_t1vt = if t + 1 < n { vtrace[t + 1] } else { bootstrap };
+            let rho    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(RHO_BAR);
+            buffers.advantages[abs_t] =
+                rho * (buffers.rewards[abs_t] + gamma * v_t1vt - buffers.values[abs_t]);
+            buffers.returns[abs_t] = vtrace[t];
+        }
+    }
+
     /// Return flat f32 observations for all buffered steps, used for deferred GAE value inference.
     pub fn get_obs_flat_for_gae_blocking(&self) -> (Vec<f32>, usize) {
         let buffers = self.buffers.lock().unwrap();
@@ -154,6 +195,20 @@ impl PPOReplayBuffer {
         }
         let cut_step = buffers.episode_boundaries[n - 1].1;
         (buffers.obs_flat[..cut_step * obs_dim].to_vec(), obs_dim)
+    }
+
+    pub fn get_act_flat_for_first_n_episodes(&self, n: usize) -> Vec<i64> {
+        let buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n { return Vec::new(); }
+        let cut_step = buffers.episode_boundaries[n - 1].1;
+        buffers.act_flat[..cut_step].to_vec()
+    }
+
+    pub fn get_logp_flat_for_first_n_episodes(&self, n: usize) -> Vec<f32> {
+        let buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n { return Vec::new(); }
+        let cut_step = buffers.episode_boundaries[n - 1].1;
+        buffers.logp_flat[..cut_step].to_vec()
     }
 
     /// Fill values buffer and compute GAE for all recorded episode boundaries.
@@ -249,7 +304,7 @@ impl PPOReplayBuffer {
 
     /// Drain exactly the first `n` complete episodes: compute GAE, extract batch, shift
     /// remainder to front of buffer. Returns None if fewer than `n` episodes are complete.
-    pub fn finalize_and_drain_first_n_blocking(&self, values: Vec<f32>, n: usize) -> Option<PPOFlatBatch> {
+    pub fn finalize_and_drain_first_n_blocking(&self, values: Vec<f32>, is_ratios: Vec<f32>, n: usize) -> Option<PPOFlatBatch> {
         let mut buffers = self.buffers.lock().unwrap();
         if buffers.episode_boundaries.len() < n {
             return None;
@@ -265,7 +320,8 @@ impl PPOReplayBuffer {
             buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
         }
 
-        // Compute GAE for the first n episodes only
+        // Compute advantages/returns for the first n episodes
+        let use_vtrace = !is_ratios.is_empty();
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
             let bootstrap = if *is_truncated {
@@ -273,7 +329,11 @@ impl PPOReplayBuffer {
             } else {
                 0.0
             };
-            Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+            if use_vtrace {
+                Self::compute_vtrace_episode(&mut buffers, gamma, *start, *end, bootstrap, &is_ratios);
+            } else {
+                Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+            }
         }
 
         // Normalize advantages across these n episodes only
