@@ -452,18 +452,7 @@ where
             } else {
                 Vec::new()
             };
-            // V-trace IS correction: π_θ(a|s)/μ(a|s) per step using current Burn model
-            let is_ratios = if !obs_flat.is_empty() {
-                let act_flat = slot.replay_buffer.get_act_flat_for_first_n_episodes(n);
-                let logp_old = slot.replay_buffer.get_logp_flat_for_first_n_episodes(n);
-                let logp_new = kernel.get_pi_logprobs_flat(&obs_flat, obs_dim_peek, &act_flat);
-                logp_new.iter().zip(logp_old.iter())
-                    .map(|(&lnew, &lold)| (lnew - lold).exp())
-                    .collect::<Vec<f32>>()
-            } else {
-                Vec::new()
-            };
-            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(fresh_values, is_ratios, n)?;
+            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(fresh_values, n)?;
             jobs.push((kernel, batch));
         }
         if jobs.is_empty() {
