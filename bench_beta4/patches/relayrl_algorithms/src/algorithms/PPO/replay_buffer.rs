@@ -322,6 +322,18 @@ impl PPOReplayBuffer {
         let buffers = self.buffers.lock().unwrap();
         buffers.episode_boundaries.last().map(|&(_, end, _)| end).unwrap_or(0)
     }
+
+    /// Minimum number of complete episodes needed so their total steps >= min_steps.
+    /// Returns 0 if no episodes exist or buffer hasn't accumulated min_steps yet.
+    pub fn episodes_needed_for_steps(&self, min_steps: usize) -> usize {
+        let buffers = self.buffers.lock().unwrap();
+        for (i, &(_, end, _)) in buffers.episode_boundaries.iter().enumerate() {
+            if end >= min_steps {
+                return i + 1;
+            }
+        }
+        0  // not enough complete steps yet
+    }
 }
 
 #[async_trait]

@@ -347,9 +347,9 @@ where
         let has_agents = self.runtime.components.agent_registry.len() > 0;
         if !has_agents { return false; }
         if let Some(min_steps) = self.hyperparams.min_steps_per_epoch {
+            // Ready when buffer has enough complete steps for at least one drain
             self.runtime.components.agent_slots.iter().all(|slot| {
-                slot.replay_buffer.get_complete_step_count() >= min_steps as usize
-                    && slot.replay_buffer.get_episode_count() > 0
+                slot.replay_buffer.episodes_needed_for_steps(min_steps as usize) > 0
             })
         } else {
             self.runtime.components.agent_slots.iter()
@@ -424,12 +424,13 @@ where
         OutK: Send + 'static,
         KN: super::kernel::PPOKernelTrait<B, InK, OutK> + Send + 'static,
     {
-        let use_step_trigger = self.hyperparams.min_steps_per_epoch.is_some();
         let traj_n_default = self.hyperparams.traj_per_epoch as usize;
+        let min_steps_opt = self.hyperparams.min_steps_per_epoch;
         let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
         for slot in &mut self.runtime.components.agent_slots {
-            let n = if use_step_trigger {
-                slot.replay_buffer.get_episode_count()
+            let n = if let Some(min_steps) = min_steps_opt {
+                // Drain the minimum episodes covering min_steps; leave excess for next epoch
+                slot.replay_buffer.episodes_needed_for_steps(min_steps as usize)
             } else {
                 traj_n_default
             };
