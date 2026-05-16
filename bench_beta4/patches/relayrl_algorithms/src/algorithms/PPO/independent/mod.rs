@@ -479,7 +479,7 @@ where
     }
 }
 
-#[cfg(feature = "ndarray-backend")]
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 impl<B, InK, OutK, KN> IndependentPPOAlgorithm<B, InK, OutK, KN>
 where
     B: Backend + BackendMatcher<Backend = B>,
@@ -490,42 +490,43 @@ where
         + crate::templates::base_algorithm::WeightProvider
         + Default,
 {
-    /// Export the trained policy as an in-memory ONNX model.
-    ///
-    /// Extracts layer specs from the first registered actor's kernel, encodes them as
-    /// a fully-connected MLP in ONNX format, and wraps the result in a `ModelModule`.
-    /// Returns `None` if no actor has been registered or if no training has occurred
-    /// yet (the kernel's `pi_trainer` network is absent).
-    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
-        use relayrl_types::data::tensor::{DType, NdArrayDType};
+    fn backend_f32_dtype() -> relayrl_types::data::tensor::DType {
+        use relayrl_types::data::tensor::{DType, SupportedTensorBackend};
+        match B::get_supported_backend() {
+            #[cfg(feature = "tch-backend")]
+            SupportedTensorBackend::Tch => DType::Tch(relayrl_types::data::tensor::TchDType::F32),
+            _ => DType::NdArray(relayrl_types::data::tensor::NdArrayDType::F32),
+        }
+    }
 
+    /// Export the trained policy as a TorchScript model (LibTorch backend) or ONNX model
+    /// (NdArray backend). Returns `None` before the first training epoch.
+    pub fn acquire_model_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
         let slot = self.runtime.components.agent_slots.first()?;
         let layer_specs = slot.kernel.as_ref()?.get_pi_layer_specs()?;
-
+        let dtype = Self::backend_f32_dtype();
         crate::acquire_model_module::<B>(
             "ppo",
             layer_specs,
-            DType::NdArray(NdArrayDType::F32),
-            DType::NdArray(NdArrayDType::F32),
+            dtype.clone(),
+            dtype,
             vec![1, self.runtime.args.obs_dim],
             vec![1, self.runtime.args.act_dim],
             None,
         )
     }
 
-    /// Export the value (baseline) head as an in-memory ONNX model.
-    /// Output is a single scalar value per obs: shape [batch, 1].
+    /// Export the value head as a TorchScript model (LibTorch backend) or ONNX model
+    /// (NdArray backend). Output shape is [batch, 1].
     pub fn acquire_value_module(&self) -> Option<relayrl_types::model::ModelModule<B>> {
-        use relayrl_types::data::tensor::{DType, NdArrayDType};
-
         let slot = self.runtime.components.agent_slots.first()?;
         let layer_specs = slot.kernel.as_ref()?.get_vf_layer_specs()?;
-
+        let dtype = Self::backend_f32_dtype();
         crate::acquire_model_module::<B>(
             "ppo_vf",
             layer_specs,
-            DType::NdArray(NdArrayDType::F32),
-            DType::NdArray(NdArrayDType::F32),
+            dtype.clone(),
+            dtype,
             vec![1, self.runtime.args.obs_dim],
             vec![1, 1],
             None,

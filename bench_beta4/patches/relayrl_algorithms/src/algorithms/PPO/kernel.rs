@@ -743,6 +743,11 @@ where
     }
 
     fn value_forward_only_flat(&self, obs_flat: &[f32], obs_dim: usize) -> Vec<f32> {
+        // Use the trained VF network when available; self.baseline is never updated.
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+        if let Some(trainer) = &self.actor_critic_trainer {
+            return trainer.value_forward_flat(obs_flat, obs_dim);
+        }
         let n = if obs_dim > 0 { obs_flat.len() / obs_dim } else { 0 };
         if n == 0 {
             return Vec::new();
