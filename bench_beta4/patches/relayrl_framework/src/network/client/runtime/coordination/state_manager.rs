@@ -1019,10 +1019,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let epoch_count_learner = Arc::clone(&epoch_count_shared);
                 let runtime_learner = Arc::clone(&runtime);
                 let device_learner = device.clone();
-                // Barrier sync: pause_tx=true halts env stepping in the collection loop
-                // while training is in progress, ensuring every new epoch is on-policy.
-                let (pause_tx, mut pause_rx) =
-                    tokio::sync::watch::channel::<bool>(false);
                 // trainer moves into the learner task; collection loop only holds traj_tx.
                 // Training runs in a background thread via spawn_blocking while the learner
                 // continues draining traj_rx — eliminating traj_tx backpressure.
@@ -1051,21 +1047,19 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         let pi_module = trainer.acquire_model_module();
                                         let vf_module = trainer.acquire_value_module();
                                         if pi_module.is_some() || vf_module.is_some() {
-                                            // Refresh weights inline — collection is already halted
-                                            // (pause_tx=true since epoch started), so new steps will
-                                            // use the updated model the moment they resume.
-                                            if let Some(m) = pi_module {
-                                                let _ = runtime_learner.perform_refresh_model(m, device_learner.clone()).await;
-                                            }
-                                            if let Some(v) = vf_module {
-                                                let _ = runtime_learner.perform_refresh_value_model(v, device_learner.clone()).await;
-                                            }
+                                            let rt = Arc::clone(&runtime_learner);
+                                            let dev = device_learner.clone();
+                                            tokio::spawn(async move {
+                                                if let Some(m) = pi_module {
+                                                    let _ = rt.perform_refresh_model(m, dev.clone()).await;
+                                                }
+                                                if let Some(v) = vf_module {
+                                                    let _ = rt.perform_refresh_value_model(v, dev).await;
+                                                }
+                                            });
                                         }
-                                        // Drain any residual episodes; if none, release the barrier.
+                                        // Drain any data accumulated while training was in flight
                                         pending_train = trainer.start_epoch_training();
-                                        if pending_train.is_none() {
-                                            let _ = pause_tx.send(false);
-                                        }
                                     }
 
                                     // New trajectory while training — insert but don't start
@@ -1123,9 +1117,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                                         if epoch_started {
                                             pending_train = trainer.start_epoch_training();
-                                            if pending_train.is_some() {
-                                                let _ = pause_tx.send(true);
-                                            }
                                         }
                                     }
                                 }
@@ -1245,9 +1236,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 let t_collection_start = std::time::Instant::now();
                 for _ in 0..step_count {
-                    // Barrier sync: block until training + model refresh are both done.
-                    // When pause_tx=false this returns immediately (zero overhead).
-                    let _ = pause_rx.wait_for(|v| !v).await;
                     // Step envs with LAST inference result (stale by 1 step after bootstrap)
                     let t_step = std::time::Instant::now();
                     let act_i64: &[i64] = bytemuck::cast_slice(&cur_action_bytes_i64);
