@@ -78,8 +78,8 @@ pub use algorithms::DDPG::{
     MADDPGParams, MultiagentDDPGKernelTrait,
 };
 pub use algorithms::PPO::{
-    IPPOAlgorithm, IPPOParams, MAPPOAlgorithm, MAPPOParams, MultiagentPPOKernelTrait, PPOAlgorithm,
-    PPOKernelTrait, PPOParams,
+    EpochTrainOutput, IPPOAlgorithm, IPPOParams, MAPPOAlgorithm, MAPPOParams,
+    MultiagentPPOKernelTrait, PPOAlgorithm, PPOKernelTrait, PPOParams, SlotTrainResult,
 };
 pub use algorithms::REINFORCE::{
     IREINFORCEAlgorithm, IREINFORCEParams, MAREINFORCEAlgorithm, MAREINFORCEParams,
@@ -578,6 +578,34 @@ where
         match self {
             Self::PPO(algorithm) => algorithm.value_inference_only(obs_data),
             Self::IPPO(algorithm) => algorithm.value_inference_only(obs_data),
+        }
+    }
+
+    /// Extract epoch data from all slots, launch SGD in a background thread, and return
+    /// immediately. Collection can fill the next epoch in parallel with training.
+    pub fn start_epoch_training(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<EpochTrainOutput<K>>>
+    where
+        B: Send + 'static,
+        InK: Send + 'static,
+        OutK: Send + 'static,
+        K: PPOKernelTrait<B, InK, OutK> + Send + 'static,
+    {
+        match self {
+            Self::PPO(algorithm) => algorithm.start_epoch_training(),
+            Self::IPPO(algorithm) => algorithm.start_epoch_training(),
+        }
+    }
+
+    /// Restore kernels from a completed background training run and record training stats.
+    pub fn apply_epoch_result(&mut self, output: EpochTrainOutput<K>)
+    where
+        K: PPOKernelTrait<B, InK, OutK>,
+    {
+        match self {
+            Self::PPO(algorithm) => algorithm.apply_epoch_result(output),
+            Self::IPPO(algorithm) => algorithm.apply_epoch_result(output),
         }
     }
 }

@@ -1019,36 +1019,90 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                 let epoch_count_learner = Arc::clone(&epoch_count_shared);
                 let runtime_learner = Arc::clone(&runtime);
                 let device_learner = device.clone();
-                // trainer moves into the learner task; collection loop only holds traj_tx
+                // trainer moves into the learner task; collection loop only holds traj_tx.
+                // Training runs in a background thread via spawn_blocking while the learner
+                // continues draining traj_rx — eliminating traj_tx backpressure.
                 let learner_handle: tokio::task::JoinHandle<Result<(), StateManagerError>> =
                     tokio::spawn(async move {
                         let mut trainer = trainer;
-                        while let Some(traj) = traj_rx.recv().await {
-                            let trained =
-                                AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
-                                    &mut trainer, traj,
-                                )
-                                .await
-                                .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
-                            if trained {
-                                epoch_count_learner
-                                    .fetch_add(1, std::sync::atomic::Ordering::Release);
-                                let pi_module = trainer.acquire_model_module();
-                                let vf_module = trainer.acquire_value_module();
-                                if pi_module.is_some() || vf_module.is_some() {
-                                    let rt = Arc::clone(&runtime_learner);
-                                    let dev = device_learner.clone();
-                                    tokio::spawn(async move {
-                                        if let Some(m) = pi_module {
-                                            let _ = rt.perform_refresh_model(m, dev.clone()).await;
+                        let mut pending_train: Option<
+                            tokio::task::JoinHandle<relayrl_algorithms::EpochTrainOutput<KN>>,
+                        > = None;
+
+                        loop {
+                            if let Some(ref mut handle) = pending_train {
+                                tokio::select! {
+                                    // Training done — restore kernel, log, push weights
+                                    result = handle => {
+                                        pending_train = None;
+                                        let output = result.map_err(|e| StateManagerError::TrainerError(
+                                            format!("training task panicked: {e:?}")
+                                        ))?;
+                                        trainer.apply_epoch_result(output);
+                                        AlgorithmTrait::<RelayRLTrajectory>::log_epoch(&mut trainer);
+                                        epoch_count_learner.fetch_add(1, std::sync::atomic::Ordering::Release);
+
+                                        let pi_module = trainer.acquire_model_module();
+                                        let vf_module = trainer.acquire_value_module();
+                                        if pi_module.is_some() || vf_module.is_some() {
+                                            let rt = Arc::clone(&runtime_learner);
+                                            let dev = device_learner.clone();
+                                            tokio::spawn(async move {
+                                                if let Some(m) = pi_module {
+                                                    let _ = rt.perform_refresh_model(m, dev.clone()).await;
+                                                }
+                                                if let Some(v) = vf_module {
+                                                    let _ = rt.perform_refresh_value_model(v, dev).await;
+                                                }
+                                            });
                                         }
-                                        if let Some(v) = vf_module {
-                                            let _ = rt.perform_refresh_value_model(v, dev).await;
+                                    }
+
+                                    // New trajectory while training — insert but don't start another epoch
+                                    maybe_traj = traj_rx.recv() => {
+                                        match maybe_traj {
+                                            None => {
+                                                // Channel closed — drain pending training then exit
+                                                if let Some(h) = pending_train.take() {
+                                                    if let Ok(output) = h.await {
+                                                        trainer.apply_epoch_result(output);
+                                                        AlgorithmTrait::<RelayRLTrajectory>::log_epoch(&mut trainer);
+                                                        epoch_count_learner.fetch_add(1, std::sync::atomic::Ordering::Release);
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                            Some(traj) => {
+                                                AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
+                                                    &mut trainer, traj,
+                                                )
+                                                .await
+                                                .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
+                                                // epoch_started ignored — training already in flight
+                                            }
                                         }
-                                    });
+                                    }
+                                }
+                            } else {
+                                // No training in flight — receive trajectories
+                                match traj_rx.recv().await {
+                                    None => break,
+                                    Some(traj) => {
+                                        let epoch_started =
+                                            AlgorithmTrait::<RelayRLTrajectory>::receive_trajectory(
+                                                &mut trainer, traj,
+                                            )
+                                            .await
+                                            .map_err(|e| StateManagerError::TrainerError(e.to_string()))?;
+
+                                        if epoch_started {
+                                            pending_train = trainer.start_epoch_training();
+                                        }
+                                    }
                                 }
                             }
                         }
+
                         Ok(())
                     });
 

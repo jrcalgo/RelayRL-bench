@@ -20,8 +20,28 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+use super::replay_buffer::PPOFlatBatch;
+
 type AgentKey = String;
 const DEFAULT_AGENT_KEY: &str = "__default_ppo_agent__";
+
+/// Per-slot output from one background training run.
+pub struct SlotTrainResult<KN> {
+    pub kernel: KN,
+    pub pi_loss: f32,
+    pub delta_pi_loss: f32,
+    pub vf_loss: f32,
+    pub delta_vf_loss: f32,
+    pub kl: f32,
+    pub entropy: f32,
+    pub clipfrac: f32,
+    pub stop_iter: f32,
+}
+
+/// Output of one full epoch training (all agent slots, sequential).
+pub struct EpochTrainOutput<KN> {
+    pub slot_results: Vec<SlotTrainResult<KN>>,
+}
 
 fn resolve_agent_key(trajectory: &RelayRLTrajectory) -> AgentKey {
     trajectory
@@ -131,7 +151,7 @@ struct AgentRuntimeSlot<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: T
     #[allow(dead_code)]
     agent_key: AgentKey,
     trajectory_count: u64,
-    kernel: KN,
+    kernel: Option<KN>,
     replay_buffer: IndependentPPOReplayBuffer,
     _phantom: PhantomData<(B, InK, OutK)>,
 }
@@ -146,7 +166,7 @@ where
         Self {
             agent_key,
             trajectory_count: 0,
-            kernel,
+            kernel: Some(kernel),
             replay_buffer,
             _phantom: PhantomData,
         }
@@ -358,7 +378,7 @@ where
         KN: crate::templates::base_algorithm::StepKernelTrait<B, InK, OutK>,
     {
         let slot = self.runtime.components.agent_slots.first()?;
-        Some(slot.kernel.step::<IN_D, OUT_D>(obs, mask))
+        Some(slot.kernel.as_ref()?.step::<IN_D, OUT_D>(obs, mask))
     }
 
     /// Run only the value (baseline) head of the first registered kernel.
@@ -372,7 +392,81 @@ where
         KN: super::kernel::PPOKernelTrait<B, InK, OutK>,
     {
         let slot = self.runtime.components.agent_slots.first()?;
-        Some(slot.kernel.value_forward_only(obs_data, &[]))
+        Some(slot.kernel.as_ref()?.value_forward_only(obs_data, &[]))
+    }
+
+    /// Extract epoch data + kernel from all slots and launch SGD in a background thread.
+    /// Returns immediately after draining buffers; collection can fill the next epoch in parallel.
+    pub fn start_epoch_training(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<EpochTrainOutput<KN>>>
+    where
+        B: Send + 'static,
+        InK: Send + 'static,
+        OutK: Send + 'static,
+        KN: super::kernel::PPOKernelTrait<B, InK, OutK> + Send + 'static,
+    {
+        let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
+        for slot in &mut self.runtime.components.agent_slots {
+            let (obs_flat, obs_dim) = slot.replay_buffer.get_obs_flat_for_gae_blocking();
+            if obs_flat.is_empty() {
+                continue;
+            }
+            let values = slot.kernel.as_ref()?.value_forward_only_flat(&obs_flat, obs_dim);
+            let batch = slot.replay_buffer.finalize_and_drain_blocking(values)?;
+            let kernel = slot.kernel.take()?;
+            jobs.push((kernel, batch));
+        }
+        if jobs.is_empty() {
+            return None;
+        }
+
+        let clip_ratio = self.hyperparams.clip_ratio;
+        let ent_coef = self.hyperparams.ent_coef;
+        let target_kl = self.hyperparams.target_kl;
+        let train_pi_iters = self.hyperparams.train_pi_iters;
+        let train_vf_iters = self.hyperparams.train_vf_iters;
+        let mb_size_opt = self.hyperparams.mini_batch_size;
+
+        Some(tokio::task::spawn_blocking(move || {
+            let slot_results = jobs
+                .into_iter()
+                .map(|(kernel, batch)| {
+                    run_ppo_sgd_flat::<B, InK, OutK, KN>(
+                        kernel,
+                        batch,
+                        clip_ratio,
+                        ent_coef,
+                        target_kl,
+                        train_pi_iters,
+                        train_vf_iters,
+                        mb_size_opt,
+                    )
+                })
+                .collect();
+            EpochTrainOutput { slot_results }
+        }))
+    }
+
+    /// Restore kernels from a completed background training run and record training stats.
+    pub fn apply_epoch_result(&mut self, output: EpochTrainOutput<KN>) {
+        for (slot, result) in self
+            .runtime
+            .components
+            .agent_slots
+            .iter_mut()
+            .zip(output.slot_results.into_iter())
+        {
+            slot.kernel = Some(result.kernel);
+            self.runtime.components.epoch_logger.store("LossPi", result.pi_loss);
+            self.runtime.components.epoch_logger.store("DeltaLossPi", result.delta_pi_loss);
+            self.runtime.components.epoch_logger.store("LossV", result.vf_loss);
+            self.runtime.components.epoch_logger.store("DeltaLossV", result.delta_vf_loss);
+            self.runtime.components.epoch_logger.store("KL", result.kl);
+            self.runtime.components.epoch_logger.store("Entropy", result.entropy);
+            self.runtime.components.epoch_logger.store("ClipFrac", result.clipfrac);
+            self.runtime.components.epoch_logger.store("StopIter", result.stop_iter);
+        }
     }
 }
 
@@ -397,7 +491,7 @@ where
         use relayrl_types::data::tensor::{DType, NdArrayDType};
 
         let slot = self.runtime.components.agent_slots.first()?;
-        let layer_specs = slot.kernel.get_pi_layer_specs()?;
+        let layer_specs = slot.kernel.as_ref()?.get_pi_layer_specs()?;
 
         crate::acquire_model_module::<B>(
             "ppo",
@@ -416,7 +510,7 @@ where
         use relayrl_types::data::tensor::{DType, NdArrayDType};
 
         let slot = self.runtime.components.agent_slots.first()?;
-        let layer_specs = slot.kernel.get_vf_layer_specs()?;
+        let layer_specs = slot.kernel.as_ref()?.get_vf_layer_specs()?;
 
         crate::acquire_model_module::<B>(
             "ppo_vf",
@@ -427,6 +521,157 @@ where
             vec![1, 1],
             None,
         )
+    }
+}
+
+fn run_ppo_sgd_flat<B, InK, OutK, KN>(
+    mut kernel: KN,
+    batch: PPOFlatBatch,
+    clip_ratio: f32,
+    ent_coef: f32,
+    target_kl: f32,
+    train_pi_iters: u64,
+    train_vf_iters: u64,
+    mb_size_opt: Option<usize>,
+) -> SlotTrainResult<KN>
+where
+    B: Backend + BackendMatcher,
+    InK: TensorKind<B>,
+    OutK: TensorKind<B>,
+    KN: self::kernel::PPOKernelTrait<B, InK, OutK>,
+{
+    use rand::seq::SliceRandom;
+
+    let n = batch.act_flat.len();
+    let obs_dim = batch.obs_dim;
+
+    if n == 0 || obs_dim == 0 {
+        return SlotTrainResult {
+            kernel,
+            pi_loss: 0.0,
+            delta_pi_loss: 0.0,
+            vf_loss: 0.0,
+            delta_vf_loss: 0.0,
+            kl: 0.0,
+            entropy: 0.0,
+            clipfrac: 0.0,
+            stop_iter: 0.0,
+        };
+    }
+
+    let mb_size = mb_size_opt.unwrap_or(n).clamp(1, n);
+    let full_batch = mb_size >= n;
+
+    let mut rng = rand::rng();
+    let mut idx: Vec<usize> = (0..n).collect();
+
+    let mut first_pi_loss: Option<f32> = None;
+    let mut final_pi_loss = 0.0f32;
+    let mut final_kl = 0.0f32;
+    let mut final_entropy = 0.0f32;
+    let mut final_clipfrac = 0.0f32;
+    let mut stop_iter = 0u64;
+
+    'pi: for i in 0..train_pi_iters {
+        idx.shuffle(&mut rng);
+        let mut epoch_loss = 0.0f32;
+        let mut epoch_kl = 0.0f32;
+        let mut epoch_entropy = 0.0f32;
+        let mut epoch_clipfrac = 0.0f32;
+        let mut mb_count = 0usize;
+        let mut early_stop = false;
+
+        for start in (0..n).step_by(mb_size) {
+            let end = (start + mb_size).min(n);
+            let mb = &idx[start..end];
+            let (loss, info) = if full_batch {
+                kernel.ppo_pi_loss_flat(
+                    &batch.obs_flat,
+                    obs_dim,
+                    &batch.act_flat,
+                    &batch.adv_norm,
+                    &batch.logp_flat,
+                    clip_ratio,
+                    ent_coef,
+                    true,
+                )
+            } else {
+                let obs_mb: Vec<f32> = mb
+                    .iter()
+                    .flat_map(|&j| batch.obs_flat[j * obs_dim..(j + 1) * obs_dim].iter().copied())
+                    .collect();
+                let act_mb: Vec<i64> = mb.iter().map(|&j| batch.act_flat[j]).collect();
+                let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
+                let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp_flat[j]).collect();
+                kernel.ppo_pi_loss_flat(
+                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, clip_ratio, ent_coef, true,
+                )
+            };
+            epoch_loss += loss;
+            let mb_kl = info.get("kl").copied().unwrap_or(0.0);
+            epoch_kl = mb_kl;
+            epoch_entropy = info.get("entropy").copied().unwrap_or(0.0);
+            epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(0.0);
+            mb_count += 1;
+            if mb_kl > 1.5 * target_kl {
+                early_stop = true;
+                break;
+            }
+        }
+        if mb_count > 0 {
+            epoch_loss /= mb_count as f32;
+        }
+        first_pi_loss.get_or_insert(epoch_loss);
+        final_pi_loss = epoch_loss;
+        final_kl = epoch_kl;
+        final_entropy = epoch_entropy;
+        final_clipfrac = epoch_clipfrac;
+        stop_iter = i + 1;
+        if early_stop || final_kl > 1.5 * target_kl {
+            break 'pi;
+        }
+    }
+
+    let mut first_vf_loss: Option<f32> = None;
+    let mut final_vf_loss = 0.0f32;
+
+    for _ in 0..train_vf_iters {
+        idx.shuffle(&mut rng);
+        let mut epoch_loss = 0.0f32;
+        let mut mb_count = 0usize;
+        for start in (0..n).step_by(mb_size) {
+            let end = (start + mb_size).min(n);
+            let mb = &idx[start..end];
+            let loss = if full_batch {
+                kernel.ppo_vf_loss_flat(&batch.obs_flat, obs_dim, &batch.ret_flat)
+            } else {
+                let obs_mb: Vec<f32> = mb
+                    .iter()
+                    .flat_map(|&j| batch.obs_flat[j * obs_dim..(j + 1) * obs_dim].iter().copied())
+                    .collect();
+                let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
+                kernel.ppo_vf_loss_flat(&obs_mb, obs_dim, &ret_mb)
+            };
+            epoch_loss += loss;
+            mb_count += 1;
+        }
+        if mb_count > 0 {
+            epoch_loss /= mb_count as f32;
+        }
+        first_vf_loss.get_or_insert(epoch_loss);
+        final_vf_loss = epoch_loss;
+    }
+
+    SlotTrainResult {
+        kernel,
+        pi_loss: final_pi_loss,
+        delta_pi_loss: final_pi_loss - first_pi_loss.unwrap_or(final_pi_loss),
+        vf_loss: final_vf_loss,
+        delta_vf_loss: final_vf_loss - first_vf_loss.unwrap_or(final_vf_loss),
+        kl: final_kl,
+        entropy: final_entropy,
+        clipfrac: final_clipfrac,
+        stop_iter: stop_iter as f32,
     }
 }
 
@@ -479,8 +724,6 @@ where
 
         if self.all_agents_ready() {
             self.runtime.components.epoch_count += 1;
-            <Self as AlgorithmTrait<T>>::train_model(self);
-            <Self as AlgorithmTrait<T>>::log_epoch(self);
             self.reset_agent_counts();
             return Ok(true);
         }
@@ -489,150 +732,7 @@ where
     }
 
     fn train_model(&mut self) {
-        use rand::seq::SliceRandom;
-
-        for slot in &mut self.runtime.components.agent_slots {
-            // Deferred GAE: batch value inference over all epoch obs, then compute advantages
-            let (obs_flat_gae, obs_dim_gae) = slot.replay_buffer.get_obs_flat_for_gae_blocking();
-            if obs_flat_gae.is_empty() {
-                continue;
-            }
-            let values = slot.kernel.value_forward_only_flat(&obs_flat_gae, obs_dim_gae);
-
-            // Single lock: fill values + GAE + normalize adv + drain buffer
-            let batch_flat = match slot.replay_buffer.finalize_and_drain_blocking(values) {
-                Some(b) => b,
-                None => continue,
-            };
-
-            let n = batch_flat.act_flat.len();
-            let obs_dim = batch_flat.obs_dim;
-            if n == 0 || obs_dim == 0 {
-                continue;
-            }
-            // Full-batch (None) = 1 gradient step per pi_iter, matching RL4Sys/spinning-up.
-            // KL early stopping across pi_iters controls effective update count.
-            let mb_size = self.hyperparams.mini_batch_size.unwrap_or(n).clamp(1, n);
-            let full_batch = mb_size >= n;
-
-            // ── Minibatch training ────────────────────────────────────────────
-            let mut rng = rand::rng();
-            let mut idx: Vec<usize> = (0..n).collect();
-
-            let mut first_pi_loss: Option<f32> = None;
-            let mut final_pi_loss = 0.0f32;
-            let mut final_kl = 0.0f32;
-            let mut final_entropy = 0.0f32;
-            let mut final_clipfrac = 0.0f32;
-            let mut stop_iter = 0u64;
-
-            'pi: for i in 0..self.hyperparams.train_pi_iters {
-                idx.shuffle(&mut rng);
-                let mut epoch_loss = 0.0f32;
-                let mut epoch_kl = 0.0f32;
-                let mut epoch_entropy = 0.0f32;
-                let mut epoch_clipfrac = 0.0f32;
-                let mut mb_count = 0usize;
-                let mut early_stop = false;
-
-                for start in (0..n).step_by(mb_size) {
-                    let end = (start + mb_size).min(n);
-                    let mb = &idx[start..end];
-
-                    // Always compute stats for per-mini-batch KL early stopping.
-                    // Matches SB3/CleanRL/RL4Sys: break immediately when any mini-batch
-                    // KL exceeds 1.5 * target_kl (prevents excess policy drift).
-                    let (loss, info) = if full_batch {
-                        // Full-batch: use flat slices directly — no gather allocation
-                        slot.kernel.ppo_pi_loss_flat(
-                            &batch_flat.obs_flat, obs_dim,
-                            &batch_flat.act_flat,
-                            &batch_flat.adv_norm,
-                            &batch_flat.logp_flat,
-                            self.hyperparams.clip_ratio,
-                            self.hyperparams.ent_coef,
-                            true,
-                        )
-                    } else {
-                        let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| batch_flat.obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
-                        let act_mb: Vec<i64> = mb.iter().map(|&j| batch_flat.act_flat[j]).collect();
-                        let adv_mb: Vec<f32> = mb.iter().map(|&j| batch_flat.adv_norm[j]).collect();
-                        let logp_mb: Vec<f32> = mb.iter().map(|&j| batch_flat.logp_flat[j]).collect();
-                        slot.kernel.ppo_pi_loss_flat(
-                            &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb,
-                            self.hyperparams.clip_ratio,
-                            self.hyperparams.ent_coef,
-                            true,
-                        )
-                    };
-                    epoch_loss += loss;
-                    let mb_kl = info.get("kl").copied().unwrap_or(0.0);
-                    epoch_kl = mb_kl;
-                    epoch_entropy = info.get("entropy").copied().unwrap_or(0.0);
-                    epoch_clipfrac = info.get("clipfrac").copied().unwrap_or(0.0);
-                    mb_count += 1;
-
-                    if mb_kl > 1.5 * self.hyperparams.target_kl {
-                        early_stop = true;
-                        break;
-                    }
-                }
-
-                if mb_count > 0 {
-                    epoch_loss /= mb_count as f32;
-                }
-                first_pi_loss.get_or_insert(epoch_loss);
-                final_pi_loss = epoch_loss;
-                final_kl = epoch_kl;
-                final_entropy = epoch_entropy;
-                final_clipfrac = epoch_clipfrac;
-                stop_iter = i + 1;
-
-                if early_stop || final_kl > 1.5 * self.hyperparams.target_kl {
-                    break 'pi;
-                }
-            }
-
-            let mut first_vf_loss: Option<f32> = None;
-            let mut final_vf_loss = 0.0f32;
-
-            for _ in 0..self.hyperparams.train_vf_iters {
-                idx.shuffle(&mut rng);
-                let mut epoch_loss = 0.0f32;
-                let mut mb_count = 0usize;
-
-                for start in (0..n).step_by(mb_size) {
-                    let end = (start + mb_size).min(n);
-                    let mb = &idx[start..end];
-
-                    let loss = if full_batch {
-                        slot.kernel.ppo_vf_loss_flat(&batch_flat.obs_flat, obs_dim, &batch_flat.ret_flat)
-                    } else {
-                        let obs_mb: Vec<f32> = mb.iter().flat_map(|&j| batch_flat.obs_flat[j*obs_dim..(j+1)*obs_dim].iter().copied()).collect();
-                        let ret_mb: Vec<f32> = mb.iter().map(|&j| batch_flat.ret_flat[j]).collect();
-                        slot.kernel.ppo_vf_loss_flat(&obs_mb, obs_dim, &ret_mb)
-                    };
-                    epoch_loss += loss;
-                    mb_count += 1;
-                }
-
-                if mb_count > 0 { epoch_loss /= mb_count as f32; }
-                first_vf_loss.get_or_insert(epoch_loss);
-                final_vf_loss = epoch_loss;
-            }
-
-            let first_pi_loss = first_pi_loss.unwrap_or(final_pi_loss);
-            let first_vf_loss = first_vf_loss.unwrap_or(final_vf_loss);
-
-            self.runtime.components.epoch_logger.store("LossPi", final_pi_loss);
-            self.runtime.components.epoch_logger.store("DeltaLossPi", final_pi_loss - first_pi_loss);
-            self.runtime.components.epoch_logger.store("LossV", final_vf_loss);
-            self.runtime.components.epoch_logger.store("DeltaLossV", final_vf_loss - first_vf_loss);
-            self.runtime.components.epoch_logger.store("KL", final_kl);
-            self.runtime.components.epoch_logger.store("Entropy", final_entropy);
-            self.runtime.components.epoch_logger.store("ClipFrac", final_clipfrac);
-            self.runtime.components.epoch_logger.store("StopIter", stop_iter as f32);
-        }
+        // Training runs asynchronously via start_epoch_training; this stub satisfies the trait.
     }
 
     fn log_epoch(&mut self) {

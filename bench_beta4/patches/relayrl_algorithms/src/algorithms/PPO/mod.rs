@@ -7,7 +7,8 @@ pub mod multiagent;
 pub use independent::kernel::*;
 pub use independent::replay_buffer::*;
 pub use independent::{
-    IPPOAlgorithm, IPPOParams, IndependentPPOAlgorithm, PPOAlgorithm, PPOParams,
+    EpochTrainOutput, IPPOAlgorithm, IPPOParams, IndependentPPOAlgorithm, PPOAlgorithm, PPOParams,
+    SlotTrainResult,
 };
 pub use multiagent::kernel::MultiagentPPOKernel;
 pub use multiagent::replay_buffer::MultiagentPPOReplayBuffer;
