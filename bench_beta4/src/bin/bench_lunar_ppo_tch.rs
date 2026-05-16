@@ -42,6 +42,8 @@ const ENT_COEF: f32 = 0.01;
 const TRAJ_PER_EPOCH: u64 = 64;
 // Step-count epoch trigger: guarantees epoch buffer > MINI_BATCH_SIZE (2× → 2 mini-batches/iter)
 const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64 * 2; // 32768
+// ~90 steps/ep → drain ~365 eps/epoch; cap at ~2 drain-epochs to bound off-policy lag
+const MAX_BUFFERED_EPISODES: u64 = 800;
 // 600_000 loop iterations × 64 envs ≈ 38.4M total env frames
 const TOTAL_STEPS: usize = 600_000;
 const BUFFER_SIZE: ReplayBufferSize = 500_000;
@@ -119,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mini_batch_size: Some(MINI_BATCH_SIZE),
                 vf_coef: VF_COEF,
                 min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
+                max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_tch"),

@@ -110,6 +110,10 @@ pub struct IPPOParams {
     /// Set to 2 × mini_batch_size to guarantee at least 2 mini-batches per iter.
     #[serde(default)]
     pub min_steps_per_epoch: Option<u64>,
+    /// Maximum complete episodes held in the replay buffer at once.
+    /// When full, incoming trajectories are silently dropped to bound off-policy lag.
+    #[serde(default)]
+    pub max_buffered_episodes: Option<u64>,
 }
 
 fn default_vf_coef() -> f32 {
@@ -134,6 +138,7 @@ impl Default for IPPOParams {
             mini_batch_size: None,
             vf_coef: 0.5,
             min_steps_per_epoch: None,
+            max_buffered_episodes: None,
         }
     }
 }
@@ -318,6 +323,7 @@ where
             self.runtime.args.buffer_size,
             self.hyperparams.gamma,
             self.hyperparams.lam,
+            self.hyperparams.max_buffered_episodes.map(|v| v as usize),
         );
         let obs_dim = self.runtime.args.obs_dim;
         let act_dim = self.runtime.args.act_dim;
@@ -705,6 +711,11 @@ where
         let agent_key = resolve_agent_key(&extracted_traj);
         let agent_index = self.register_agent_slot(agent_key);
         let slot = &mut self.runtime.components.agent_slots[agent_index];
+
+        if slot.replay_buffer.is_full() {
+            return Ok(false);
+        }
+
         slot.trajectory_count += 1;
 
         let result: Box<dyn Any> = slot

@@ -66,16 +66,17 @@ pub struct PPOReplayBuffer {
     buffers: Arc<Mutex<Buffers>>,
     metadata: Arc<BufferMetadata>,
     return_running: Mutex<RunningMeanStd>,
+    max_buffered_episodes: Option<usize>,
 }
 
 impl Default for PPOReplayBuffer {
     fn default() -> Self {
-        Self::new(1_000_000, 0.99, 0.97)
+        Self::new(1_000_000, 0.99, 0.97, None)
     }
 }
 
 impl PPOReplayBuffer {
-    pub fn new(buffer_size: usize, gamma: f32, lam: f32) -> Self {
+    pub fn new(buffer_size: usize, gamma: f32, lam: f32, max_buffered_episodes: Option<usize>) -> Self {
         let buffers = Buffers {
             obs_flat: Vec::with_capacity(buffer_size * 8),
             obs_dim: 0,
@@ -97,6 +98,7 @@ impl PPOReplayBuffer {
                 buffer_path_start_idx: AtomicUsize::new(0),
             }),
             return_running: Mutex::new(RunningMeanStd::default()),
+            max_buffered_episodes,
         }
     }
 
@@ -353,6 +355,13 @@ impl PPOReplayBuffer {
     pub fn get_complete_step_count(&self) -> usize {
         let buffers = self.buffers.lock().unwrap();
         buffers.episode_boundaries.last().map(|&(_, end, _)| end).unwrap_or(0)
+    }
+
+    pub fn is_full(&self) -> bool {
+        match self.max_buffered_episodes {
+            None => false,
+            Some(max) => self.buffers.lock().unwrap().episode_boundaries.len() >= max,
+        }
     }
 
     /// Minimum number of complete episodes needed so their total steps >= min_steps.

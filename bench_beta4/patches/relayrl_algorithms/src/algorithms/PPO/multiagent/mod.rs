@@ -282,6 +282,7 @@ where
             self.runtime.args.buffer_size,
             self.hyperparams.gamma,
             self.hyperparams.lam,
+            None,
         );
         let index = self.runtime.components.agent_slots.len();
         self.runtime
