@@ -1,15 +1,24 @@
 """
 Sample Factory APPO benchmark on LunarLander-v3.
-Hyperparameters matched to RelayRL PPO conv5 config:
+Hyperparameters matched to RelayRL PPO conv5:
   64 envs, [128,128] net, gamma=0.999, lam=0.98, clip=0.2, ent=0.01,
   lr=2.5e-4, 4 gradient epochs per rollout, CPU.
-  rollout=128 → 64*128=8192 steps per update (RelayRL: ~64eps*90steps=5760).
-Target: mean episode return >= 250.
+
+Architecture notes:
+  - batched_sampling=True: single vectorized-env process (mirrors RelayRL's
+    single-process env loop rather than 64 separate Python subprocesses)
+  - normalize_returns=True: SF default for training stability; RelayRL doesn't
+    normalize, but this is an impl detail, not a core hyperparameter
+  - rollout=90 → 64*90=5760 steps/update ≈ RelayRL's 64eps*~90steps=5760
+  - batch_size=5760 (full-batch), num_epochs=4 → 4 full-batch gradient steps
 """
 
 import os
 import sys
 import time
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import gymnasium
 from sample_factory.envs.env_utils import register_env
@@ -21,30 +30,31 @@ def make_lunarlander(full_env_name, cfg=None, env_config=None, render_mode=None)
     return gymnasium.make("LunarLander-v3")
 
 
-# Register env at module level so child processes see it
 register_env("LunarLander-v3", make_lunarlander)
 
 
-# ── config (matched to RelayRL conv5) ────────────────────────────────────────
-
-N_WORKERS   = 64
-ROLLOUT     = 128   # 64 * 128 = 8192 steps per update
-BATCH_SIZE  = 8192  # Full-batch gradient step per epoch
-N_EPOCHS    = 4     # 4 gradient epochs per update
-GAMMA       = 0.999
-GAE_LAMBDA  = 0.98
-CLIP        = 0.2
-ENT_COEF    = 0.01
-LR          = 2.5e-4
-TRAIN_STEPS = 20_000_000
+# ── config ────────────────────────────────────────────────────────────────────
+N_WORKERS           = 1
+N_ENVS_PER_WORKER   = 64   # 64 parallel envs in one process
+ROLLOUT             = 90   # 64 * 90 = 5760 steps/update ≈ RelayRL's ~5760
+BATCH_SIZE          = 5760 # full-batch per gradient step
+N_BATCHES_PER_EPOCH = 1
+N_EPOCHS            = 4    # 4 gradient passes per update
+GAMMA               = 0.999
+GAE_LAMBDA          = 0.98
+CLIP                = 0.2
+ENT_COEF            = 0.01
+LR                  = 2.5e-4
+TRAIN_STEPS         = 20_000_000
 
 ARGV = [
     "--env=LunarLander-v3",
     "--algo=APPO",
     f"--num_workers={N_WORKERS}",
-    "--num_envs_per_worker=1",
+    f"--num_envs_per_worker={N_ENVS_PER_WORKER}",
     f"--rollout={ROLLOUT}",
     f"--batch_size={BATCH_SIZE}",
+    f"--num_batches_per_epoch={N_BATCHES_PER_EPOCH}",
     f"--num_epochs={N_EPOCHS}",
     f"--gamma={GAMMA}",
     f"--gae_lambda={GAE_LAMBDA}",
@@ -52,12 +62,12 @@ ARGV = [
     f"--exploration_loss_coeff={ENT_COEF}",
     f"--learning_rate={LR}",
     "--encoder_mlp_layers", "128", "128",
-    "--normalize_returns=False",
+    "--normalize_returns=True",
     f"--train_for_env_steps={TRAIN_STEPS}",
     "--device=cpu",
     "--with_wandb=False",
-    "--async_rl=True",
-    "--worker_num_splits=1",
+    "--batched_sampling=True",
+    "--async_rl=False",
     "--env_gpu_observations=False",
     "--seed=42",
     "--experiment=sf_lunarlander_bench",
@@ -72,7 +82,8 @@ if __name__ == "__main__":
     print("  Sample Factory APPO — LunarLander-v3 — 64 envs — CPU")
     print(f"  lr={LR}  rollout={ROLLOUT}  batch={BATCH_SIZE}  epochs={N_EPOCHS}")
     print(f"  gamma={GAMMA}  lam={GAE_LAMBDA}  clip={CLIP}  ent={ENT_COEF}")
-    print(f"  net=[128,128]  seed=42  env_count={N_WORKERS}")
+    print(f"  net=[128,128]  seed=42  env_count={N_WORKERS*N_ENVS_PER_WORKER}")
+    print(f"  batched_sampling=True  normalize_returns=True")
     print(f"  train_for_env_steps={TRAIN_STEPS}")
     print("=" * 60)
 
@@ -88,7 +99,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  Sample Factory RESULTS")
     print("=" * 60)
-    print(f"  n_envs       : {N_WORKERS}")
+    print(f"  n_envs       : {N_WORKERS * N_ENVS_PER_WORKER}")
     print(f"  total frames : {TRAIN_STEPS}")
     print(f"  wall time    : {wall:.1f}s")
     print(f"  fps          : {TRAIN_STEPS / wall:.0f}")
