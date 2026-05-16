@@ -1152,19 +1152,20 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                 // ── Inference pipeline: dedicated tokio task ──────────────────────────
                 // obs channel: collection → inference worker (capacity 2)
-                // act channel: inference worker → collection
+                // act channel: inference worker → collection; tuple is ((action_bytes, logp_bytes), values)
                 let (inf_obs_tx, mut inf_obs_rx) =
                     tokio::sync::mpsc::channel::<Vec<u8>>(2);
                 let (inf_act_tx, mut inf_act_rx) =
-                    tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>)>(2);
+                    tokio::sync::mpsc::channel::<((Vec<u8>, Vec<u8>), Vec<f32>)>(2);
                 let inf_runtime = Arc::clone(&runtime);
                 tokio::spawn(async move {
                     while let Some(obs) = inf_obs_rx.recv().await {
-                        match inf_runtime
-                            .perform_local_ppo_inference(&obs, n_envs, obs_dim, act_dim)
-                            .await
-                        {
-                            Ok(r) => { if inf_act_tx.send(r).await.is_err() { break; } }
+                        let (ppo_result, values) = tokio::join!(
+                            inf_runtime.perform_local_ppo_inference(&obs, n_envs, obs_dim, act_dim),
+                            inf_runtime.perform_local_value_inference(&obs, n_envs, obs_dim),
+                        );
+                        match ppo_result {
+                            Ok(r) => { if inf_act_tx.send((r, values)).await.is_err() { break; } }
                             Err(_) => break,
                         }
                     }
@@ -1180,7 +1181,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .map_err(|_| StateManagerError::InferenceRequestError(
                         "inference worker died at bootstrap".to_string()
                     ))?;
-                let (mut cur_action_bytes_i64, mut cur_logp_bytes) =
+                let ((mut cur_action_bytes_i64, mut cur_logp_bytes), mut cur_values) =
                     inf_act_rx.recv().await
                         .ok_or_else(|| StateManagerError::InferenceRequestError(
                             "inference worker closed at bootstrap".to_string()
@@ -1232,8 +1233,16 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                             cur_logp_bytes[logp_start..logp_start + 4].to_vec(),
                             SupportedTensorBackend::NdArray,
                         );
+                        let val_f32 = cur_values.get(i).copied().unwrap_or(0.0);
+                        let val_i = TensorData::new(
+                            vec![1],
+                            DType::NdArray(NdArrayDType::F32),
+                            val_f32.to_le_bytes().to_vec(),
+                            SupportedTensorBackend::NdArray,
+                        );
                         let mut data_map: HashMap<String, RelayRLData> = HashMap::new();
                         data_map.insert("logp_a".to_string(), RelayRLData::Tensor(logp_i));
+                        data_map.insert("value".to_string(), RelayRLData::Tensor(val_i));
 
                         per_env_ep_return[i] += rewards[i];
                         per_env_step_count[i] += 1;
@@ -1289,7 +1298,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                     // Receive next inference result — only blocks if ORT isn't done yet (gap time)
                     let t_wait = std::time::Instant::now();
-                    let (next_action, next_logp) = inf_act_rx.recv().await
+                    let ((next_action, next_logp), next_values) = inf_act_rx.recv().await
                         .ok_or_else(|| StateManagerError::InferenceRequestError(
                             "inference worker closed during collection".to_string()
                         ))?;
@@ -1299,6 +1308,7 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     cur_obs_bytes = new_obs_bytes;
                     cur_action_bytes_i64 = next_action;
                     cur_logp_bytes = next_logp;
+                    cur_values = next_values;
                 }
                 // Snapshot collection time BEFORE waiting for the learner to drain
                 let collection_wall_ns = t_collection_start.elapsed().as_nanos();

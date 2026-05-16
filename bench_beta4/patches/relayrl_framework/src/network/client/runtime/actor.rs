@@ -799,7 +799,7 @@ impl<
     /// Falls back to zeros if the value model is not yet loaded.
     pub(crate) async fn perform_local_value_inference(
         &self,
-        obs_bytes: Vec<u8>,
+        obs_bytes: &[u8],
         n_envs: usize,
         obs_dim: usize,
     ) -> Vec<f32> {
@@ -813,7 +813,7 @@ impl<
         let input = TensorData::new(
             vec![n_envs, obs_dim],
             DType::NdArray(NdArrayDType::F32),
-            obs_bytes,
+            obs_bytes.to_vec(),
             SupportedTensorBackend::NdArray,
         );
         let output = module

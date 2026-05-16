@@ -105,6 +105,11 @@ pub struct IPPOParams {
     /// VF loss coefficient in combined loss: total = pi_loss + vf_coef * vf_loss.
     #[serde(default = "default_vf_coef")]
     pub vf_coef: f32,
+    /// Minimum env steps across complete episodes before triggering training.
+    /// When set, overrides traj_per_epoch as the epoch trigger condition.
+    /// Set to 2 × mini_batch_size to guarantee at least 2 mini-batches per iter.
+    #[serde(default)]
+    pub min_steps_per_epoch: Option<u64>,
 }
 
 fn default_vf_coef() -> f32 {
@@ -128,6 +133,7 @@ impl Default for IPPOParams {
             max_episode_steps: None,
             mini_batch_size: None,
             vf_coef: 0.5,
+            min_steps_per_epoch: None,
         }
     }
 }
@@ -338,13 +344,17 @@ where
     }
 
     fn all_agents_ready(&self) -> bool {
-        self.runtime.components.agent_registry.len() > 0
-            && self
-                .runtime
-                .components
-                .agent_slots
-                .iter()
+        let has_agents = self.runtime.components.agent_registry.len() > 0;
+        if !has_agents { return false; }
+        if let Some(min_steps) = self.hyperparams.min_steps_per_epoch {
+            self.runtime.components.agent_slots.iter().all(|slot| {
+                slot.replay_buffer.get_complete_step_count() >= min_steps as usize
+                    && slot.replay_buffer.get_episode_count() > 0
+            })
+        } else {
+            self.runtime.components.agent_slots.iter()
                 .all(|slot| slot.trajectory_count >= self.hyperparams.traj_per_epoch)
+        }
     }
 
     fn reset_agent_counts(&mut self) {
@@ -414,15 +424,20 @@ where
         OutK: Send + 'static,
         KN: super::kernel::PPOKernelTrait<B, InK, OutK> + Send + 'static,
     {
-        let traj_per_epoch = self.hyperparams.traj_per_epoch as usize;
+        let use_step_trigger = self.hyperparams.min_steps_per_epoch.is_some();
+        let traj_n_default = self.hyperparams.traj_per_epoch as usize;
         let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
         for slot in &mut self.runtime.components.agent_slots {
-            let (obs_flat, obs_dim) = slot.replay_buffer.get_obs_flat_for_first_n_episodes(traj_per_epoch);
-            if obs_flat.is_empty() {
+            let n = if use_step_trigger {
+                slot.replay_buffer.get_episode_count()
+            } else {
+                traj_n_default
+            };
+            if n == 0 {
                 continue;
             }
-            let values = slot.kernel.as_ref()?.value_forward_only_flat(&obs_flat, obs_dim);
-            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(values, traj_per_epoch)?;
+            // Values stored inline from per-step inference; pass Vec::new() to use stored values.
+            let batch = slot.replay_buffer.finalize_and_drain_first_n_blocking(Vec::new(), n)?;
             let kernel = slot.kernel.take()?;
             jobs.push((kernel, batch));
         }

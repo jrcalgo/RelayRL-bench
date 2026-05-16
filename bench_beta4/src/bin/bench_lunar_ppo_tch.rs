@@ -40,6 +40,8 @@ const ENT_COEF: f32 = 0.01;
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
+// Step-count epoch trigger: guarantees epoch buffer > MINI_BATCH_SIZE (2× → 2 mini-batches/iter)
+const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64 * 2; // 32768
 // 600_000 loop iterations × 64 envs ≈ 38.4M total env frames
 const TOTAL_STEPS: usize = 600_000;
 const BUFFER_SIZE: ReplayBufferSize = 500_000;
@@ -116,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_episode_steps: Some(MAX_STEPS),
                 mini_batch_size: Some(MINI_BATCH_SIZE),
                 vf_coef: VF_COEF,
+                min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_tch"),

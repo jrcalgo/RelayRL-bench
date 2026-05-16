@@ -160,15 +160,17 @@ impl PPOReplayBuffer {
         }
         let obs_dim = buffers.obs_dim;
 
-        // Fill values
-        let fill_len = values.len().min(buffers.values.len());
-        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+        // Fill values only when external values provided; else use inline stored values
+        if !values.is_empty() {
+            let fill_len = values.len().min(buffers.values.len());
+            buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+        }
 
         // Compute GAE for each completed episode
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
             let bootstrap = if is_truncated {
-                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+                buffers.values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -226,15 +228,17 @@ impl PPOReplayBuffer {
         let obs_dim = buffers.obs_dim;
         let cut_step = buffers.episode_boundaries[n - 1].1;
 
-        // Fill values for steps 0..cut_step
-        let fill_len = values.len().min(cut_step).min(buffers.values.len());
-        buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+        // Fill values only when external values provided; else use inline stored values
+        if !values.is_empty() {
+            let fill_len = values.len().min(cut_step).min(buffers.values.len());
+            buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
+        }
 
         // Compute GAE for the first n episodes only
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
             let bootstrap = if *is_truncated {
-                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+                buffers.values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -307,6 +311,17 @@ impl PPOReplayBuffer {
             val_flat,
         })
     }
+
+    /// Number of complete episodes currently in the buffer.
+    pub fn get_episode_count(&self) -> usize {
+        self.buffers.lock().unwrap().episode_boundaries.len()
+    }
+
+    /// Total steps across all complete episodes (step index of last boundary end).
+    pub fn get_complete_step_count(&self) -> usize {
+        let buffers = self.buffers.lock().unwrap();
+        buffers.episode_boundaries.last().map(|&(_, end, _)| end).unwrap_or(0)
+    }
 }
 
 #[async_trait]
@@ -368,10 +383,24 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             };
             buffers.logp_flat.push(logp);
 
+            // Value: extract f32 scalar pre-computed during rollout (0.0 if not present)
+            let value = if let Some(map) = action.get_data() {
+                if let Some(RelayRLData::Tensor(val_td)) = map.get("value") {
+                    bytemuck::cast_slice::<u8, f32>(&val_td.data)
+                        .first()
+                        .copied()
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
             buffers.rewards.push(reward);
             buffers.advantages.push(0.0);
             buffers.returns.push(0.0);
-            buffers.values.push(0.0);
+            buffers.values.push(value);
 
             let next = self.metadata.buffer_pointer.load(Ordering::Relaxed) + 1;
             self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
