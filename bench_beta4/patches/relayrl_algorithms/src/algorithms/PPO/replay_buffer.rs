@@ -129,13 +129,23 @@ impl PPOReplayBuffer {
             v_next = vtrace[t];
         }
 
+        // Advantages use V-trace IS correction; returns use plain MC for stable VF training.
+        // V-trace targets as VF regression targets are a moving-target problem (v_t depends on
+        // V(s_t)) and introduce bias when IS ratios deviate from 1 — MC returns avoid this.
+        let mut mc_return = bootstrap;
+        let mut mc_returns = vec![0.0f32; n];
+        for t in (0..n).rev() {
+            mc_return = buffers.rewards[start + t] + gamma * mc_return;
+            mc_returns[t] = mc_return;
+        }
+
         for t in 0..n {
             let abs_t  = start + t;
             let v_t1vt = if t + 1 < n { vtrace[t + 1] } else { bootstrap };
             let rho    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
             buffers.advantages[abs_t] =
                 rho * (buffers.rewards[abs_t] + gamma * v_t1vt - buffers.values[abs_t]);
-            buffers.returns[abs_t] = vtrace[t];
+            buffers.returns[abs_t] = mc_returns[t];
         }
     }
 

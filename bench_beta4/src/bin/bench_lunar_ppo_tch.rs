@@ -29,14 +29,14 @@ const ENV_COUNT: u32 = 64;
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
-const PI_LR: f64 = 2e-4;  // lowered from 3e-4: V-trace IS weighting creates noisier gradients
+const PI_LR: f64 = 3e-4;
 const VF_LR: f64 = 3e-4; // kept for reference; kernel uses PI_LR for shared optimizer
 const VF_COEF: f32 = 2.0;
 const TRAIN_PI_ITERS: u64 = 10;
 const TRAIN_VF_ITERS: u64 = 10;
-const TARGET_KL: f32 = 0.03;  // tightened from 0.05: prevent large updates amplifying IS instability
-const MINI_BATCH_SIZE: usize = 8192;  // lowered from 16384: full-batch per epoch at min_steps=8192
-const ENT_COEF: f32 = 0.05;  // raised from 0.01: counter V-trace entropy collapse (IS weighting concentrates policy)
+const TARGET_KL: f32 = 0.05;
+const MINI_BATCH_SIZE: usize = 8192;
+const ENT_COEF: f32 = 0.01;
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
