@@ -31,7 +31,7 @@ const GAMMA: f32 = 0.99;
 const LAM: f32 = 0.95;
 const CLIP_RATIO: f32 = 0.2;
 #[allow(dead_code)]
-const PI_LR: f64 = 2.5e-4;
+const PI_LR: f64 = 1e-4;
 const VF_COEF: f32 = 1.0;
 const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
