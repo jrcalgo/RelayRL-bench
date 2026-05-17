@@ -37,7 +37,7 @@ const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0;          // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs × 90-step rollout
 const ENT_COEF: f32 = 0.01;
-const NORMALIZE_RETURNS: bool = false; // use per-batch advantage normalization only (no RunningMeanStd on returns)
+const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
