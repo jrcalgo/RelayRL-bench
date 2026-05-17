@@ -837,7 +837,7 @@ impl<
         match self.reloadable_model.load_full() {
             Some(model) => {
                 model
-                    .reload_from_module(model_module, model.version())
+                    .reload_from_module(model_module, model.version() + 1)
                     .await
                     .map_err(ActorError::from)?;
                 Ok(())

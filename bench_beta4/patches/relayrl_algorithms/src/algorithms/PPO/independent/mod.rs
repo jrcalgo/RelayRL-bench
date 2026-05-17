@@ -201,6 +201,10 @@ where
 struct RuntimeComponents<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: TensorKind<B>, KN> {
     epoch_logger: EpochLogger,
     epoch_count: u64,
+    /// Counts completed training epochs (increments only in apply_epoch_result).
+    /// Used as the version-filtering reference so wasted all_agents_ready() triggers
+    /// during background SGD don't inflate the version and filter out fresh data.
+    model_version: i64,
     agent_registry: AgentRegistry,
     agent_slots: Vec<AgentRuntimeSlot<B, InK, OutK, KN>>,
     seed_kernel: Option<KN>,
@@ -217,6 +221,7 @@ where
         Self {
             epoch_logger: EpochLogger::new(),
             epoch_count: 0,
+            model_version: 0,
             agent_registry: AgentRegistry::default(),
             agent_slots: Vec::new(),
             seed_kernel: Some(Default::default()),
@@ -304,6 +309,7 @@ where
                 components: RuntimeComponents::<B, InK, OutK, KN> {
                     epoch_logger: EpochLogger::new(),
                     epoch_count: 0,
+                    model_version: 0,
                     agent_registry: AgentRegistry::default(),
                     agent_slots: Vec::new(),
                     seed_kernel: Some(kernel),
@@ -438,7 +444,9 @@ where
     {
         let traj_n_default = self.hyperparams.traj_per_epoch as usize;
         let min_steps_opt = self.hyperparams.min_steps_per_epoch;
-        let current_version = self.runtime.components.epoch_count as i64;
+        // model_version increments only in apply_epoch_result (one real training completion = +1),
+        // so it never inflates from wasted all_agents_ready() triggers during background SGD.
+        let current_version = self.runtime.components.model_version + 1;
         let max_version_lag = self.hyperparams.max_version_lag;
         let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
         for slot in &mut self.runtime.components.agent_slots {
@@ -500,6 +508,9 @@ where
 
     /// Restore kernels from a completed background training run and record training stats.
     pub fn apply_epoch_result(&mut self, output: EpochTrainOutput<KN>) {
+        // Advance the model version — this is the only place it increments, ensuring
+        // it reflects real training completions and never inflates from wasted triggers.
+        self.runtime.components.model_version += 1;
         for (slot, result) in self
             .runtime
             .components
@@ -730,11 +741,9 @@ where
 
         slot.trajectory_count += 1;
 
-        // Tag with the current epoch so the replay buffer can filter stale episodes.
-        // epoch_count is the count AFTER the last completed training epoch, so episodes
-        // collected now have version = epoch_count; at drain time current_version = epoch_count+1,
-        // giving lag = 1 for all fresh data — within max_version_lag=1.
-        extracted_traj.policy_version = self.runtime.components.epoch_count as i64;
+        // policy_version was stamped by the actor with reloadable_model.version(), which now
+        // increments on every perform_refresh_model call (i.e. once per real model push).
+        // No override needed here — the actor-side value is the source of truth.
 
         let result: Box<dyn Any> = slot
             .replay_buffer
