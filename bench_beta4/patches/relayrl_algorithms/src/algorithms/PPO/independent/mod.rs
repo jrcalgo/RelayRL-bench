@@ -746,9 +746,12 @@ where
 
         slot.trajectory_count += 1;
 
-        // policy_version was stamped by the actor with reloadable_model.version(), which now
-        // increments on every perform_refresh_model call (i.e. once per real model push).
-        // No override needed here — the actor-side value is the source of truth.
+        // IndependentPPO runs without distributed actors (no flag_last_action path), so
+        // actor-side policy_version stamping never fires. Stamp here with model_version,
+        // which increments once per completed training epoch in apply_epoch_result.
+        // Episodes received during epoch N's training have model_version=N; at epoch N+1
+        // drain (current_version=N+1), lag = 1 ≤ max_version_lag → always fresh.
+        extracted_traj.policy_version = self.runtime.components.model_version;
 
         let result: Box<dyn Any> = slot
             .replay_buffer
