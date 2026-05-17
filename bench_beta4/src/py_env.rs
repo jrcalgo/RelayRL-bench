@@ -284,6 +284,7 @@ pub fn make_lunar_lander_vec(
         let gym = py.import("gymnasium")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("num_envs", num_envs as i64)?;
+        kwargs.set_item("max_episode_steps", 500i64)?;
         let vec_env = gym.call_method("make_vec", ("LunarLander-v3",), Some(&kwargs))?;
         // Initial reset so the env is in a clean state before set_env hands it to the framework
         vec_env.call_method0("reset")?;
