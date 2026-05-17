@@ -124,7 +124,7 @@ pub struct IPPOParams {
 }
 
 fn default_vf_coef() -> f32 { 0.5 }
-fn default_rho_bar() -> f32 { 2.0 }
+fn default_rho_bar() -> f32 { 1.3 }
 fn default_c_bar()   -> f32 { 1.0 }
 
 impl Default for IPPOParams {
@@ -146,7 +146,7 @@ impl Default for IPPOParams {
             vf_coef: 0.5,
             min_steps_per_epoch: None,
             max_buffered_episodes: None,
-            rho_bar: 2.0,
+            rho_bar: 1.3,
             c_bar:   1.0,
         }
     }
