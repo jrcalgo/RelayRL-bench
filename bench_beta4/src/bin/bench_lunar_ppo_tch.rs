@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vf_coef: VF_COEF,
                 min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
                 max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
-                max_version_lag: 1,
+                max_version_lag: 2,
                 normalize_returns: NORMALIZE_RETURNS,
                 ..Default::default()
             })),
