@@ -308,15 +308,18 @@ impl PPOReplayBuffer {
         })
     }
 
-    /// Drain exactly the first `n` complete episodes: compute GAE or V-trace, extract batch, shift
-    /// remainder to front of buffer. Returns None if fewer than `n` episodes are complete.
-    /// Pass `is_ratios=Vec::new()` to use GAE; pass IS ratios + rho_bar/c_bar for V-trace.
+    /// Drain exactly the first `n` complete episodes: compute GAE with optional IS weighting,
+    /// extract batch, shift remainder to front of buffer. Returns None if fewer than `n` episodes.
+    /// Pass `is_ratios=Vec::new()` for plain GAE; pass IS ratios + rho_bar for IS-weighted GAE.
+    /// IS-weighted GAE: compute full multi-step GAE advantages (with lam), then multiply each
+    /// A_t by min(ρ_t, ρ̄). Keeps GAE's long-horizon credit assignment while correcting for
+    /// off-policy data — avoids V-trace's single-step advantage that degrades on long episodes.
     pub fn finalize_and_drain_first_n_blocking(
         &self,
         values: Vec<f32>,
         is_ratios: Vec<f32>,
         rho_bar: f32,
-        c_bar: f32,
+        _c_bar: f32,
         n: usize,
     ) -> Option<PPOFlatBatch> {
         let mut buffers = self.buffers.lock().unwrap();
@@ -334,8 +337,7 @@ impl PPOReplayBuffer {
             buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
         }
 
-        // Compute advantages/returns for the first n episodes (V-trace or GAE)
-        let use_vtrace = !is_ratios.is_empty();
+        // GAE for all first-n episodes (multi-step λ advantages + MC returns)
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
             let bootstrap = if *is_truncated {
@@ -343,13 +345,16 @@ impl PPOReplayBuffer {
             } else {
                 0.0
             };
-            if use_vtrace {
-                Self::compute_vtrace_episode(
-                    &mut buffers, gamma, *start, *end, bootstrap,
-                    &is_ratios, rho_bar, c_bar,
-                );
-            } else {
-                Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+            Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+        }
+
+        // IS-weighted GAE: if IS ratios provided, scale each advantage by min(ρ_t, ρ̄).
+        // This amplifies gradient signal where the current policy improved beyond behavior
+        // policy (ρ > 1) while attenuating it where the policy degraded (ρ < 1).
+        if !is_ratios.is_empty() {
+            for abs_t in 0..cut_step {
+                let rho = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
+                buffers.advantages[abs_t] *= rho;
             }
         }
 
