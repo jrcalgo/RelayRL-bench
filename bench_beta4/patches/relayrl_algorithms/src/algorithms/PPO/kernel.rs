@@ -96,7 +96,6 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
-        val_old: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         vf_coef: f32,
@@ -125,7 +124,6 @@ mod training {
     use burn_core::module::Initializer;
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
-    use burn_optim::grad_clipping::GradientClipping;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 
     // Use LibTorch autodiff when the tch-backend feature is active; fall back to NdArray.
@@ -242,8 +240,7 @@ mod training {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
             let optimizer = AdamConfig::new()
-                .init::<TB, ActorCriticMlp<TB>>()
-                .with_grad_clipping(GradientClipping::Norm(4.0));
+                .init::<TB, ActorCriticMlp<TB>>();
             Self {
                 network: Some(network),
                 optimizer,
@@ -273,7 +270,6 @@ mod training {
             adv: &[f32],
             logp_old: &[f32],
             ret: &[f32],
-            val_old: &[f32],
             clip_ratio: f32,
             ent_coef: f32,
             compute_stats: bool,
@@ -325,24 +321,13 @@ mod training {
                 .mean();
             let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
 
-            // ── Value head with clipped VF loss ───────────────────────────
+            // ── Value head ────────────────────────────────────────────────
             let v_pred = net.vf_forward(obs).reshape([n]);
             let ret_tensor = Tensor::<TB, 1, Float>::from_data(
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
                 &device,
             );
-            let val_old_n = val_old.len().min(n);
-            let mut val_old_vec = val_old[..val_old_n].to_vec();
-            val_old_vec.resize(n, 0.0f32);
-            let val_old_tensor = Tensor::<TB, 1, Float>::from_data(
-                BurnTensorData::new(val_old_vec, [n]),
-                &device,
-            );
-            let v_diff = v_pred.clone() - val_old_tensor.clone();
-            let v_pred_clip = val_old_tensor + v_diff.clamp(-clip_ratio, clip_ratio);
-            let vf_loss1 = (v_pred - ret_tensor.clone()).powf_scalar(2.0);
-            let vf_loss2 = (v_pred_clip - ret_tensor).powf_scalar(2.0);
-            let vf_loss_t = vf_loss1.max_pair(vf_loss2).mean();
+            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
 
             // ── Combined loss → single backward pass ──────────────────────
             let vf_coef_t = self.vf_coef;
@@ -739,7 +724,6 @@ where
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
-        val_old: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         _vf_coef: f32, // stored on trainer; parameter kept for API symmetry
@@ -748,7 +732,7 @@ where
         #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         if let Some(trainer) = &mut self.actor_critic_trainer {
             return trainer.train_step_flat(
-                obs_flat, obs_dim, act_flat, adv, logp_old, ret, val_old,
+                obs_flat, obs_dim, act_flat, adv, logp_old, ret,
                 clip_ratio, ent_coef, compute_stats,
             );
         }

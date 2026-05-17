@@ -125,12 +125,6 @@ pub struct IPPOParams {
     /// when episode returns span multiple orders of magnitude.
     #[serde(default)]
     pub normalize_returns: bool,
-    /// Fixed-step rollout length per env per epoch. When set, the collection loop
-    /// force-sends a truncated partial trajectory every `rollout_len` steps per env
-    /// regardless of episode completion, matching SF's synchronised rollout collection.
-    /// None = episode-based collection (original behaviour).
-    #[serde(default)]
-    pub rollout_len: Option<usize>,
 }
 
 fn default_vf_coef()        -> f32 { 0.5 }
@@ -157,7 +151,6 @@ impl Default for IPPOParams {
             max_buffered_episodes: None,
             max_version_lag: 1,
             normalize_returns: false,
-            rollout_len: None,
         }
     }
 }
@@ -673,7 +666,6 @@ where
                 kernel.ppo_combined_loss_flat(
                     &batch.obs_flat, obs_dim,
                     &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &batch.ret_flat,
-                    &batch.val_flat,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             } else {
@@ -685,9 +677,8 @@ where
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp_flat[j]).collect();
                 let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
-                let val_mb: Vec<f32> = mb.iter().map(|&j| batch.val_flat[j]).collect();
                 kernel.ppo_combined_loss_flat(
-                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb, &val_mb,
+                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             };

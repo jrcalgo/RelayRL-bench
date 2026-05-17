@@ -125,7 +125,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
                 max_version_lag: 1,
                 normalize_returns: NORMALIZE_RETURNS,
-                rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_py"),

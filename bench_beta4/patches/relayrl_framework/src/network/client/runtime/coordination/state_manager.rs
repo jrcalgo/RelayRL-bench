@@ -986,10 +986,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     AlgorithmCfg::PPO(Some(p)) | AlgorithmCfg::IPPO(Some(p)) => p.traj_per_epoch as usize,
                     _ => 2,
                 };
-                let rollout_len: Option<usize> = match &algorithm_cfg {
-                    AlgorithmCfg::PPO(Some(p)) | AlgorithmCfg::IPPO(Some(p)) => p.rollout_len,
-                    _ => None,
-                };
                 let spec = match algorithm_cfg {
                     AlgorithmCfg::PPO(params) => PpoTrainerSpec::ppo(trainer_args, params),
                     AlgorithmCfg::IPPO(params) => PpoTrainerSpec::ippo(trainer_args, params),
@@ -1141,7 +1137,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                     .collect();
                 let mut per_env_episode: Vec<u64> = vec![0u64; n_envs];
                 let mut per_env_step_count: Vec<usize> = vec![0usize; n_envs];
-                let mut per_env_rollout_step: Vec<usize> = vec![0usize; n_envs];
                 // Stats tracking for convergence logging
                 let mut per_env_ep_return: Vec<f32> = vec![0.0f32; n_envs];
                 let mut completed_episodes: u64 = 0;
@@ -1300,7 +1295,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
 
                         per_env_ep_return[i] += rewards[i];
                         per_env_step_count[i] += 1;
-                        if rollout_len.is_some() { per_env_rollout_step[i] += 1; }
                         let action = RelayRLAction::new(
                             Some(obs_i),
                             Some(act_i),
@@ -1332,7 +1326,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                 }
                             }
                             per_env_step_count[i] = 0;
-                            per_env_rollout_step[i] = 0;
 
                             ns_traj += t_traj_env.elapsed().as_nanos();
                             // Bounded send: may block when learner is behind —
@@ -1348,20 +1341,6 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                     current_epoch, completed_episodes, mean_ret, ep_ret);
                             }
                         } else {
-                            if let Some(rl) = rollout_len {
-                                if per_env_rollout_step[i] >= rl {
-                                    let mut traj = std::mem::replace(
-                                        &mut per_env_trajs[i],
-                                        RelayRLTrajectory::new(rl + 1),
-                                    );
-                                    traj.set_episode(per_env_episode[i]);
-                                    traj.set_truncated();
-                                    per_env_rollout_step[i] = 0;
-                                    ns_traj += t_traj_env.elapsed().as_nanos();
-                                    let _ = traj_tx.send(traj).await;
-                                    continue;
-                                }
-                            }
                             ns_traj += t_traj_env.elapsed().as_nanos();
                         }
                     }
