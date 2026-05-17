@@ -27,7 +27,7 @@ const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 64;
 
-const GAMMA: f32 = 0.999;
+const GAMMA: f32 = 0.99;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 #[allow(dead_code)]

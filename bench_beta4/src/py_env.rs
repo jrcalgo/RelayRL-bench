@@ -14,6 +14,46 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Welford online mean/variance for observation normalization.
+struct ObsRunningStats {
+    mean: Vec<f64>,
+    var: Vec<f64>,
+    count: f64,
+}
+
+impl ObsRunningStats {
+    fn new(dim: usize) -> Self {
+        Self { mean: vec![0.0; dim], var: vec![1.0; dim], count: 0.0 }
+    }
+
+    fn update_batch(&mut self, flat: &[f32], n_envs: usize) {
+        let dim = self.mean.len();
+        for i in 0..n_envs {
+            for d in 0..dim {
+                let x = flat[i * dim + d] as f64;
+                self.count += 1.0;
+                let delta = x - self.mean[d];
+                self.mean[d] += delta / self.count;
+                let delta2 = x - self.mean[d];
+                self.var[d] += delta * delta2;
+            }
+        }
+    }
+
+    fn normalize(&self, flat: &[f32]) -> Vec<f32> {
+        let dim = self.mean.len();
+        let denom = (self.count - 1.0).max(1.0);
+        flat.chunks(dim)
+            .flat_map(|obs| {
+                obs.iter().enumerate().map(|(d, &v)| {
+                    let std = (self.var[d] / denom).sqrt().max(1e-8);
+                    ((v as f64 - self.mean[d]) / std).clamp(-10.0, 10.0) as f32
+                })
+            })
+            .collect()
+    }
+}
+
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use uuid::Uuid;
@@ -39,6 +79,7 @@ pub struct PyVectorEnv {
     uuid_to_idx: Mutex<HashMap<EnvironmentUuid, usize>>,
     /// Cached flat `[n_envs × obs_dim × 4]` bytes; updated on every step/reset.
     obs_cache: Mutex<Vec<u8>>,
+    obs_stats: Mutex<ObsRunningStats>,
 }
 
 // Py<PyAny> is Send + Sync in PyO3 0.14+. Mutex<...> is Send + Sync.
@@ -67,7 +108,17 @@ impl PyVectorEnv {
             uuids: Mutex::new(Vec::new()),
             uuid_to_idx: Mutex::new(HashMap::new()),
             obs_cache: Mutex::new(vec![0u8; n_envs * obs_dim * 4]),
+            obs_stats: Mutex::new(ObsRunningStats::new(obs_dim)),
         }
+    }
+
+    /// Update running obs stats and return normalized f32 bytes.
+    fn normalize_obs(&self, raw: Vec<u8>) -> Vec<u8> {
+        let floats: &[f32] = bytemuck::cast_slice(&raw);
+        let mut stats = self.obs_stats.lock().unwrap();
+        stats.update_batch(floats, self.n_envs);
+        let normed = stats.normalize(floats);
+        bytemuck::cast_slice::<f32, u8>(&normed).to_vec()
     }
 
     /// Extract a flat `Vec<u8>` of f32 bytes from a `[n_envs, obs_dim]` numpy array.
@@ -187,12 +238,13 @@ impl VectorEnvironment for PyVectorEnv {
                 result.clone()
             };
 
-            let flat = self.extract_flat_obs(py, &obs_obj).ok_or_else(|| {
+            let raw = self.extract_flat_obs(py, &obs_obj).ok_or_else(|| {
                 EnvironmentError::ObservationBuildingError(format!(
                     "reset: expected [{} × {}] float32 obs",
                     self.n_envs, self.obs_dim
                 ))
             })?;
+            let flat = self.normalize_obs(raw);
             *self.obs_cache.lock().unwrap() = flat.clone();
 
             let stride = self.obs_dim * 4;
@@ -229,7 +281,8 @@ impl VectorEnvironment for PyVectorEnv {
             let tup = result.downcast::<PyTuple>().ok()?;
 
             // obs: [n_envs, obs_dim] — auto-reset obs for done envs (gymnasium semantics)
-            let flat_obs = self.extract_flat_obs(py, &tup.get_item(0).ok()?)?;
+            let raw_obs = self.extract_flat_obs(py, &tup.get_item(0).ok()?)?;
+            let flat_obs = self.normalize_obs(raw_obs);
             *self.obs_cache.lock().unwrap() = flat_obs.clone();
 
             // rewards: gymnasium returns float64 by default; cast to float32
