@@ -102,6 +102,43 @@ impl PPOReplayBuffer {
         }
     }
 
+    fn compute_vtrace_episode(
+        buffers: &mut Buffers,
+        gamma: f32,
+        start: usize,
+        end: usize,
+        bootstrap: f32,
+        is_ratios: &[f32],
+        rho_bar: f32,
+        c_bar: f32,
+    ) {
+        let n = end - start;
+        if n == 0 { return; }
+
+        let mut vtrace = vec![0.0f32; n];
+        let mut v_next = bootstrap;
+        for t in (0..n).rev() {
+            let abs_t = start + t;
+            let r_t  = buffers.rewards[abs_t];
+            let v_t  = buffers.values[abs_t];
+            let v_t1 = if t + 1 < n { buffers.values[start + t + 1] } else { bootstrap };
+            let rho  = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
+            let c    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(c_bar);
+            let delta = rho * (r_t + gamma * v_t1 - v_t);
+            vtrace[t] = v_t + delta + gamma * c * (v_next - v_t1);
+            v_next = vtrace[t];
+        }
+
+        for t in 0..n {
+            let abs_t  = start + t;
+            let v_t1vt = if t + 1 < n { vtrace[t + 1] } else { bootstrap };
+            let rho    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
+            buffers.advantages[abs_t] =
+                rho * (buffers.rewards[abs_t] + gamma * v_t1vt - buffers.values[abs_t]);
+            buffers.returns[abs_t] = vtrace[t];
+        }
+    }
+
     /// Compute GAE for one episode [start, end) using values already in buffers.values.
     /// bootstrap: 0.0 for terminal episodes, V(s_T) for truncated.
     fn compute_gae_episode(
@@ -154,6 +191,20 @@ impl PPOReplayBuffer {
         }
         let cut_step = buffers.episode_boundaries[n - 1].1;
         (buffers.obs_flat[..cut_step * obs_dim].to_vec(), obs_dim)
+    }
+
+    pub fn get_act_flat_for_first_n_episodes(&self, n: usize) -> Vec<i64> {
+        let buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n { return Vec::new(); }
+        let cut_step = buffers.episode_boundaries[n - 1].1;
+        buffers.act_flat[..cut_step].to_vec()
+    }
+
+    pub fn get_logp_flat_for_first_n_episodes(&self, n: usize) -> Vec<f32> {
+        let buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n { return Vec::new(); }
+        let cut_step = buffers.episode_boundaries[n - 1].1;
+        buffers.logp_flat[..cut_step].to_vec()
     }
 
     /// Fill values buffer and compute GAE for all recorded episode boundaries.
@@ -247,9 +298,17 @@ impl PPOReplayBuffer {
         })
     }
 
-    /// Drain exactly the first `n` complete episodes: compute GAE, extract batch, shift
+    /// Drain exactly the first `n` complete episodes: compute GAE or V-trace, extract batch, shift
     /// remainder to front of buffer. Returns None if fewer than `n` episodes are complete.
-    pub fn finalize_and_drain_first_n_blocking(&self, values: Vec<f32>, n: usize) -> Option<PPOFlatBatch> {
+    /// Pass `is_ratios=Vec::new()` to use GAE; pass IS ratios + rho_bar/c_bar for V-trace.
+    pub fn finalize_and_drain_first_n_blocking(
+        &self,
+        values: Vec<f32>,
+        is_ratios: Vec<f32>,
+        rho_bar: f32,
+        c_bar: f32,
+        n: usize,
+    ) -> Option<PPOFlatBatch> {
         let mut buffers = self.buffers.lock().unwrap();
         if buffers.episode_boundaries.len() < n {
             return None;
@@ -265,7 +324,8 @@ impl PPOReplayBuffer {
             buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
         }
 
-        // Compute GAE for the first n episodes only
+        // Compute advantages/returns for the first n episodes (V-trace or GAE)
+        let use_vtrace = !is_ratios.is_empty();
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
             let bootstrap = if *is_truncated {
@@ -273,7 +333,14 @@ impl PPOReplayBuffer {
             } else {
                 0.0
             };
-            Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+            if use_vtrace {
+                Self::compute_vtrace_episode(
+                    &mut buffers, gamma, *start, *end, bootstrap,
+                    &is_ratios, rho_bar, c_bar,
+                );
+            } else {
+                Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
+            }
         }
 
         // Normalize advantages across these n episodes only
