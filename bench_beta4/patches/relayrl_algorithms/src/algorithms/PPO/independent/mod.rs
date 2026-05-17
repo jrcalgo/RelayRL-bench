@@ -125,6 +125,12 @@ pub struct IPPOParams {
     /// when episode returns span multiple orders of magnitude.
     #[serde(default)]
     pub normalize_returns: bool,
+    /// Fixed-step rollout length per env per epoch. When set, the collection loop
+    /// force-sends a truncated partial trajectory every `rollout_len` steps per env
+    /// regardless of episode completion, matching SF's synchronised rollout collection.
+    /// None = episode-based collection (original behaviour).
+    #[serde(default)]
+    pub rollout_len: Option<usize>,
 }
 
 fn default_vf_coef()        -> f32 { 0.5 }
@@ -151,6 +157,7 @@ impl Default for IPPOParams {
             max_buffered_episodes: None,
             max_version_lag: 1,
             normalize_returns: false,
+            rollout_len: None,
         }
     }
 }
