@@ -114,18 +114,16 @@ pub struct IPPOParams {
     /// When full, incoming trajectories are silently dropped to bound off-policy lag.
     #[serde(default)]
     pub max_buffered_episodes: Option<u64>,
-    /// V-trace IS clip for advantages (ρ̄). Set >1 to allow gradient amplification for
-    /// improving actions. Use 1.0 for standard IMPALA-style clipping (no amplification).
-    #[serde(default = "default_rho_bar")]
-    pub rho_bar: f32,
-    /// V-trace trace coefficient clip (c̄). Controls credit assignment propagation.
-    #[serde(default = "default_c_bar")]
-    pub c_bar: f32,
+    /// Version-aware staleness filter (RL4Sys-style): episodes collected more than this many
+    /// policy versions behind the current training epoch are drained but excluded from training.
+    /// lag = current_epoch - episode_policy_version. Default 1 allows data from the most recent
+    /// model push only. Set to i64::MAX to disable filtering (plain GAE, no version check).
+    #[serde(default = "default_max_version_lag")]
+    pub max_version_lag: i64,
 }
 
-fn default_vf_coef() -> f32 { 0.5 }
-fn default_rho_bar() -> f32 { 2.0 }
-fn default_c_bar()   -> f32 { 1.0 }
+fn default_vf_coef()        -> f32 { 0.5 }
+fn default_max_version_lag() -> i64 { 1 }
 
 impl Default for IPPOParams {
     fn default() -> Self {
@@ -146,8 +144,7 @@ impl Default for IPPOParams {
             vf_coef: 0.5,
             min_steps_per_epoch: None,
             max_buffered_episodes: None,
-            rho_bar: 2.0,
-            c_bar:   1.0,
+            max_version_lag: 1,
         }
     }
 }
@@ -461,20 +458,10 @@ where
             } else {
                 Vec::new()
             };
-            let is_ratios = if !obs_flat.is_empty() {
-                let act_flat = slot.replay_buffer.get_act_flat_for_first_n_episodes(n);
-                let logp_old = slot.replay_buffer.get_logp_flat_for_first_n_episodes(n);
-                let logp_new = kernel.get_pi_logprobs_flat(&obs_flat, obs_dim_peek, &act_flat);
-                logp_new.iter().zip(logp_old.iter())
-                    .map(|(&lnew, &lold)| (lnew - lold).exp())
-                    .collect::<Vec<f32>>()
-            } else {
-                Vec::new()
-            };
-            let rho_bar = self.hyperparams.rho_bar;
-            let c_bar   = self.hyperparams.c_bar;
+            let current_version = self.runtime.components.epoch_count as i64;
+            let max_version_lag = self.hyperparams.max_version_lag;
             let batch = slot.replay_buffer
-                .finalize_and_drain_first_n_blocking(fresh_values, is_ratios, rho_bar, c_bar, n)?;
+                .finalize_and_drain_first_n_blocking(fresh_values, current_version, max_version_lag, n)?;
             jobs.push((kernel, batch));
         }
         if jobs.is_empty() {

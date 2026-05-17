@@ -743,7 +743,10 @@ impl<
                 })
             };
 
-            if let Some(trajectory) = maybe_trajectory {
+            if let Some(mut trajectory) = maybe_trajectory {
+                // Stamp the inference model version for replay buffer staleness filtering
+                let pv = self.reloadable_model.load_full().map(|m| m.version()).unwrap_or(0);
+                trajectory.policy_version = pv;
                 self.send_trajectory(trajectory).await?;
             }
 
@@ -855,7 +858,9 @@ impl<
             state.take_shutdown_trajectories(self.actor_id, max_traj_length)
         };
 
-        for trajectory in trajectories {
+        for mut trajectory in trajectories {
+            let pv = self.reloadable_model.load_full().map(|m| m.version()).unwrap_or(0);
+            trajectory.policy_version = pv;
             self.send_trajectory(trajectory).await?;
         }
 

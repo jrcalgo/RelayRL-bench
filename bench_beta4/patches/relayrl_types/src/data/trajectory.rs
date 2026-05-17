@@ -55,6 +55,12 @@ pub struct RelayRLTrajectory {
     /// determine the GAE bootstrap: 0 for terminals, V(s_T) for truncations.
     #[serde(default)]
     pub is_truncated: bool,
+    /// Policy version (HotReloadableModel::version()) active on the inference worker
+    /// when this episode was collected. Used by the replay buffer for version-aware
+    /// staleness filtering: episodes with (current_epoch - policy_version) > max_version_lag
+    /// are drained but excluded from the training batch.
+    #[serde(default)]
+    pub policy_version: i64,
 }
 
 impl Default for RelayRLTrajectory {
@@ -71,6 +77,7 @@ impl Default for RelayRLTrajectory {
             training_step: None,
             bootstrap_value: 0.0,
             is_truncated: false,
+            policy_version: 0,
         }
     }
 }
@@ -88,6 +95,7 @@ impl RelayRLTrajectory {
             training_step: None,
             bootstrap_value: 0.0,
             is_truncated: false,
+            policy_version: 0,
         }
     }
 
@@ -103,6 +111,7 @@ impl RelayRLTrajectory {
             training_step: None,
             bootstrap_value: 0.0,
             is_truncated: false,
+            policy_version: 0,
         }
     }
 
@@ -125,6 +134,7 @@ impl RelayRLTrajectory {
             training_step,
             bootstrap_value: 0.0,
             is_truncated: false,
+            policy_version: 0,
         }
     }
 

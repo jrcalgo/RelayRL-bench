@@ -42,6 +42,9 @@ struct Buffers {
     values: Vec<f32>,
     // Episode boundaries for deferred GAE: (path_start, path_end, is_truncated)
     episode_boundaries: Vec<(usize, usize, bool)>,
+    // Policy version (HotReloadableModel::version()) when each episode was collected.
+    // Parallel to episode_boundaries; used for version-aware staleness filtering at drain time.
+    episode_versions: Vec<i64>,
 }
 
 struct BufferMetadata {
@@ -87,6 +90,7 @@ impl PPOReplayBuffer {
             returns: Vec::with_capacity(buffer_size),
             values: Vec::with_capacity(buffer_size),
             episode_boundaries: Vec::new(),
+            episode_versions: Vec::new(),
         };
         Self {
             buffers: Arc::new(Mutex::new(buffers)),
@@ -99,53 +103,6 @@ impl PPOReplayBuffer {
             }),
             return_running: Mutex::new(RunningMeanStd::default()),
             max_buffered_episodes,
-        }
-    }
-
-    fn compute_vtrace_episode(
-        buffers: &mut Buffers,
-        gamma: f32,
-        start: usize,
-        end: usize,
-        bootstrap: f32,
-        is_ratios: &[f32],
-        rho_bar: f32,
-        c_bar: f32,
-    ) {
-        let n = end - start;
-        if n == 0 { return; }
-
-        let mut vtrace = vec![0.0f32; n];
-        let mut v_next = bootstrap;
-        for t in (0..n).rev() {
-            let abs_t = start + t;
-            let r_t  = buffers.rewards[abs_t];
-            let v_t  = buffers.values[abs_t];
-            let v_t1 = if t + 1 < n { buffers.values[start + t + 1] } else { bootstrap };
-            let rho  = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
-            let c    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(c_bar);
-            let delta = rho * (r_t + gamma * v_t1 - v_t);
-            vtrace[t] = v_t + delta + gamma * c * (v_next - v_t1);
-            v_next = vtrace[t];
-        }
-
-        // Advantages use V-trace IS correction; returns use plain MC for stable VF training.
-        // V-trace targets as VF regression targets are a moving-target problem (v_t depends on
-        // V(s_t)) and introduce bias when IS ratios deviate from 1 — MC returns avoid this.
-        let mut mc_return = bootstrap;
-        let mut mc_returns = vec![0.0f32; n];
-        for t in (0..n).rev() {
-            mc_return = buffers.rewards[start + t] + gamma * mc_return;
-            mc_returns[t] = mc_return;
-        }
-
-        for t in 0..n {
-            let abs_t  = start + t;
-            let v_t1vt = if t + 1 < n { vtrace[t + 1] } else { bootstrap };
-            let rho    = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
-            buffers.advantages[abs_t] =
-                rho * (buffers.rewards[abs_t] + gamma * v_t1vt - buffers.values[abs_t]);
-            buffers.returns[abs_t] = mc_returns[t];
         }
     }
 
@@ -201,20 +158,6 @@ impl PPOReplayBuffer {
         }
         let cut_step = buffers.episode_boundaries[n - 1].1;
         (buffers.obs_flat[..cut_step * obs_dim].to_vec(), obs_dim)
-    }
-
-    pub fn get_act_flat_for_first_n_episodes(&self, n: usize) -> Vec<i64> {
-        let buffers = self.buffers.lock().unwrap();
-        if buffers.episode_boundaries.len() < n { return Vec::new(); }
-        let cut_step = buffers.episode_boundaries[n - 1].1;
-        buffers.act_flat[..cut_step].to_vec()
-    }
-
-    pub fn get_logp_flat_for_first_n_episodes(&self, n: usize) -> Vec<f32> {
-        let buffers = self.buffers.lock().unwrap();
-        if buffers.episode_boundaries.len() < n { return Vec::new(); }
-        let cut_step = buffers.episode_boundaries[n - 1].1;
-        buffers.logp_flat[..cut_step].to_vec()
     }
 
     /// Fill values buffer and compute GAE for all recorded episode boundaries.
@@ -296,6 +239,7 @@ impl PPOReplayBuffer {
         buffers.returns.clear();
         buffers.values.clear();
         buffers.episode_boundaries.clear();
+        buffers.episode_versions.clear();
 
         Some(PPOFlatBatch {
             obs_flat,
@@ -308,18 +252,16 @@ impl PPOReplayBuffer {
         })
     }
 
-    /// Drain exactly the first `n` complete episodes: compute GAE with optional IS weighting,
-    /// extract batch, shift remainder to front of buffer. Returns None if fewer than `n` episodes.
-    /// Pass `is_ratios=Vec::new()` for plain GAE; pass IS ratios + rho_bar for IS-weighted GAE.
-    /// IS-weighted GAE: compute full multi-step GAE advantages (with lam), then multiply each
-    /// A_t by min(ρ_t, ρ̄). Keeps GAE's long-horizon credit assignment while correcting for
-    /// off-policy data — avoids V-trace's single-step advantage that degrades on long episodes.
+    /// Drain exactly the first `n` complete episodes using version-aware filtering (RL4Sys-style).
+    /// Computes GAE for all n episodes, then builds the training batch from only non-stale episodes
+    /// — those where (current_version - episode_version) <= max_version_lag. Stale episodes are
+    /// drained from the buffer but excluded from the batch to prevent off-policy gradient noise.
+    /// Returns None if fewer than `n` episodes exist, or if all n are stale.
     pub fn finalize_and_drain_first_n_blocking(
         &self,
         values: Vec<f32>,
-        is_ratios: Vec<f32>,
-        rho_bar: f32,
-        _c_bar: f32,
+        current_version: i64,
+        max_version_lag: i64,
         n: usize,
     ) -> Option<PPOFlatBatch> {
         let mut buffers = self.buffers.lock().unwrap();
@@ -337,8 +279,9 @@ impl PPOReplayBuffer {
             buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
         }
 
-        // GAE for all first-n episodes (multi-step λ advantages + MC returns)
+        // Compute GAE for all n episodes regardless of staleness (they are all drained below)
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
+        let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
             let bootstrap = if *is_truncated {
                 buffers.values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
@@ -348,68 +291,58 @@ impl PPOReplayBuffer {
             Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
         }
 
-        // IS-weighted GAE: if IS ratios provided, scale each advantage by min(ρ_t, ρ̄).
-        // This amplifies gradient signal where the current policy improved beyond behavior
-        // policy (ρ > 1) while attenuating it where the policy degraded (ρ < 1).
-        if !is_ratios.is_empty() {
-            for abs_t in 0..cut_step {
-                let rho = is_ratios.get(abs_t).copied().unwrap_or(1.0).min(rho_bar);
-                buffers.advantages[abs_t] *= rho;
+        // Build batch from only non-stale episodes (version lag within budget)
+        let mut fresh_obs:  Vec<f32> = Vec::new();
+        let mut fresh_acts: Vec<i64> = Vec::new();
+        let mut fresh_logp: Vec<f32> = Vec::new();
+        let mut fresh_adv:  Vec<f32> = Vec::new();
+        let mut fresh_ret:  Vec<f32> = Vec::new();
+        let mut fresh_val:  Vec<f32> = Vec::new();
+
+        for (i, &(start, end, _)) in boundaries_n.iter().enumerate() {
+            let ep_version = versions_n.get(i).copied().unwrap_or(0);
+            let lag = current_version.saturating_sub(ep_version);
+            if lag > max_version_lag {
+                continue; // stale: drain but don't train on this episode
             }
+            let obs_start = start * obs_dim;
+            let obs_end   = end   * obs_dim;
+            fresh_obs.extend_from_slice(&buffers.obs_flat[obs_start..obs_end]);
+            fresh_acts.extend_from_slice(&buffers.act_flat[start..end]);
+            fresh_logp.extend_from_slice(&buffers.logp_flat[start..end]);
+            fresh_adv.extend_from_slice(&buffers.advantages[start..end]);
+            fresh_ret.extend_from_slice(&buffers.returns[start..end]);
+            fresh_val.extend_from_slice(&buffers.values[start..end]);
         }
 
-        // Normalize advantages across these n episodes only
-        let adv_raw = &buffers.advantages[..cut_step];
-        let (adv_mean, adv_std) = scalar_stats(adv_raw);
-        let adv_norm = compute_normed_advantages(adv_raw, adv_mean, adv_std.max(1e-8));
-
-        // Extract batch for 0..cut_step
-        let obs_end = cut_step * obs_dim;
-        let obs_flat  = buffers.obs_flat[..obs_end].to_vec();
-        let act_flat  = buffers.act_flat[..cut_step].to_vec();
-        let logp_flat = buffers.logp_flat[..cut_step].to_vec();
-        let ret_raw = &buffers.returns[..cut_step];
-        let ret_flat = {
-            let mut rrs = self.return_running.lock().unwrap();
-            rrs.update_batch(ret_raw);
-            compute_normed_advantages(ret_raw, rrs.mean_f32(), rrs.std())
-        };
-        let val_flat  = buffers.values[..cut_step].to_vec();
-
-        // Shift remaining data to front of buffer
+        // Shift remaining data to front of buffer (always drain all n episodes)
         let total_steps = self.metadata.buffer_pointer.load(Ordering::Relaxed);
         let remaining = total_steps - cut_step;
+        let obs_end_cut = cut_step * obs_dim;
+        let obs_total = obs_end_cut + remaining * obs_dim;
 
-        let obs_total = obs_end + remaining * obs_dim;
-        buffers.obs_flat.copy_within(obs_end..obs_total, 0);
+        buffers.obs_flat.copy_within(obs_end_cut..obs_total, 0);
         buffers.obs_flat.truncate(remaining * obs_dim);
-
         buffers.act_flat.copy_within(cut_step..total_steps, 0);
         buffers.act_flat.truncate(remaining);
-
         buffers.logp_flat.copy_within(cut_step..total_steps, 0);
         buffers.logp_flat.truncate(remaining);
-
         buffers.rewards.copy_within(cut_step..total_steps, 0);
         buffers.rewards.truncate(remaining);
-
         buffers.advantages.copy_within(cut_step..total_steps, 0);
         buffers.advantages.truncate(remaining);
-
         buffers.returns.copy_within(cut_step..total_steps, 0);
         buffers.returns.truncate(remaining);
-
         buffers.values.copy_within(cut_step..total_steps, 0);
         buffers.values.truncate(remaining);
 
-        // Remove first n episode boundaries and re-offset the rest
         let remaining_boundaries: Vec<_> = buffers.episode_boundaries[n..]
             .iter()
             .map(|&(s, e, trunc)| (s - cut_step, e - cut_step, trunc))
             .collect();
         buffers.episode_boundaries = remaining_boundaries;
+        buffers.episode_versions = buffers.episode_versions[n..].to_vec();
 
-        // Update atomics
         self.metadata.buffer_pointer.store(remaining, Ordering::Relaxed);
         let old_path_start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
         self.metadata.buffer_path_start_idx.store(
@@ -417,14 +350,29 @@ impl PPOReplayBuffer {
             Ordering::Relaxed,
         );
 
+        // All episodes were stale — skip training this epoch
+        if fresh_obs.is_empty() {
+            return None;
+        }
+
+        // Normalize advantages across the fresh batch
+        let (adv_mean, adv_std) = scalar_stats(&fresh_adv);
+        let adv_norm = compute_normed_advantages(&fresh_adv, adv_mean, adv_std.max(1e-8));
+
+        let ret_flat = {
+            let mut rrs = self.return_running.lock().unwrap();
+            rrs.update_batch(&fresh_ret);
+            compute_normed_advantages(&fresh_ret, rrs.mean_f32(), rrs.std())
+        };
+
         Some(PPOFlatBatch {
-            obs_flat,
+            obs_flat: fresh_obs,
             obs_dim,
-            act_flat,
-            logp_flat,
+            act_flat: fresh_acts,
+            logp_flat: fresh_logp,
             adv_norm,
             ret_flat,
-            val_flat,
+            val_flat: fresh_val,
         })
     }
 
@@ -544,6 +492,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
                 let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
                 let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
                 buffers.episode_boundaries.push((start, end, trajectory.is_truncated));
+                buffers.episode_versions.push(trajectory.policy_version);
                 self.metadata.buffer_path_start_idx.store(end, Ordering::Relaxed);
             }
         }
