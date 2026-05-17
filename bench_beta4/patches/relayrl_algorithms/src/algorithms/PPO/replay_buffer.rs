@@ -376,6 +376,56 @@ impl PPOReplayBuffer {
         })
     }
 
+    /// Remove all leading stale episodes from the buffer front.
+    /// An episode is stale if (current_version - ep_version) > max_version_lag.
+    /// Called before each epoch drain so `episodes_needed_for_steps` sees only fresh data.
+    pub fn purge_stale_episodes(&self, current_version: i64, max_version_lag: i64) {
+        let mut buffers = self.buffers.lock().unwrap();
+        let stale_count = buffers.episode_versions.iter()
+            .take_while(|&&v| current_version.saturating_sub(v) > max_version_lag)
+            .count();
+        if stale_count == 0 {
+            return;
+        }
+        let cut_step = buffers.episode_boundaries[stale_count - 1].1;
+        let total_steps = self.metadata.buffer_pointer.load(Ordering::Relaxed);
+        let remaining = total_steps - cut_step;
+        let obs_dim = buffers.obs_dim;
+        let obs_end_cut = cut_step * obs_dim;
+        let obs_total = obs_end_cut + remaining * obs_dim;
+
+        if remaining > 0 {
+            buffers.obs_flat.copy_within(obs_end_cut..obs_total, 0);
+            buffers.act_flat.copy_within(cut_step..total_steps, 0);
+            buffers.logp_flat.copy_within(cut_step..total_steps, 0);
+            buffers.rewards.copy_within(cut_step..total_steps, 0);
+            buffers.advantages.copy_within(cut_step..total_steps, 0);
+            buffers.returns.copy_within(cut_step..total_steps, 0);
+            buffers.values.copy_within(cut_step..total_steps, 0);
+        }
+        buffers.obs_flat.truncate(remaining * obs_dim);
+        buffers.act_flat.truncate(remaining);
+        buffers.logp_flat.truncate(remaining);
+        buffers.rewards.truncate(remaining);
+        buffers.advantages.truncate(remaining);
+        buffers.returns.truncate(remaining);
+        buffers.values.truncate(remaining);
+
+        let remaining_boundaries: Vec<_> = buffers.episode_boundaries[stale_count..]
+            .iter()
+            .map(|&(s, e, trunc)| (s - cut_step, e - cut_step, trunc))
+            .collect();
+        buffers.episode_boundaries = remaining_boundaries;
+        buffers.episode_versions = buffers.episode_versions[stale_count..].to_vec();
+
+        self.metadata.buffer_pointer.store(remaining, Ordering::Relaxed);
+        let old_path_start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
+        self.metadata.buffer_path_start_idx.store(
+            old_path_start.saturating_sub(cut_step),
+            Ordering::Relaxed,
+        );
+    }
+
     /// Number of complete episodes currently in the buffer.
     pub fn get_episode_count(&self) -> usize {
         self.buffers.lock().unwrap().episode_boundaries.len()

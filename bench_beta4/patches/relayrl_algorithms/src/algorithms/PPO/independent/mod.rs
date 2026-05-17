@@ -438,8 +438,13 @@ where
     {
         let traj_n_default = self.hyperparams.traj_per_epoch as usize;
         let min_steps_opt = self.hyperparams.min_steps_per_epoch;
+        let current_version = self.runtime.components.epoch_count as i64;
+        let max_version_lag = self.hyperparams.max_version_lag;
         let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
         for slot in &mut self.runtime.components.agent_slots {
+            // Purge stale episodes from buffer front so episodes_needed_for_steps sees only fresh data.
+            slot.replay_buffer.purge_stale_episodes(current_version, max_version_lag);
+
             let n = if let Some(min_steps) = min_steps_opt {
                 // Drain the minimum episodes covering min_steps; leave excess for next epoch
                 slot.replay_buffer.episodes_needed_for_steps(min_steps as usize)
@@ -458,8 +463,6 @@ where
             } else {
                 Vec::new()
             };
-            let current_version = self.runtime.components.epoch_count as i64;
-            let max_version_lag = self.hyperparams.max_version_lag;
             let batch = slot.replay_buffer
                 .finalize_and_drain_first_n_blocking(fresh_values, current_version, max_version_lag, n)?;
             jobs.push((kernel, batch));
