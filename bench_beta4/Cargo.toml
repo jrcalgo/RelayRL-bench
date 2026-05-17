@@ -29,6 +29,9 @@ rayon        = "1"
 tokio   = { version = "1", features = ["full"] }
 futures = "0.3"
 clap    = { version = "4", features = ["derive"] }
+pyo3    = { version = "0.23", features = ["auto-initialize"] }
+bytemuck = "1"
+uuid    = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "bench_lunar_direct_scalar1"
@@ -57,3 +60,7 @@ path = "src/bin/bench_lunar_ppo_64env.rs"
 [[bin]]
 name = "bench_lunar_ppo_tch"
 path = "src/bin/bench_lunar_ppo_tch.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_py"
+path = "src/bin/bench_lunar_ppo_py.rs"
