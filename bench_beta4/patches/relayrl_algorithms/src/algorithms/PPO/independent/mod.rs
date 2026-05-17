@@ -446,7 +446,10 @@ where
         let min_steps_opt = self.hyperparams.min_steps_per_epoch;
         // model_version increments only in apply_epoch_result (one real training completion = +1),
         // so it never inflates from wasted all_agents_ready() triggers during background SGD.
-        let current_version = self.runtime.components.model_version + 1;
+        // Use model_version directly (not +1) so episodes from the preceding model push
+        // (lag=1) are accepted as fresh — necessary because perform_refresh_model runs
+        // asynchronously and version-0 episodes keep arriving until it completes.
+        let current_version = self.runtime.components.model_version;
         let max_version_lag = self.hyperparams.max_version_lag;
         let mut jobs: Vec<(KN, PPOFlatBatch)> = Vec::new();
         for slot in &mut self.runtime.components.agent_slots {
