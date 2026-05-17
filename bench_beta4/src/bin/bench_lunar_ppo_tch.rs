@@ -38,6 +38,9 @@ const TARGET_KL: f32 = 1.0;          // effectively disabled (SF has no KL early
 const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs × 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // matches SF normalize_returns=True
+// SF decays LR linearly to 0 over 20M frames: 20M/5760 * 4 grad_steps ≈ 13889
+// Setting this freezes the policy near its peak instead of drifting at constant LR.
+const LR_SCHEDULE_STEPS: u64 = 13_889;
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
@@ -96,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ActivationKind::ReLU,
         PI_LR,
         VF_COEF,
-        None,
+        Some(LR_SCHEDULE_STEPS),
         &burn_device,
     );
 
@@ -123,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vf_coef: VF_COEF,
                 min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
                 max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
-                max_version_lag: 2,
+                max_version_lag: 1,
                 normalize_returns: NORMALIZE_RETURNS,
                 ..Default::default()
             })),
