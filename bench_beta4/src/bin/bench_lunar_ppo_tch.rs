@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mini_batch_size: Some(MINI_BATCH_SIZE),
                 vf_coef: VF_COEF,
                 min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
-                max_buffered_episodes: None,
+                max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_tch"),
