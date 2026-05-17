@@ -713,7 +713,7 @@ where
     fn save(&self, _filename: &str) {}
 
     async fn receive_trajectory(&mut self, trajectory: T) -> Result<bool, AlgorithmError> {
-        let extracted_traj: RelayRLTrajectory = trajectory.into_relayrl().ok_or_else(|| {
+        let mut extracted_traj: RelayRLTrajectory = trajectory.into_relayrl().ok_or_else(|| {
             AlgorithmError::TrajectoryInsertionError("Missing RelayRL trajectory".to_string())
         })?;
 
@@ -726,6 +726,12 @@ where
         }
 
         slot.trajectory_count += 1;
+
+        // Tag with the current epoch so the replay buffer can filter stale episodes.
+        // epoch_count is the count AFTER the last completed training epoch, so episodes
+        // collected now have version = epoch_count; at drain time current_version = epoch_count+1,
+        // giving lag = 1 for all fresh data — within max_version_lag=1.
+        extracted_traj.policy_version = self.runtime.components.epoch_count as i64;
 
         let result: Box<dyn Any> = slot
             .replay_buffer
