@@ -5,6 +5,8 @@ Hyperparameters matched to RelayRL PPO conv5:
   lr=2.5e-4, 4 gradient epochs per rollout, CPU.
 
 Architecture notes:
+  - use_rnn=False: pure MLP (matches RelayRL's 128x128 feed-forward policy)
+  - nonlinearity=relu + policy_initialization=orthogonal: match RelayRL defaults
   - batched_sampling=True: single vectorized-env process (mirrors RelayRL's
     single-process env loop rather than 64 separate Python subprocesses)
   - normalize_returns=True: SF default for training stability; RelayRL doesn't
@@ -62,6 +64,9 @@ ARGV = [
     f"--exploration_loss_coeff={ENT_COEF}",
     f"--learning_rate={LR}",
     "--encoder_mlp_layers", "128", "128",
+    "--use_rnn=False",
+    "--nonlinearity=relu",
+    "--policy_initialization=orthogonal",
     "--normalize_returns=True",
     f"--train_for_env_steps={TRAIN_STEPS}",
     "--device=cpu",
@@ -82,8 +87,8 @@ if __name__ == "__main__":
     print("  Sample Factory APPO — LunarLander-v3 — 64 envs — CPU")
     print(f"  lr={LR}  rollout={ROLLOUT}  batch={BATCH_SIZE}  epochs={N_EPOCHS}")
     print(f"  gamma={GAMMA}  lam={GAE_LAMBDA}  clip={CLIP}  ent={ENT_COEF}")
-    print(f"  net=[128,128]  seed=42  env_count={N_WORKERS*N_ENVS_PER_WORKER}")
-    print(f"  batched_sampling=True  normalize_returns=True")
+    print(f"  net=[128,128]  relu  orthogonal_init  no_rnn  seed=42")
+    print(f"  env_count={N_WORKERS*N_ENVS_PER_WORKER}  batched_sampling=True  normalize_returns=True")
     print(f"  train_for_env_steps={TRAIN_STEPS}")
     print("=" * 60)
 
@@ -104,3 +109,4 @@ if __name__ == "__main__":
     print(f"  wall time    : {wall:.1f}s")
     print(f"  fps          : {TRAIN_STEPS / wall:.0f}")
     print("=" * 60)
+
