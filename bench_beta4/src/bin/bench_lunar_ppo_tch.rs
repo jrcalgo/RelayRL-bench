@@ -30,7 +30,7 @@ const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 #[allow(dead_code)]
-const PI_LR: f64 = 2.5e-4;           // matches SF lr=2.5e-4
+const PI_LR: f64 = 1e-4;
 const VF_COEF: f32 = 1.0;            // matches SF vf_coef default
 const TRAIN_PI_ITERS: u64 = 4;       // matches SF num_epochs=4
 const TRAIN_VF_ITERS: u64 = 4;
@@ -38,9 +38,6 @@ const TARGET_KL: f32 = 1.0;          // effectively disabled (SF has no KL early
 const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs × 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // matches SF normalize_returns=True
-// SF decays LR linearly to 0 over 20M frames: 20M/5760 * 4 grad_steps ≈ 13889
-// Setting this freezes the policy near its peak instead of drifting at constant LR.
-const LR_SCHEDULE_STEPS: u64 = 13_889;
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
@@ -99,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ActivationKind::ReLU,
         PI_LR,
         VF_COEF,
-        Some(LR_SCHEDULE_STEPS),
+        None,
         &burn_device,
     );
 
