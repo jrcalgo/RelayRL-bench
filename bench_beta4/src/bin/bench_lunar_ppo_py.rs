@@ -28,7 +28,7 @@ const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 64;
 
 const GAMMA: f32 = 0.99;
-const LAM: f32 = 0.98;
+const LAM: f32 = 0.95;
 const CLIP_RATIO: f32 = 0.2;
 #[allow(dead_code)]
 const PI_LR: f64 = 2.5e-4;
@@ -37,7 +37,7 @@ const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0;
 const MINI_BATCH_SIZE: usize = 5760;
-const ENT_COEF: f32 = 0.01;
+const ENT_COEF: f32 = 0.05;
 const NORMALIZE_RETURNS: bool = true;
 
 const TRAJ_PER_EPOCH: u64 = 64;
