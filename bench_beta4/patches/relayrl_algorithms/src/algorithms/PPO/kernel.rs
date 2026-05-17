@@ -96,6 +96,7 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
+        val_old: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         vf_coef: f32,
@@ -121,8 +122,10 @@ mod training {
 
     use burn_autodiff::Autodiff;
     use burn_core::module::Module;
+    use burn_core::module::Initializer;
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
+    use burn_optim::grad_clipping::GradientClipping;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 
     // Use LibTorch autodiff when the tch-backend feature is active; fall back to NdArray.
@@ -157,17 +160,40 @@ mod training {
             let mut pi_dims = vec![obs_dim];
             pi_dims.extend_from_slice(hidden_sizes);
             pi_dims.push(act_dim);
+            let pi_n = pi_dims.len() - 1;
             let pi_layers = pi_dims
                 .windows(2)
-                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .enumerate()
+                .map(|(i, w)| {
+                    let gain = if i < pi_n - 1 { 2.0f64.sqrt() } else { 0.01 };
+                    // Bias must stay 1-D so we can't use Orthogonal directly on LinearConfig
+                    // (it would also apply to the bias and panic). Initialize bias with Zeros,
+                    // then overwrite the weight parameter with an orthogonal init.
+                    let mut layer = LinearConfig::new(w[0], w[1])
+                        .with_initializer(Initializer::Zeros)
+                        .init(device);
+                    layer.weight = Initializer::Orthogonal { gain }
+                        .init_with([w[0], w[1]], Some(w[0]), Some(w[1]), device);
+                    layer
+                })
                 .collect();
 
             let mut vf_dims = vec![obs_dim];
             vf_dims.extend_from_slice(hidden_sizes);
             vf_dims.push(1);
+            let vf_n = vf_dims.len() - 1;
             let vf_layers = vf_dims
                 .windows(2)
-                .map(|w| LinearConfig::new(w[0], w[1]).init(device))
+                .enumerate()
+                .map(|(i, w)| {
+                    let gain = if i < vf_n - 1 { 2.0f64.sqrt() } else { 1.0 };
+                    let mut layer = LinearConfig::new(w[0], w[1])
+                        .with_initializer(Initializer::Zeros)
+                        .init(device);
+                    layer.weight = Initializer::Orthogonal { gain }
+                        .init_with([w[0], w[1]], Some(w[0]), Some(w[1]), device);
+                    layer
+                })
                 .collect();
 
             Self { pi_layers, vf_layers, relu: Relu::new(), obs_dim, act_dim }
@@ -216,7 +242,8 @@ mod training {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
             let optimizer = AdamConfig::new()
-                .init::<TB, ActorCriticMlp<TB>>();
+                .init::<TB, ActorCriticMlp<TB>>()
+                .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
                 network: Some(network),
                 optimizer,
@@ -246,6 +273,7 @@ mod training {
             adv: &[f32],
             logp_old: &[f32],
             ret: &[f32],
+            val_old: &[f32],
             clip_ratio: f32,
             ent_coef: f32,
             compute_stats: bool,
@@ -297,13 +325,24 @@ mod training {
                 .mean();
             let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
 
-            // ── Value head ────────────────────────────────────────────────
+            // ── Value head with clipped VF loss ───────────────────────────
             let v_pred = net.vf_forward(obs).reshape([n]);
             let ret_tensor = Tensor::<TB, 1, Float>::from_data(
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
                 &device,
             );
-            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+            let val_old_n = val_old.len().min(n);
+            let mut val_old_vec = val_old[..val_old_n].to_vec();
+            val_old_vec.resize(n, 0.0f32);
+            let val_old_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(val_old_vec, [n]),
+                &device,
+            );
+            let v_diff = v_pred.clone() - val_old_tensor.clone();
+            let v_pred_clip = val_old_tensor + v_diff.clamp(-clip_ratio, clip_ratio);
+            let vf_loss1 = (v_pred - ret_tensor.clone()).powf_scalar(2.0);
+            let vf_loss2 = (v_pred_clip - ret_tensor).powf_scalar(2.0);
+            let vf_loss_t = vf_loss1.max_pair(vf_loss2).mean();
 
             // ── Combined loss → single backward pass ──────────────────────
             let vf_coef_t = self.vf_coef;
@@ -700,6 +739,7 @@ where
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
+        val_old: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         _vf_coef: f32, // stored on trainer; parameter kept for API symmetry
@@ -708,7 +748,7 @@ where
         #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         if let Some(trainer) = &mut self.actor_critic_trainer {
             return trainer.train_step_flat(
-                obs_flat, obs_dim, act_flat, adv, logp_old, ret,
+                obs_flat, obs_dim, act_flat, adv, logp_old, ret, val_old,
                 clip_ratio, ent_coef, compute_stats,
             );
         }

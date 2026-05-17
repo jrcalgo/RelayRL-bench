@@ -666,6 +666,7 @@ where
                 kernel.ppo_combined_loss_flat(
                     &batch.obs_flat, obs_dim,
                     &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &batch.ret_flat,
+                    &batch.val_flat,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             } else {
@@ -677,8 +678,9 @@ where
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp_flat[j]).collect();
                 let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
+                let val_mb: Vec<f32> = mb.iter().map(|&j| batch.val_flat[j]).collect();
                 kernel.ppo_combined_loss_flat(
-                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb,
+                    &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb, &val_mb,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             };
