@@ -263,6 +263,7 @@ impl PPOReplayBuffer {
         current_version: i64,
         max_version_lag: i64,
         n: usize,
+        normalize_returns: bool,
     ) -> Option<PPOFlatBatch> {
         let mut buffers = self.buffers.lock().unwrap();
         if buffers.episode_boundaries.len() < n {
@@ -359,10 +360,12 @@ impl PPOReplayBuffer {
         let (adv_mean, adv_std) = scalar_stats(&fresh_adv);
         let adv_norm = compute_normed_advantages(&fresh_adv, adv_mean, adv_std.max(1e-8));
 
-        let ret_flat = {
+        let ret_flat = if normalize_returns {
             let mut rrs = self.return_running.lock().unwrap();
             rrs.update_batch(&fresh_ret);
             compute_normed_advantages(&fresh_ret, rrs.mean_f32(), rrs.std())
+        } else {
+            fresh_ret
         };
 
         Some(PPOFlatBatch {

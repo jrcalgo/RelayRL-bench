@@ -29,21 +29,22 @@ const ENV_COUNT: u32 = 64;
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
-const PI_LR: f64 = 3e-4;
-const VF_LR: f64 = 3e-4; // kept for reference; kernel uses PI_LR for shared optimizer
-const VF_COEF: f32 = 2.0;
-const TRAIN_PI_ITERS: u64 = 10;
-const TRAIN_VF_ITERS: u64 = 10;
-const TARGET_KL: f32 = 0.05;
-const MINI_BATCH_SIZE: usize = 8192;
+#[allow(dead_code)]
+const PI_LR: f64 = 2.5e-4;           // matches SF lr=2.5e-4
+const VF_COEF: f32 = 1.0;            // matches SF vf_coef default
+const TRAIN_PI_ITERS: u64 = 4;       // matches SF num_epochs=4
+const TRAIN_VF_ITERS: u64 = 4;
+const TARGET_KL: f32 = 1.0;          // effectively disabled (SF has no KL early-stop)
+const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs × 90-step rollout
 const ENT_COEF: f32 = 0.01;
+const NORMALIZE_RETURNS: bool = true; // matches SF normalize_returns=True
 
 // 64 trajs/epoch × 64 envs → ~90 loop iters/epoch → ~1100 training epochs in 100k steps
 const TRAJ_PER_EPOCH: u64 = 64;
-// Step-count epoch trigger: ~91 eps/drain, closer to SF's 64-ep rollout cadence
-const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64; // 8192
-// 2× drain-epoch cap: 2 × ~91 eps = ~182 eps max in buffer
-const MAX_BUFFERED_EPISODES: u64 = 180;
+// Step-count epoch trigger: 64 envs × 90-step rollout = 5760, matches SF exactly
+const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64; // 5760
+// 2× drain-epoch cap: 2 × ~64 eps = 128 eps max in buffer
+const MAX_BUFFERED_EPISODES: u64 = 128;
 // 600_000 loop iterations × 64 envs ≈ 38.4M total env frames
 const TOTAL_STEPS: usize = 600_000;
 const BUFFER_SIZE: ReplayBufferSize = 500_000;
@@ -61,8 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("============================================================");
     println!("  RelayRL PPO — LunarLander-v3 — 64 envs — LibTorch backend");
-    println!("  lr={PI_LR}  n_steps≈{}  batch={MINI_BATCH_SIZE}  epochs={TRAIN_PI_ITERS}", TRAJ_PER_EPOCH as usize * 200);
-    println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  ent={ENT_COEF}  target_kl={TARGET_KL}");
+    println!("  lr={PI_LR}  batch={MINI_BATCH_SIZE}  epochs={TRAIN_PI_ITERS}  normalize_returns={NORMALIZE_RETURNS}");
+    println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  ent={ENT_COEF}  vf_coef={VF_COEF}");
     println!("  net=[128,128]  seed=42  max_ep_steps={MAX_STEPS}  env_count={ENV_COUNT}");
     println!("============================================================");
 
@@ -123,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
                 max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
                 max_version_lag: 1,
+                normalize_returns: NORMALIZE_RETURNS,
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_tch"),

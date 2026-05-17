@@ -120,6 +120,11 @@ pub struct IPPOParams {
     /// model push only. Set to i64::MAX to disable filtering (plain GAE, no version check).
     #[serde(default = "default_max_version_lag")]
     pub max_version_lag: i64,
+    /// Normalize return targets using a running mean/std before computing value loss.
+    /// Matches Sample Factory's normalize_returns=True. Stabilizes value function training
+    /// when episode returns span multiple orders of magnitude.
+    #[serde(default)]
+    pub normalize_returns: bool,
 }
 
 fn default_vf_coef()        -> f32 { 0.5 }
@@ -145,6 +150,7 @@ impl Default for IPPOParams {
             min_steps_per_epoch: None,
             max_buffered_episodes: None,
             max_version_lag: 1,
+            normalize_returns: false,
         }
     }
 }
@@ -474,7 +480,7 @@ where
             // finalize_and_drain drains all n episodes but only includes fresh ones in the batch.
             // If all n were stale, it returns None — restore kernel so the next epoch can use it.
             match slot.replay_buffer
-                .finalize_and_drain_first_n_blocking(fresh_values, current_version, max_version_lag, n)
+                .finalize_and_drain_first_n_blocking(fresh_values, current_version, max_version_lag, n, self.hyperparams.normalize_returns)
             {
                 Some(batch) => jobs.push((kernel, batch)),
                 None => { slot.kernel = Some(kernel); continue; }
