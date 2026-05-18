@@ -27,17 +27,17 @@ const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 64;
 
-const GAMMA: f32 = 0.99;
-const LAM: f32 = 0.95;
+const GAMMA: f32 = 0.999;
+const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 #[allow(dead_code)]
-const PI_LR: f64 = 1e-4;
+const PI_LR: f64 = 2.5e-4;
 const VF_COEF: f32 = 1.0;
 const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0;
 const MINI_BATCH_SIZE: usize = 5760;
-const ENT_COEF: f32 = 0.05;
+const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true;
 
 const TRAJ_PER_EPOCH: u64 = 64;
@@ -125,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
                 max_version_lag: 1,
                 normalize_returns: NORMALIZE_RETURNS,
+                rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_py"),
