@@ -124,6 +124,7 @@ mod training {
     use burn_core::module::Initializer;
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
+    use burn_optim::grad_clipping::GradientClipping;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 
     // Use LibTorch autodiff when the tch-backend feature is active; fall back to NdArray.
@@ -240,7 +241,8 @@ mod training {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
             let optimizer = AdamConfig::new()
-                .init::<TB, ActorCriticMlp<TB>>();
+                .init::<TB, ActorCriticMlp<TB>>()
+                .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
                 network: Some(network),
                 optimizer,
