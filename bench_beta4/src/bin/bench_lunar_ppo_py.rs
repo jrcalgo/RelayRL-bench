@@ -33,8 +33,8 @@ const CLIP_RATIO: f32 = 0.2;
 #[allow(dead_code)]
 const PI_LR: f64 = 2.5e-4;
 const VF_COEF: f32 = 1.0;
-const TRAIN_PI_ITERS: u64 = 10;
-const TRAIN_VF_ITERS: u64 = 10;
+const TRAIN_PI_ITERS: u64 = 4;
+const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0;
 const MINI_BATCH_SIZE: usize = 5760;
 const ENT_COEF: f32 = 0.01;
