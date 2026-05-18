@@ -37,7 +37,7 @@ const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0;
 const MINI_BATCH_SIZE: usize = 5760;
-const ENT_COEF: f32 = 0.03;
+const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true;
 
 const TRAJ_PER_EPOCH: u64 = 64;
@@ -88,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_env(actor_id, boxed, ENV_COUNT).await?;
 
     let burn_device = <B as burn_tensor::backend::Backend>::Device::default();
+    <B as burn_tensor::backend::Backend>::seed(&burn_device, 42);
     let kernel = PPOKernel::<B, Float, Float>::new_with_schedule(
         OBS_DIM,
         ACT_DIM,
