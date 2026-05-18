@@ -37,7 +37,7 @@ const TRAIN_PI_ITERS: u64 = 4;
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0;
 const MINI_BATCH_SIZE: usize = 5760;
-const ENT_COEF: f32 = 0.01;
+const ENT_COEF: f32 = 0.03;
 const NORMALIZE_RETURNS: bool = true;
 
 const TRAJ_PER_EPOCH: u64 = 64;
