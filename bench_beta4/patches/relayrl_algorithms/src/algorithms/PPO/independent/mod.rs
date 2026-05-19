@@ -636,6 +636,10 @@ where
     let mb_size = mb_size_opt.unwrap_or(n).clamp(1, n);
     let full_batch = mb_size >= n;
 
+    // Persistent return normalization (SF-aligned): update running stats on full batch,
+    // then use normalized returns for all mini-batch iterations this epoch.
+    let ret_normalized = kernel.normalize_returns_persistent(&batch.ret_flat);
+
     let mut first_pi_loss: Option<f32> = None;
     let mut first_vf_loss: Option<f32> = None;
     let mut final_pi_loss = 0.0f32;
@@ -666,7 +670,7 @@ where
             let (pi_loss, vf_loss, info) = if full_batch {
                 kernel.ppo_combined_loss_flat(
                     &batch.obs_flat, obs_dim,
-                    &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &batch.ret_flat,
+                    &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &ret_normalized,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             } else {
@@ -677,7 +681,7 @@ where
                 let act_mb: Vec<i64> = mb.iter().map(|&j| batch.act_flat[j]).collect();
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp_flat[j]).collect();
-                let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
+                let ret_mb: Vec<f32> = mb.iter().map(|&j| ret_normalized[j]).collect();
                 kernel.ppo_combined_loss_flat(
                     &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
