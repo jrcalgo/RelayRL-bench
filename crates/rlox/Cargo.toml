@@ -1,0 +1,21 @@
+[package]
+name = "rlox"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rlox"
+path = "src/main.rs"
+
+[[bin]]
+name = "lunar"
+path = "src/bin/lunar.rs"
+
+[dependencies]
+burn-autodiff  = "0.20.1"
+burn-core      = "0.20.1"
+burn-ndarray   = "0.20.1"
+burn-nn        = "0.20.1"
+burn-optim     = "0.20.1"
+burn-tensor    = "0.20.1"
+lunarlander-rl = { path = "../lunarlander-rl" }

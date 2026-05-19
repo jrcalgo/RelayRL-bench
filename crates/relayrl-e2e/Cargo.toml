@@ -11,11 +11,30 @@ keywords = ["relayrl", "rl", "e2e", "benchmark", "trajectory"]
 categories = ["science", "simulation", "command-line-utilities", "development-tools::testing", "development-tools::profiling"]
 license = "Apache-2.0"
 
+[features]
+default = ["ndarray"]
+ndarray = [
+    "burn-ndarray",
+    "relayrl_algorithms/ndarray-backend",
+]
+tch = [
+    "burn-tch",
+    "relayrl_framework/tch-backend",
+    "relayrl_algorithms/tch-backend",
+]
+
 [dependencies]
-relayrl_framework = "0.5.0-alpha.1"
+relayrl_framework = { workspace = true, default-features = false, features = ["client"] }
+relayrl_algorithms = { workspace = true }
+relayrl_types = { workspace = true }
+relayrl_env_trait = { workspace = true }
+gridworld-rl = { path = "../gridworld-rl" }
+lunarlander-rl = { path = "../lunarlander-rl" }
 
-tokio = "1.49.0"
-clap = "4.5.54"
+burn-ndarray = { version = "0.20.1", optional = true }
+burn-tch    = { version = "0.20.1", optional = true }
+burn-tensor = "0.20.1"
 
-# gridworld-rl = "0.1.0"
-
+tokio   = { version = "1.49.0", features = ["full"] }
+futures = "0.3"
+clap    = { version = "4.5.54", features = ["derive"] }

@@ -1,0 +1,78 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — set_env / run_env (arch-fix) — LunarLander — 1 env
+  1000000 steps · ndarray · 4 logical cores
+═══════════════════════════════════════════════════════════════════
+
+set_env OK — registered 1 LunarLander env
+manual request_action smoke test: true
+Warming up (5 000 steps)… done.
+
+─── Throughput ──────────────────────────────────────────────────────
+  total steps              :    1000000
+  wall time                :       6.79 s
+  steps/sec                :     147240
+  µs/step                  :      6.792
+
+─── OS ──────────────────────────────────────────────────────────────
+  RSS                      :     29.0 MB
+  context switches total   :          17
+  context switches/step    :      0.0000
+  logical cores            :           4
+
+─── vs baselines ────────────────────────────────────────────────────
+  vs beta.2 manual loop    :       7.69×
+  vs patched (inline infer):       0.69×  (baseline: 213 390 sps)
+  vs arch-fix baseline     :       0.98×  (baseline: 150 746 sps)
+═══════════════════════════════════════════════════════════════════
+
+Notes:
+  API path : set_env / run_env — framework owns step loop
+  inference: direct call to ActorRuntime::perform_local_inference_batch()
+  env count: 1
+  max steps: 500 per episode
+  backend  : NdArray (CPU)
+  binary   : bench_beta2/src/bin/bench_lunar_set_env.rs
+
+  Observed range across multiple runs: ~135 000 – 150 000 sps
+  Mean: ~143 000 sps  (variance from system scheduling, CPU freq scaling)
+
+Architectural fixes applied:
+  1. Brief read lock on StateManager — coordinator acquires read lock ONLY
+     to clone three Arc handles (runtime, device, env_map), then releases it
+     immediately.  The 1M-step loop runs with NO StateManager lock held,
+     unblocking concurrent coordinator operations.
+
+  2. block_in_place+block_on moved into StateManager::run_env_step_loop
+     (sync fn) — avoids tokio scheduler overhead at each .await point in
+     the inference loop; all .await points are driven synchronously on one
+     blocked thread, matching the original structure.
+
+  3. actor_envs field changed from DashMap<ActorUuid, EnvironmentInterface>
+     to Arc<DashMap<ActorUuid, EnvironmentInterface>> so the Arc can be
+     cloned inside the brief read lock and the DashMap shard write lock
+     (parking_lot RwLock) acquired INSIDE the step loop — identical to
+     the original get_mut() path, with no per-step overhead difference.
+
+  4. Bug fix (ndarray-backend cfg guard): removed erroneous
+     #[cfg(feature = "ndarray-backend")] guard on DType::NdArray arm
+     in tensor_data_to_any — the feature doesn't exist; arm was dead code.
+
+  5. Bug fix (send_trajectory crash on Disabled mode): send_trajectory()
+     now returns Ok(()) early when the buffer channel is closed
+     (ActorTrainingDataMode::Disabled drops the receiver at startup).
+
+Performance regression analysis:
+  Original (before fixes): 150 746 sps (write lock held for 1M steps)
+  After fix 1 only (pure async step loop, no block_in_place): ~109 000 sps
+  After restoring block_in_place in coordinator: ~115 000 sps
+  After adding Arc<Mutex<EnvironmentInterface>>: ~130 000 sps
+  After block_in_place inside run_env_step_loop (sync fn): ~136 000 sps
+  After Arc<DashMap> (DashMap shard lock, matching original): ~143-147k sps
+  → Net regression vs original: ~2–5% (within measurement variance)
+
+Why patched (inline infer, 213k sps) > run_env (147k sps):
+  run_env does FULL RL steps: inference + env.step() + auto-reset + reward
+  tracking + episode flagging.  The LunarLander env.step() alone costs ~1µs,
+  and per-step Vec allocations (batch, request_actions_direct decomposition)
+  add ~1µs more.  The patched baseline only measures inference throughput and
+  never calls env.step() at all — it is not a fair apples-to-apples comparison.

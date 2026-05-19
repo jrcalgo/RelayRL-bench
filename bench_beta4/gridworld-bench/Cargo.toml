@@ -1,0 +1,12 @@
+[package]
+name = "gridworld-bench"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "gridworld_bench"
+
+[dependencies]
+relayrl_env_trait = "1.2"
+bytemuck = "1"

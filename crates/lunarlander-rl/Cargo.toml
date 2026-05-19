@@ -1,0 +1,13 @@
+[package]
+name = "lunarlander-rl"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+relayrl_env_trait = { workspace = true }
+relayrl_types = { workspace = true }
+burn-tensor = "0.20.1"
+glam = "0.25"
+rand = "0.9"
+rayon = "1"

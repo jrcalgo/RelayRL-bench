@@ -1,0 +1,41 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — set_env / run_env — LunarLander — 1 env
+  1000000 steps · ndarray · 4 logical cores
+═══════════════════════════════════════════════════════════════════
+
+set_env OK — registered 1 LunarLander env
+manual request_action smoke test: true
+Warming up (5 000 steps)… done.
+
+─── Throughput ──────────────────────────────────────────────────────
+  total steps              :    1000000
+  wall time                :      69.59 s
+  steps/sec                :      14370
+  µs/step                  :     69.587
+
+─── OS ──────────────────────────────────────────────────────────────
+  RSS                      :     29.0 MB
+  context switches total   :   1002712
+  context switches/step    :     1.0027
+  logical cores            :          4
+
+─── vs baselines ────────────────────────────────────────────────────
+  vs beta.2 manual loop    :       0.75×  (baseline: 19 138 sps)
+  vs patched (inline infer):       0.07×  (baseline: 213 390 sps)
+═══════════════════════════════════════════════════════════════════
+
+Notes:
+  API path : set_env / run_env (framework owns step loop)
+  env count: 1
+  max steps: 500 per episode
+  backend  : NdArray (CPU)
+  binary   : bench_beta2/src/bin/bench_lunar_set_env.rs
+
+Bugs fixed (patched in bench_beta2/patches/relayrl_framework/):
+  1. state_manager.rs: removed #[cfg(feature="ndarray-backend")] guard on
+     DType::NdArray arm in tensor_data_to_any — the feature doesn't exist,
+     so every action hit the _ => Err branch.
+  2. actor.rs: flush_env_trajectory now returns Ok early when the trajectory
+     buffer channel is closed (trajectory_buffer_rx is dropped at startup
+     when ActorTrainingDataMode::Disabled, causing TrajectorySendError that
+     killed the actor's spawn_loop and closed its inbox).

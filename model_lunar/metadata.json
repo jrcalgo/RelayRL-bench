@@ -1,0 +1,19 @@
+{
+    "model_file": "lunarlander_policy.onnx",
+    "model_type": "onnx",
+    "input_dtype": {
+        "NdArray": "F32"
+    },
+    "output_dtype": {
+        "NdArray": "F32"
+    },
+    "input_shape": [
+        1,
+        8
+    ],
+    "output_shape": [
+        1,
+        4
+    ],
+    "default_device": "Cpu"
+}

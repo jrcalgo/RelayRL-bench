@@ -1,0 +1,41 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — set_env / run_env — VectorLunarLander — 128 envs
+  50000 loop iterations · 6400000 total env transitions · ndarray · 4 logical cores
+  env backend: SyncLunarVectorEnvFramework (rayon parallel stepping)
+═══════════════════════════════════════════════════════════════════
+
+set_env OK — registered 128 rayon-parallel LunarLander sub-envs with actor 00000075-4631-8499-856d-661143d2858f
+manual request_action smoke test: true
+Warming up (500 loop iters = 64000 env transitions)…
+Warm-up done. Starting timed benchmark (50000 loop iters)…
+
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — VectorLunarLander — FINAL RESULTS  (128 envs)
+═══════════════════════════════════════════════════════════════════
+
+─── Throughput ──────────────────────────────────────────────────────
+  env count                :        128
+  loop iterations          :      50000
+  total env transitions    :    6400000
+  wall time                :      26.76 s
+  loop iters/sec           :       1868
+  env transitions/sec      :     239126
+  µs / loop iter           :    535.283
+  µs / env transition      :      4.182
+
+─── OS ──────────────────────────────────────────────────────────────
+  RSS                      :  2448.7 MB
+  context switches total   :      50957
+  context switches/iter    :     1.0191
+  logical cores            :          4
+
+─── vs baselines ────────────────────────────────────────────────────
+  scalar-128 transitions/s :     205656  (sequential stepping)
+  vector-128 transitions/s :     239126
+  speedup vs scalar-128    :       1.16×
+  1-env baseline           :     147240  loop iters/sec
+  loop iter speedup        :       0.01×  vs 1-env
+═══════════════════════════════════════════════════════════════════
+
+NOTE: Run at 50k steps (not 1M) — the 1M run was consistently OOM-killed
+due to 2448.7 MB RSS. 50k steps (26.76s) is sufficient for stable throughput numbers.

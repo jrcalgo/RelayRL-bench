@@ -1,0 +1,151 @@
+//! bench_lunar_ppo_1env — RelayRL PPO on LunarLander, 1 env, 100k steps.
+//!
+//! Matches the cross-framework benchmark hyperparameters used in bench_sb3.py /
+//! bench_rllib.py / bench_sf.py for direct apples-to-apples comparison:
+//!   gamma=0.999, lam=0.98, clip=0.2, lr=2.5e-4, ent=0.05,
+//!   n_epochs=10, mini_batch_size=64, target_kl=0.05, net=[128,128]
+//!
+//! Note: RelayRL env initial seed is fixed at 12345 (not user-configurable).
+
+use std::path::PathBuf;
+use std::time::Instant;
+
+use burn_ndarray::NdArray;
+use burn_tensor::Float;
+
+use relayrl_algorithms::algorithms::PPO::PPOKernel;
+use relayrl_algorithms::algorithms::REINFORCE::ActivationKind;
+use relayrl_algorithms::PPOParams;
+use relayrl_framework::prelude::network::{
+    ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, AlgorithmCfg, ModelMode,
+    RelayRLActorEnv, RelayRLAgentActors, ReplayBufferSize, SaveModelPath,
+};
+use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
+
+use lunarlander_rl::env::LunarLanderEnv;
+
+// ─────────────────────────── Constants ──────────────────────────────────────
+
+const OBS_DIM: usize = 8;
+const ACT_DIM: usize = 4;
+const MAX_STEPS: usize = 500;
+const ENV_COUNT: u32 = 1;
+
+// Shared hyperparameters — match bench_sb3.py / bench_rllib.py / bench_sf.py
+const GAMMA: f32 = 0.999;
+const LAM: f32 = 0.98;
+const CLIP_RATIO: f32 = 0.2;
+const PI_LR: f64 = 2.5e-4;
+const VF_LR: f64 = 2.5e-4;
+const TRAIN_PI_ITERS: u64 = 10;
+const TRAIN_VF_ITERS: u64 = 10;
+const TARGET_KL: f32 = 0.05;
+const MINI_BATCH_SIZE: usize = 64;
+const ENT_COEF: f32 = 0.05;
+
+// ~5 episodes × ~200 steps/ep ≈ 1024 steps per epoch (matches SB3 n_steps=1024)
+const TRAJ_PER_EPOCH: u64 = 5;
+
+// 100k env-frames with 1 env = 100k loop steps
+const TOTAL_STEPS: usize = 100_000;
+const BUFFER_SIZE: ReplayBufferSize = 200_000;
+
+// Convergence threshold (same as other frameworks)
+const CONVERGENCE: f64 = 200.0;
+const WINDOW: usize = 100;
+
+// ─────────────────────────── Main ───────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    std::env::set_var(
+        "ORT_DYLIB_PATH",
+        "/usr/local/lib/python3.11/dist-packages/onnxruntime/capi/libonnxruntime.so.1.25.0",
+    );
+
+    type B = NdArray;
+
+    println!("============================================================");
+    println!("  RelayRL PPO — LunarLander-v3 — 1 env");
+    println!("  lr={PI_LR}  n_steps≈{}  batch={MINI_BATCH_SIZE}  epochs={TRAIN_PI_ITERS}", TRAJ_PER_EPOCH as usize * 200);
+    println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  ent={ENT_COEF}  target_kl={TARGET_KL}");
+    println!("  net=[128,128]  seed=42  max_ep_steps={MAX_STEPS}");
+    println!("============================================================");
+
+    let config_path = PathBuf::from("./config.json");
+    let mut builder = AgentBuilder::<B, 2, 2>::builder()
+        .actor_count(1)
+        .default_device(DeviceType::Cpu)
+        .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
+        .actor_training_data_mode(ActorTrainingDataMode::Disabled)
+        .router_scale(1);
+    if config_path.exists() {
+        builder = builder.config_path(config_path);
+    }
+
+    let (mut agent, params) = builder.build().await?;
+    agent.start(params).await?;
+    let actor_ids = agent.get_actor_ids()?;
+    let actor_id = actor_ids[0];
+
+    let env = LunarLanderEnv::<B>::new_with_seed(MAX_STEPS, Default::default(), 42);
+    let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(env);
+    agent.set_env(actor_id, boxed, ENV_COUNT).await?;
+
+    let burn_device = <B as burn_tensor::backend::Backend>::Device::default();
+    // Constant LR — matches SB3/RLlib/SF which use no LR schedule
+    let kernel = PPOKernel::<B, Float, Float>::new_with_schedule(
+        OBS_DIM,
+        ACT_DIM,
+        true,
+        &[128, 128],
+        ActivationKind::ReLU,
+        PI_LR,
+        VF_LR,
+        None, // constant LR
+        &burn_device,
+    );
+
+    println!("Starting PPO training ({TOTAL_STEPS} steps)...\n");
+
+    let t0 = Instant::now();
+    agent
+        .run_env_with_ppo::<Float, Float, _>(
+            actor_id,
+            TOTAL_STEPS,
+            AlgorithmCfg::PPO(Some(PPOParams {
+                discrete: true,
+                gamma: GAMMA,
+                lam: LAM,
+                clip_ratio: CLIP_RATIO,
+                train_pi_iters: TRAIN_PI_ITERS,
+                train_vf_iters: TRAIN_VF_ITERS,
+                target_kl: TARGET_KL,
+                traj_per_epoch: TRAJ_PER_EPOCH,
+                ent_coef: ENT_COEF,
+                max_episode_steps: Some(MAX_STEPS),
+                mini_batch_size: Some(MINI_BATCH_SIZE),
+                ..Default::default()
+            })),
+            SaveModelPath::from("./models/lunar_ppo_1env"),
+            BUFFER_SIZE,
+            DeviceType::Cpu,
+            kernel,
+        )
+        .await?;
+    let wall = t0.elapsed().as_secs_f64();
+
+    let env_frames_per_sec = TOTAL_STEPS as f64 / wall;
+
+    println!();
+    println!("============================================================");
+    println!("  RelayRL RESULTS");
+    println!("============================================================");
+    println!("  total steps       : {}", TOTAL_STEPS);
+    println!("  wall time         : {:.1}s", wall);
+    println!("  steps/sec         : {:.0}", env_frames_per_sec);
+    println!("============================================================");
+
+    agent.shutdown().await?;
+    Ok(())
+}

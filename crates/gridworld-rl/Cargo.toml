@@ -21,6 +21,7 @@ render = ["iced"]
 [dependencies]
 relayrl_env_trait = { workspace = true }
 relayrl_types = { workspace = true }
+rayon = "1"
 iced = { workspace = true, optional = true, features = ["canvas"] }
 
 [[example]]

@@ -1,0 +1,183 @@
+//! Cryptographic integrity verification for tensor data
+//!
+//! Uses BLAKE3 for fast, parallel hashing with cryptographic security.
+
+use serde::{Deserialize, Serialize};
+
+pub type Checksum = [u8; 32]; // 256-bit BLAKE3 hash
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedData {
+    pub data: Vec<u8>,
+    pub checksum: Checksum,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+}
+
+impl VerifiedData {
+    #[cfg(feature = "integrity")]
+    pub fn new(data: Vec<u8>) -> Self {
+        let checksum = compute_checksum(&data);
+        Self {
+            data,
+            checksum,
+            timestamp: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
+        }
+    }
+
+    #[cfg(feature = "integrity")]
+    pub fn new_without_timestamp(data: Vec<u8>) -> Self {
+        let checksum = compute_checksum(&data);
+        Self {
+            data,
+            checksum,
+            timestamp: None,
+        }
+    }
+
+    #[cfg(feature = "integrity")]
+    pub fn verify(&self) -> Result<(), IntegrityError> {
+        let computed = compute_checksum(&self.data);
+        if computed == self.checksum {
+            Ok(())
+        } else {
+            Err(IntegrityError::ChecksumMismatch {
+                expected: self.checksum,
+                computed,
+            })
+        }
+    }
+
+    #[cfg(feature = "integrity")]
+    pub fn verify_with_age(&self, max_age_secs: u64) -> Result<(), IntegrityError> {
+        self.verify()?;
+        if let Some(timestamp) = self.timestamp {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let age = now.saturating_sub(timestamp);
+            if age > max_age_secs {
+                return Err(IntegrityError::DataTooOld {
+                    age,
+                    max_age: max_age_secs,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Consume and return data if valid
+    #[cfg(feature = "integrity")]
+    pub fn into_verified(self) -> Result<Vec<u8>, IntegrityError> {
+        self.verify()?;
+        Ok(self.data)
+    }
+}
+
+/// Compute BLAKE3 checksum (fast, parallel, cryptographically secure)
+#[cfg(feature = "integrity")]
+pub fn compute_checksum(data: &[u8]) -> Checksum {
+    blake3::hash(data).into()
+}
+
+/// Compute keyed hash (for HMAC-like authentication)
+#[cfg(feature = "integrity")]
+pub fn compute_keyed_hash(data: &[u8], key: &[u8; 32]) -> Checksum {
+    blake3::keyed_hash(key, data).into()
+}
+
+#[derive(Debug, Clone)]
+pub enum IntegrityError {
+    ChecksumMismatch {
+        expected: Checksum,
+        computed: Checksum,
+    },
+    DataTooOld {
+        age: u64,
+        max_age: u64,
+    },
+}
+
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChecksumMismatch { expected, computed } => {
+                write!(
+                    f,
+                    "Checksum mismatch: expected {:?}, got {:?}",
+                    expected, computed
+                )
+            }
+            Self::DataTooOld { age, max_age } => {
+                write!(f, "Data too old: {} seconds (max {})", age, max_age)
+            }
+        }
+    }
+}
+
+impl std::error::Error for IntegrityError {}
+
+#[cfg(all(test, feature = "integrity"))]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn verified_data_round_trip_succeeds() {
+        let payload = b"relayrl".to_vec();
+        let verified = VerifiedData::new(payload.clone());
+
+        assert!(verified.timestamp.is_some());
+        assert_eq!(verified.clone().into_verified().unwrap(), payload);
+    }
+
+    #[test]
+    fn verified_data_without_timestamp_skips_age_tracking() {
+        let verified = VerifiedData::new_without_timestamp(vec![1, 2, 3]);
+
+        assert!(verified.timestamp.is_none());
+        assert!(verified.verify_with_age(0).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_tampered_payloads() {
+        let mut verified = VerifiedData::new(vec![1, 2, 3]);
+        verified.data[1] ^= 0xFF;
+
+        let err = verified
+            .verify()
+            .expect_err("tampered data should fail checksum verification");
+
+        assert!(matches!(err, IntegrityError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn verify_with_age_rejects_stale_payloads() {
+        let data = vec![9, 8, 7];
+        let verified = VerifiedData {
+            data: data.clone(),
+            checksum: compute_checksum(&data),
+            timestamp: Some(0),
+        };
+
+        let err = verified
+            .verify_with_age(1)
+            .expect_err("very old payloads should be rejected");
+
+        assert!(matches!(err, IntegrityError::DataTooOld { .. }));
+    }
+
+    #[test]
+    fn keyed_hash_depends_on_the_supplied_key() {
+        let data = b"relayrl";
+        let left = compute_keyed_hash(data, &[1; 32]);
+        let right = compute_keyed_hash(data, &[2; 32]);
+
+        assert_ne!(left, right);
+    }
+}
