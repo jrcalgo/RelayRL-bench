@@ -601,7 +601,11 @@ where
     B::Device: Clone,
 {
     pub fn new(max_steps: usize, device: B::Device) -> Self {
-        let state = PhysicsState::build(12345);
+        Self::new_with_seed(max_steps, device, 12345)
+    }
+
+    pub fn new_with_seed(max_steps: usize, device: B::Device, seed: u64) -> Self {
+        let state = PhysicsState::build(seed);
         LunarLanderEnv {
             max_steps,
             device,

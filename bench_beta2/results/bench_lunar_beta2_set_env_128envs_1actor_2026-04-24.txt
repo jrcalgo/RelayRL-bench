@@ -1,0 +1,67 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — set_env / run_env — LunarLander — 128 envs
+  1000000 loop iterations · 128000000 total env transitions · ndarray · 4 logical cores
+═══════════════════════════════════════════════════════════════════
+
+set_env OK — registered 128 LunarLander envs
+manual request_action smoke test: true
+Warming up (500 loop iters = 64 000 env transitions)… done.
+
+─── Throughput ──────────────────────────────────────────────────────
+  env count                :        128
+  loop iterations          :    1000000
+  total env transitions    :  128000000
+  wall time                :     622.40 s
+  loop iters/sec           :       1607
+  env transitions/sec      :     205656
+  µs / loop iter           :    622.400
+  µs / env transition      :      4.862
+
+─── OS ──────────────────────────────────────────────────────────────
+  RSS                      :     37.2 MB
+  context switches total   :        999
+  context switches/iter    :     0.0010
+  logical cores            :          4
+
+─── vs 1-env baseline ───────────────────────────────────────────────
+  1-env baseline sps       :     147240  (loop iters/sec)
+  loop iters speedup       :       0.01×
+  transition throughput    :     205656  env transitions/sec
+  transition scaling       :       1.40×  vs 1-env transitions/sec
+═══════════════════════════════════════════════════════════════════
+
+Notes:
+  API path  : set_env / run_env — framework owns step loop
+  inference : direct call to ActorRuntime::perform_local_inference_batch()
+              ONNX model called once per loop iter with batched [128, 8] input
+              (dynamic batch_size dim in ONNX export — no per-env sequential calls)
+  env count : 128  (ScalarVecEnv — 128 independent LunarLander clones)
+  max steps : 500 per episode
+  backend   : NdArray (CPU)
+  binary    : bench_beta2/src/bin/bench_lunar_set_env_128.rs
+
+Analysis — per-loop-iter cost breakdown (622 µs total):
+  Batched ONNX inference [128×8 → 128×4]:   ~100–150 µs  (est; 1-env was ~4.7 µs)
+  Environment stepping (128 × ~1 µs):         ~128 µs
+  Vec allocation overhead (128-element batch): ~20–50 µs
+  Episode management / auto-reset overhead:   ~300 µs  (est; many concurrent episodes)
+
+Transition throughput scaling:
+  1 env  → 147 240 transitions/sec  (6.8 µs/transition)
+  128 env → 205 656 transitions/sec  (4.9 µs/transition)
+  Batching benefit: 1.40× more transitions/sec
+  Per-transition cost reduction: 28 % cheaper per transition with batching
+
+  The batched ONNX call amortises inference overhead across 128 obs in one
+  forward pass, reducing per-transition inference cost.  The remaining gap
+  vs linear scaling (expected 128× but achieved 1.4×) is dominated by:
+    1. Sequential env stepping — 128 LunarLander::step() calls run one-by-one
+       inside ScalarVecEnv (no parallelism); contributes ~128 µs/iter
+    2. Episode management overhead — with 128 envs each capped at 500 steps,
+       ~26 % of steps trigger a done+reset per iter on average, adding
+       flag_last_action_direct() calls for each terminated env
+    3. Per-step Vec allocations scale with env count (128-element batches)
+
+Memory efficiency:
+  1 env:   29.0 MB RSS
+  128 env: 37.2 MB RSS  (+8.2 MB for 128 independent env instances)

@@ -1,0 +1,111 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL — LunarLander comprehensive benchmark
+  1 actor · 1000000 steps/actor · ndarray · 4 logical cores
+═══════════════════════════════════════════════════════════════════
+
+Warming up…
+Warm-up done. Starting benchmark…
+
+  [ 100000 steps/actor    100000 total] 213426 steps/sec
+  [ 200000 steps/actor    200000 total] 214153 steps/sec
+  [ 300000 steps/actor    300000 total] 214971 steps/sec
+  [ 400000 steps/actor    400000 total] 214643 steps/sec
+  [ 500000 steps/actor    500000 total] 214119 steps/sec
+  [ 600000 steps/actor    600000 total] 212933 steps/sec
+  [ 700000 steps/actor    700000 total] 213331 steps/sec
+  [ 800000 steps/actor    800000 total] 212809 steps/sec
+  [ 900000 steps/actor    900000 total] 213210 steps/sec
+  [1000000 steps/actor   1000000 total] 213391 steps/sec
+
+═══════════════════════════════════════════════════════════════════
+  RelayRL LunarLander — FINAL RESULTS  (1 actor)
+═══════════════════════════════════════════════════════════════════
+
+─── Throughput ──────────────────────────────────────────────────────
+  steps/sec (global)           :   213389.7
+  steps/sec per actor          :   213389.7
+  steps/sec per logical core   :    53347.4
+  episodes/sec                 :   3229.439
+  total steps (all actors)     :    1000000
+  steps per actor              :    1000000
+  total episodes               :      15134
+  wall time                    :       4.69s
+  logical cores                :          4
+
+─── Episode Statistics ───────────────────────────────────────────────
+  avg steps per episode        :       66.1
+  episode return mean          :   -733.572
+  episode return std dev       :    206.700
+  episode completion variance  :  42724.839
+
+─── Per-Step Timing (µs) ─────────────────────────────────────────────
+  step mean (infer+env)        :      4.112 µs
+  step P50  (round/N)          :      4.042 µs
+  step P95  (round/N)          :      7.211 µs
+  step P99  (round/N)          :     18.005 µs
+  step P99.9                   :     26.957 µs
+  jitter (P99−P50)             :     13.963 µs
+  step std dev (infer)         :      1.618 µs
+
+─── Inference Timing (µs) ────────────────────────────────────────────
+  inference mean               :      3.455 µs
+  inference std dev            :      1.618 µs
+  inference P50               :      3.120 µs
+  inference P95               :      4.953 µs
+  inference P99               :      9.001 µs
+  inference P99.9             :     22.911 µs
+  actor dispatch latency      ≈      3.120 µs  (P50 inference)
+  inference / step ratio       :      0.840
+
+─── Env Step Timing (µs) ─────────────────────────────────────────────
+  env step mean                :      0.657 µs
+  env step std dev             :      0.458 µs
+  env step P50                 :      0.631 µs
+  env step P99                 :      0.889 µs
+  env step / step ratio        :      0.160
+
+─── Scheduling / Overhead ────────────────────────────────────────────
+  overhead per round           :      0.530 µs
+  overhead ratio               :      0.114
+  deadtime per actor           :      0.114
+  round P50                    :      4.042 µs
+  round P99                    :     18.005 µs
+  round std dev                :      2.519 µs
+  action serialization         :   included in inference timing
+  state update / buffer write  :   disabled (traj off)
+  dropped/late updates         :          0
+
+─── Memory ───────────────────────────────────────────────────────────
+  RSS init                     :    28.7 MB
+  RSS peak                     :    51.5 MB
+  RSS mean                     :    40.2 MB
+  RSS final                    :    51.5 MB
+  allocation rate (RSS Δ)      : 4984.782 KB/s
+  /proc samples                :         24
+
+─── CPU / OS ─────────────────────────────────────────────────────────
+  CPU utilisation (1 core %)   :     112.46%
+  CPU util / logical core      :      28.11%
+  mean threads                 :        9.0
+  mean run-queue (1-min avg)   :      1.334
+  context switches total       :         48
+  context switches/sec         :       10.2
+  context switches/step        :   0.000048
+
+─── Efficiency Ratios ────────────────────────────────────────────────
+  steps/sec / logical core     :    53347.4
+  steps/sec / GB RSS (proxy)   :  5439535.0
+  S(n) vs 1-actor baseline     :     10.975
+  overhead ratio               :      0.114
+
+─── Notes (hardware counters require perf) ───────────────────────────
+  cache misses (L1/L2/L3)      : perf stat -e cache-misses,LLC-load-misses
+  IPC                          : perf stat -e cycles,instructions
+  memory bandwidth             : perf stat -e cache-references
+  queue backlog / contention   : not exposed by framework API
+  inter-thread msg latency     ≈ P50 inference − actual ORT time
+  sync wait time               : included in overhead_per_round
+  steps/sec / watt             : requires external power measurement
+  allocator contention         : requires jemalloc/heaptrack profiling
+
+═══════════════════════════════════════════════════════════════════

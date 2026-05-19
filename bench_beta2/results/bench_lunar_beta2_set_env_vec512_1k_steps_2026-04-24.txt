@@ -1,0 +1,42 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — set_env / run_env — VectorLunarLander — 512 envs
+  1000 loop iterations · 512000 total env transitions · ndarray · 4 logical cores
+  env backend: SyncLunarVectorEnvFramework (rayon parallel stepping)
+═══════════════════════════════════════════════════════════════════
+
+set_env OK — registered 512 rayon-parallel LunarLander sub-envs with actor 00000075-b53c-869b-a92c-29da1055c389
+manual request_action smoke test: true
+Warming up (500 loop iters = 256000 env transitions)…
+Warm-up done. Starting timed benchmark (1000 loop iters)…
+
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — VectorLunarLander — FINAL RESULTS  (512 envs)
+═══════════════════════════════════════════════════════════════════
+
+─── Throughput ──────────────────────────────────────────────────────
+  env count                :        512
+  loop iterations          :       1000
+  total env transitions    :     512000
+  wall time                :       2.48 s
+  loop iters/sec           :        404
+  env transitions/sec      :     206602
+  µs / loop iter           :   2478.197
+  µs / env transition      :      4.840
+
+─── OS ──────────────────────────────────────────────────────────────
+  RSS                      :   318.3 MB
+  context switches total   :       1585
+  context switches/iter    :     1.5850
+  logical cores            :          4
+
+─── vs baselines ────────────────────────────────────────────────────
+  scalar-128 transitions/s :     205656  (sequential stepping)
+  vector-128 transitions/s :     206602
+  speedup vs scalar-128    :       1.00×
+  1-env baseline           :     147240  loop iters/sec
+  loop iter speedup        :       0.00×  vs 1-env
+═══════════════════════════════════════════════════════════════════
+
+NOTE: 1k timed steps with 500 warm-up steps. Throughput plateaus at ~206k
+transitions/sec matching scalar-128 — 4-core rayon ceiling reached; sequential
+framework overhead (UUID decode, tensor construction) dominates at 512 envs.

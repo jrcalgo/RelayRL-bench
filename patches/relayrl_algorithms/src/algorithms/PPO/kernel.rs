@@ -69,9 +69,30 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
     ) -> (f32, HashMap<String, f32>);
 
     fn ppo_vf_loss(&mut self, obs: &[TensorData], mask: &[TensorData], ret: &[f32]) -> f32;
+
+    /// Pre-flattened variants: caller converts TensorData → flat arrays once before the
+    /// training loop; these skip the repeated allocation inside each gradient step.
+    /// `compute_stats`: when false, returns empty info map (skips KL/entropy tensor readback).
+    fn ppo_pi_loss_flat(
+        &mut self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        act_flat: &[i64],
+        adv: &[f32],
+        logp_old: &[f32],
+        clip_ratio: f32,
+        compute_stats: bool,
+    ) -> (f32, HashMap<String, f32>);
+
+    fn ppo_vf_loss_flat(
+        &mut self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        ret: &[f32],
+    ) -> f32;
 }
 
-#[cfg(feature = "ndarray-backend")]
+#[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
 mod training {
     use super::*;
 
@@ -79,12 +100,20 @@ mod training {
 
     use burn_autodiff::Autodiff;
     use burn_core::module::Module;
-    use burn_ndarray::NdArray;
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 
+    // Select the autodiff backend at compile time: ndarray takes priority when both are enabled.
+    #[cfg(feature = "ndarray-backend")]
+    use burn_ndarray::NdArray;
+    #[cfg(feature = "ndarray-backend")]
     pub type TB = Autodiff<NdArray>;
+
+    #[cfg(all(feature = "tch-backend", not(feature = "ndarray-backend")))]
+    use burn_tch::LibTorch;
+    #[cfg(all(feature = "tch-backend", not(feature = "ndarray-backend")))]
+    pub type TB = Autodiff<LibTorch<f32>>;
 
     #[derive(Module, Debug)]
     pub struct TrainMlp<B: burn_tensor::backend::Backend> {
@@ -235,6 +264,81 @@ mod training {
             info.insert("clipfrac".to_string(), clipfrac);
             (loss_value, info)
         }
+
+        /// Pre-flattened variant: obs/act/logp are already flat slices, no TensorData allocation.
+        /// When `compute_stats` is false, skips KL/entropy tensor readback (saves two .into_data()
+        /// calls per minibatch on all but the final pass per pi iteration).
+        pub fn train_step_flat(
+            &mut self,
+            obs_flat: &[f32],
+            obs_dim: usize,
+            act_flat: &[i64],
+            adv: &[f32],
+            logp_old: &[f32],
+            clip_ratio: f32,
+            compute_stats: bool,
+        ) -> (f32, HashMap<String, f32>) {
+            let n = (obs_flat.len() / obs_dim.max(1))
+                .min(act_flat.len())
+                .min(adv.len())
+                .min(logp_old.len());
+            if n == 0 {
+                return zero_pi_info();
+            }
+            let net = match self.network.take() {
+                Some(network) => network,
+                None => return zero_pi_info(),
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let logits = net.forward(obs);
+            let log_probs = log_softmax(logits, 1);
+            let act = Tensor::<TB, 2, Int>::from_data(
+                BurnTensorData::new(act_flat[..n].to_vec(), [n, 1]),
+                &device,
+            );
+            let logp = log_probs.gather(1, act).reshape([n]);
+            let adv_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(adv[..n].to_vec(), [n]),
+                &device,
+            );
+            let logp_old_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(logp_old[..n].to_vec(), [n]),
+                &device,
+            );
+            let ratio = (logp.clone() - logp_old_tensor).exp();
+            let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
+            let loss = (ratio.clone() * adv_tensor.clone())
+                .min_pair(clipped_ratio * adv_tensor)
+                .mean()
+                .neg();
+            let loss_value = scalar_from_loss(&loss);
+
+            let grads = loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let net = self.optimizer.step(self.pi_lr, net, grads_params);
+            self.network = Some(net);
+
+            if !compute_stats {
+                return (loss_value, HashMap::new());
+            }
+
+            let logp_values = logp.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n]);
+            let ratio_values = ratio.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![1.0; n]);
+            let entropy = -logp_values.iter().sum::<f32>() / n as f32;
+            let approx_kl = logp_old[..n].iter().zip(logp_values.iter()).map(|(old, new)| old - new).sum::<f32>() / n as f32;
+            let clipfrac = ratio_values.iter().filter(|r| (**r - 1.0).abs() > clip_ratio).count() as f32 / n as f32;
+
+            let mut info = HashMap::new();
+            info.insert("kl".to_string(), approx_kl);
+            info.insert("entropy".to_string(), entropy);
+            info.insert("clipfrac".to_string(), clipfrac);
+            (loss_value, info)
+        }
     }
 
     pub struct VfTrainer {
@@ -288,6 +392,35 @@ mod training {
             let net = self.optimizer.step(self.vf_lr, net, grads_params);
             self.network = Some(net);
 
+            loss_value
+        }
+
+        pub fn train_step_flat(&mut self, obs_flat: &[f32], obs_dim: usize, ret: &[f32]) -> f32 {
+            let n = (obs_flat.len() / obs_dim.max(1)).min(ret.len());
+            if n == 0 {
+                return 0.0;
+            }
+            let net = match self.network.take() {
+                Some(network) => network,
+                None => return 0.0,
+            };
+            let device = <TB as burn_tensor::backend::Backend>::Device::default();
+
+            let obs = Tensor::<TB, 2, Float>::from_data(
+                BurnTensorData::new(obs_flat[..n * obs_dim].to_vec(), [n, obs_dim]),
+                &device,
+            );
+            let v_pred = net.forward(obs).reshape([n]);
+            let ret_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(ret[..n].to_vec(), [n]),
+                &device,
+            );
+            let loss = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+            let loss_value = scalar_from_loss(&loss);
+            let grads = loss.backward();
+            let grads_params = GradientsParams::from_grads(grads, &net);
+            let net = self.optimizer.step(self.vf_lr, net, grads_params);
+            self.network = Some(net);
             loss_value
         }
     }
@@ -360,9 +493,9 @@ pub struct PPOPolicyWithBaseline<
     pub baseline: BaselineValueNetwork<B, InK, OutK>,
     input_dim: usize,
     output_dim: usize,
-    #[cfg(feature = "ndarray-backend")]
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     pi_trainer: Option<training::DiscretePpoTrainer>,
-    #[cfg(feature = "ndarray-backend")]
+    #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     vf_trainer: Option<training::VfTrainer>,
 }
 
@@ -403,7 +536,7 @@ where
         };
         let baseline = BaselineValueNetwork::new(obs_dim, hidden_sizes, activation, device);
 
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         let pi_trainer = if discrete {
             Some(training::DiscretePpoTrainer::new(
                 obs_dim,
@@ -415,7 +548,7 @@ where
             None
         };
 
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         let vf_trainer = Some(training::VfTrainer::new(obs_dim, hidden_sizes, vf_lr));
 
         Self {
@@ -423,9 +556,9 @@ where
             baseline,
             input_dim: obs_dim,
             output_dim: act_dim,
-            #[cfg(feature = "ndarray-backend")]
+            #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
             pi_trainer,
-            #[cfg(feature = "ndarray-backend")]
+            #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
             vf_trainer,
         }
     }
@@ -545,7 +678,7 @@ where
         logp_old: &[TensorData],
         clip_ratio: f32,
     ) -> (f32, HashMap<String, f32>) {
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         if let Some(trainer) = &mut self.pi_trainer {
             return trainer.train_step(obs, act, adv, logp_old, clip_ratio);
         }
@@ -558,11 +691,40 @@ where
     }
 
     fn ppo_vf_loss(&mut self, obs: &[TensorData], _mask: &[TensorData], ret: &[f32]) -> f32 {
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         if let Some(trainer) = &mut self.vf_trainer {
             return trainer.train_step(obs, ret);
         }
 
+        0.0
+    }
+
+    fn ppo_pi_loss_flat(
+        &mut self,
+        obs_flat: &[f32],
+        obs_dim: usize,
+        act_flat: &[i64],
+        adv: &[f32],
+        logp_old: &[f32],
+        clip_ratio: f32,
+        compute_stats: bool,
+    ) -> (f32, HashMap<String, f32>) {
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+        if let Some(trainer) = &mut self.pi_trainer {
+            return trainer.train_step_flat(obs_flat, obs_dim, act_flat, adv, logp_old, clip_ratio, compute_stats);
+        }
+        let mut info = HashMap::new();
+        info.insert("kl".to_string(), 0.0);
+        info.insert("entropy".to_string(), 0.0);
+        info.insert("clipfrac".to_string(), 0.0);
+        (0.0, info)
+    }
+
+    fn ppo_vf_loss_flat(&mut self, obs_flat: &[f32], obs_dim: usize, ret: &[f32]) -> f32 {
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
+        if let Some(trainer) = &mut self.vf_trainer {
+            return trainer.train_step_flat(obs_flat, obs_dim, ret);
+        }
         0.0
     }
 }
@@ -574,7 +736,7 @@ where
     OutK: BasicOps<B>,
 {
     fn get_pi_layer_specs(&self) -> Option<Vec<(usize, usize, Vec<f32>, Vec<f32>)>> {
-        #[cfg(feature = "ndarray-backend")]
+        #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
         {
             let trainer = self.pi_trainer.as_ref()?;
             let network = trainer.network.as_ref()?;
@@ -585,7 +747,6 @@ where
                 .map(|layer| {
                     let w = layer.weight.val();
                     let dims = w.dims();
-                    // Burn Linear stores weights as [in_features, out_features]
                     let in_dim = dims[0];
                     let out_dim = dims[1];
                     let w_data: Vec<f32> =
@@ -605,7 +766,7 @@ where
 
             return Some(specs);
         }
-        #[cfg(not(feature = "ndarray-backend"))]
+        #[cfg(not(any(feature = "ndarray-backend", feature = "tch-backend")))]
         None
     }
 }

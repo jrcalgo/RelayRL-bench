@@ -364,9 +364,11 @@ where
                             .collect();
 
                         // Fire all action requests concurrently.
-                        let action_futures = actor_ids.iter().zip(obs_vecs.iter()).map(|(id, obs_vec)| {
+                        // Consume obs_vecs (move each Vec<f32> directly into TensorData,
+                        // avoiding a per-step per-actor clone).
+                        let action_futures = actor_ids.iter().zip(obs_vecs.into_iter()).map(|(id, obs_vec)| {
                             let obs_tensor = Tensor::<B, 2, Float>::from_data(
-                                TensorData::new(obs_vec.clone(), [1, obs_dim]),
+                                TensorData::new(obs_vec, [1, obs_dim]),
                                 &device,
                             );
                             agent.request_action(vec![*id], obs_tensor, None, 0.0)

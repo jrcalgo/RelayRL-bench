@@ -73,8 +73,8 @@ impl PPOReplayBuffer {
     }
 
     fn finish_path(&self, buffers: &mut Buffers, last_val: f32) {
-        let start = self.metadata.buffer_path_start_idx.load(Ordering::SeqCst);
-        let end = self.metadata.buffer_pointer.load(Ordering::SeqCst);
+        let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
+        let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
         if start >= end {
             return;
         }
@@ -97,7 +97,7 @@ impl PPOReplayBuffer {
 
         self.metadata
             .buffer_path_start_idx
-            .store(end, Ordering::SeqCst);
+            .store(end, Ordering::Relaxed);
     }
 }
 
@@ -138,8 +138,8 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             }
             buffers.values.push(val);
 
-            let next = self.metadata.buffer_pointer.load(Ordering::SeqCst) + 1;
-            self.metadata.buffer_pointer.store(next, Ordering::SeqCst);
+            let next = self.metadata.buffer_pointer.load(Ordering::Relaxed) + 1;
+            self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
 
             if action.get_done() {
                 // Terminal: bootstrap with 0 (episode ended naturally)
@@ -154,7 +154,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
     /// After sampling, buffer is cleared (epoch-level buffer, not replay).
     async fn sample_buffer(&self) -> Result<Batch, ReplayBufferError> {
         let mut buffers = self.buffers.lock().await;
-        let capacity = self.metadata.buffer_pointer.load(Ordering::SeqCst);
+        let capacity = self.metadata.buffer_pointer.load(Ordering::Relaxed);
         if capacity == 0 {
             return Err(ReplayBufferError::BufferSamplingError(
                 "PPO replay buffer is empty".to_string(),
@@ -186,10 +186,10 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         let vals: Vec<f32> = buffers.values[..capacity].to_vec();
 
         // Reset buffer for next epoch
-        self.metadata.buffer_pointer.store(0, Ordering::SeqCst);
+        self.metadata.buffer_pointer.store(0, Ordering::Relaxed);
         self.metadata
             .buffer_path_start_idx
-            .store(0, Ordering::SeqCst);
+            .store(0, Ordering::Relaxed);
         buffers.observations.clear();
         buffers.actions.clear();
         buffers.masks.clear();

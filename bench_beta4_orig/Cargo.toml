@@ -1,0 +1,34 @@
+[workspace]
+members = ["."]
+
+[patch.crates-io]
+relayrl_types = { path = "./patches/relayrl_types" }
+
+[package]
+name = "bench-beta4-orig"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+
+[dependencies]
+relayrl_framework  = { version = "=0.5.0-beta.4", default-features = false, features = ["client"] }
+relayrl_algorithms = { version = "=0.3.0",         default-features = false, features = ["ndarray-backend"] }
+relayrl_types      = { version = "=0.7.2",         default-features = false, features = ["ndarray-backend", "onnx-model"] }
+relayrl_env_trait  = "1.2"
+lunarlander-rl     = { path = "../bench_beta4/lunarlander-rl" }
+
+burn-ndarray = "0.20.1"
+burn-tensor  = "0.20.1"
+rayon        = "1"
+
+tokio   = { version = "1", features = ["full"] }
+futures = "0.3"
+clap    = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "bench_lunar_direct_scalar1"
+path = "src/bin/bench_lunar_direct_scalar1.rs"
+
+[[bin]]
+name = "bench_lunar_set_env_scalar1"
+path = "src/bin/bench_lunar_set_env_scalar1.rs"

@@ -1,0 +1,48 @@
+═══════════════════════════════════════════════════════════════════
+  RelayRL beta.2 — set_env / run_env (direct inference) — LunarLander — 1 env
+  1000000 steps · ndarray · 4 logical cores
+═══════════════════════════════════════════════════════════════════
+
+set_env OK — registered 1 LunarLander env
+manual request_action smoke test: true
+Warming up (5 000 steps)… done.
+
+─── Throughput ──────────────────────────────────────────────────────
+  total steps              :    1000000
+  wall time                :       6.63 s
+  steps/sec                :     150746
+  µs/step                  :      6.634
+
+─── OS ──────────────────────────────────────────────────────────────
+  RSS                      :     28.9 MB
+  context switches total   :          60
+  context switches/step    :      0.0001
+  logical cores            :           4
+
+─── vs baselines ────────────────────────────────────────────────────
+  vs beta.2 manual loop    :       7.88×  (baseline: 19 138 sps)
+  vs patched (inline infer):       0.71×  (baseline: 213 390 sps)
+  vs prev set_env (channel):      10.49×  (prev: 14 370 sps)
+═══════════════════════════════════════════════════════════════════
+
+Notes:
+  API path : set_env / run_env — framework owns step loop
+  inference: direct call to ActorRuntime::perform_local_inference_batch()
+             (no channel send/recv, no oneshot — pure fn call)
+  env count: 1
+  max steps: 500 per episode
+  backend  : NdArray (CPU)
+  binary   : bench_beta2/src/bin/bench_lunar_set_env.rs
+
+Framework changes (direct-inference rewrite):
+  - ActorRuntime no longer has an mpsc inbox for inference requests
+  - perform_local_inference_batch() is now pub(crate) async fn called directly
+  - flag_last_action() likewise called directly — no roundtrip through channel
+  - Trajectory state moved into Mutex<ActorTrajectoryState> on the runtime struct
+  - Context switches drop from ~1.0/step to ~0.0001/step (60 total for 1M steps)
+
+Patches re-applied on updated framework:
+  1. state_manager.rs: removed #[cfg(feature="ndarray-backend")] guard on
+     DType::NdArray arm in tensor_data_to_any.
+  2. actor.rs: send_trajectory() returns Ok early when buffer channel is closed
+     (ActorTrainingDataMode::Disabled drops the receiver at startup).
