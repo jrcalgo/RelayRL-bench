@@ -483,6 +483,10 @@ pub struct PPOPolicyWithBaseline<
     pub baseline: BaselineValueNetwork<B, InK, OutK>,
     input_dim: usize,
     output_dim: usize,
+    // Persistent return normalization (SF-aligned): running mean and variance of returns
+    returns_mean: f32,
+    returns_variance: f32,
+    returns_count: u64,
     #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     actor_critic_trainer: Option<training::ActorCriticTrainer>,
 }
@@ -554,6 +558,9 @@ where
             baseline,
             input_dim: obs_dim,
             output_dim: act_dim,
+            returns_mean: 0.0,
+            returns_variance: 1.0,
+            returns_count: 0,
             #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
             actor_critic_trainer,
         }

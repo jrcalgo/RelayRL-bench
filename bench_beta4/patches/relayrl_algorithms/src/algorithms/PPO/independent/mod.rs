@@ -616,8 +616,6 @@ where
     OutK: TensorKind<B>,
     KN: self::kernel::PPOKernelTrait<B, InK, OutK>,
 {
-    use rand::seq::SliceRandom;
-
     let n = batch.act_flat.len();
     let obs_dim = batch.obs_dim;
 
@@ -638,9 +636,6 @@ where
     let mb_size = mb_size_opt.unwrap_or(n).clamp(1, n);
     let full_batch = mb_size >= n;
 
-    let mut rng = rand::rng();
-    let mut idx: Vec<usize> = (0..n).collect();
-
     let mut first_pi_loss: Option<f32> = None;
     let mut first_vf_loss: Option<f32> = None;
     let mut final_pi_loss = 0.0f32;
@@ -651,7 +646,9 @@ where
     let mut stop_iter = 0u64;
 
     'outer: for i in 0..train_iters {
-        idx.shuffle(&mut rng);
+        // Disabled shuffling to match SF's shuffle_minibatches=False
+        // Keeping sequential order preserves value-bootstrap correlation within trajectories
+        // idx.shuffle(&mut rng);
         let mut epoch_pi_loss = 0.0f32;
         let mut epoch_vf_loss = 0.0f32;
         let mut epoch_kl = 0.0f32;
@@ -663,7 +660,8 @@ where
 
         for start in (0..n).step_by(mb_size) {
             let end = (start + mb_size).min(n);
-            let mb = &idx[start..end];
+            // Use sequential indices instead of shuffled
+            let mb: Vec<usize> = (start..end).collect();
             let compute_stats = is_last_mb || mb_count == 0;
             let (pi_loss, vf_loss, info) = if full_batch {
                 kernel.ppo_combined_loss_flat(
