@@ -138,12 +138,14 @@ mod training {
     #[cfg(all(feature = "ndarray-backend", not(feature = "tch-backend")))]
     pub type TB = Autodiff<NdArray>;
 
-    /// Combined actor-critic MLP: separate pi and vf layer stacks, shared obs encoder not used
-    /// (each head has its own independent layers). Trained with one shared Adam optimizer.
+    /// Combined actor-critic MLP matching Sample Factory's architecture:
+    /// shared encoder (orthogonal gain=sqrt(2) per layer) with separate pi head
+    /// (gain=0.01) and vf head (gain=1.0). All biases zero-initialized.
     #[derive(Module, Debug)]
     pub struct ActorCriticMlp<B: burn_tensor::backend::Backend> {
-        pub pi_layers: Vec<Linear<B>>,
-        pub vf_layers: Vec<Linear<B>>,
+        pub encoder_layers: Vec<Linear<B>>,
+        pub pi_head: Linear<B>,
+        pub vf_head: Linear<B>,
         pub relu: Relu,
         pub obs_dim: usize,
         pub act_dim: usize,
@@ -156,68 +158,55 @@ mod training {
             act_dim: usize,
             device: &B::Device,
         ) -> Self {
-            let mut pi_dims = vec![obs_dim];
-            pi_dims.extend_from_slice(hidden_sizes);
-            pi_dims.push(act_dim);
-            let pi_n = pi_dims.len() - 1;
-            let pi_layers = pi_dims
+            // Shared encoder: obs_dim → h0 → h1 → ... (all hidden layers)
+            let mut enc_dims = vec![obs_dim];
+            enc_dims.extend_from_slice(hidden_sizes);
+
+            let encoder_layers = enc_dims
                 .windows(2)
-                .enumerate()
-                .map(|(i, w)| {
-                    let gain = if i < pi_n - 1 { 2.0f64.sqrt() } else { 0.01 };
-                    // Bias must stay 1-D so we can't use Orthogonal directly on LinearConfig
-                    // (it would also apply to the bias and panic). Initialize bias with Zeros,
-                    // then overwrite the weight parameter with an orthogonal init.
+                .map(|w| {
                     let mut layer = LinearConfig::new(w[0], w[1])
                         .with_initializer(Initializer::Zeros)
                         .init(device);
-                    layer.weight = Initializer::Orthogonal { gain }
+                    layer.weight = Initializer::Orthogonal { gain: 2.0f64.sqrt() }
                         .init_with([w[0], w[1]], Some(w[0]), Some(w[1]), device);
                     layer
                 })
                 .collect();
 
-            let mut vf_dims = vec![obs_dim];
-            vf_dims.extend_from_slice(hidden_sizes);
-            vf_dims.push(1);
-            let vf_n = vf_dims.len() - 1;
-            let vf_layers = vf_dims
-                .windows(2)
-                .enumerate()
-                .map(|(i, w)| {
-                    let gain = if i < vf_n - 1 { 2.0f64.sqrt() } else { 1.0 };
-                    let mut layer = LinearConfig::new(w[0], w[1])
-                        .with_initializer(Initializer::Zeros)
-                        .init(device);
-                    layer.weight = Initializer::Orthogonal { gain }
-                        .init_with([w[0], w[1]], Some(w[0]), Some(w[1]), device);
-                    layer
-                })
-                .collect();
+            let enc_out = *hidden_sizes.last().unwrap_or(&obs_dim);
 
-            Self { pi_layers, vf_layers, relu: Relu::new(), obs_dim, act_dim }
+            // Actor head: near-zero init so initial policy is near-uniform
+            let mut pi_head = LinearConfig::new(enc_out, act_dim)
+                .with_initializer(Initializer::Zeros)
+                .init(device);
+            pi_head.weight = Initializer::Orthogonal { gain: 0.01 }
+                .init_with([enc_out, act_dim], Some(enc_out), Some(act_dim), device);
+
+            // Critic head: gain=1.0 (standard value function init)
+            let mut vf_head = LinearConfig::new(enc_out, 1)
+                .with_initializer(Initializer::Zeros)
+                .init(device);
+            vf_head.weight = Initializer::Orthogonal { gain: 1.0 }
+                .init_with([enc_out, 1], Some(enc_out), Some(1), device);
+
+            Self { encoder_layers, pi_head, vf_head, relu: Relu::new(), obs_dim, act_dim }
+        }
+
+        fn encode(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
+            let mut x = input;
+            for layer in &self.encoder_layers {
+                x = self.relu.forward(layer.forward(x));
+            }
+            x
         }
 
         pub fn pi_forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
-            let mut x = input;
-            for (i, layer) in self.pi_layers.iter().enumerate() {
-                x = layer.forward(x);
-                if i < self.pi_layers.len() - 1 {
-                    x = self.relu.forward(x);
-                }
-            }
-            x
+            self.pi_head.forward(self.encode(input))
         }
 
         pub fn vf_forward(&self, input: Tensor<B, 2, Float>) -> Tensor<B, 2, Float> {
-            let mut x = input;
-            for (i, layer) in self.vf_layers.iter().enumerate() {
-                x = layer.forward(x);
-                if i < self.vf_layers.len() - 1 {
-                    x = self.relu.forward(x);
-                }
-            }
-            x
+            self.vf_head.forward(self.encode(input))
         }
     }
 
@@ -800,11 +789,22 @@ where
         let trainer = self.actor_critic_trainer.as_ref()?;
         let network = trainer.network.as_ref()?;
         let mut specs = Vec::new();
-        for layer in &network.pi_layers {
+        for layer in &network.encoder_layers {
             let w = layer.weight.val();
             let dims = w.dims();
             let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
             let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; dims[1]]
+            };
+            specs.push((dims[0], dims[1], weights, biases));
+        }
+        {
+            let w = network.pi_head.weight.val();
+            let dims = w.dims();
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &network.pi_head.bias {
                 bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
             } else {
                 vec![0.0; dims[1]]
@@ -818,11 +818,22 @@ where
         let trainer = self.actor_critic_trainer.as_ref()?;
         let network = trainer.network.as_ref()?;
         let mut specs = Vec::new();
-        for layer in &network.vf_layers {
+        for layer in &network.encoder_layers {
             let w = layer.weight.val();
             let dims = w.dims();
             let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
             let biases: Vec<f32> = if let Some(bias_param) = &layer.bias {
+                bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
+            } else {
+                vec![0.0; dims[1]]
+            };
+            specs.push((dims[0], dims[1], weights, biases));
+        }
+        {
+            let w = network.vf_head.weight.val();
+            let dims = w.dims();
+            let weights: Vec<f32> = w.into_data().to_vec::<f32>().unwrap_or_default();
+            let biases: Vec<f32> = if let Some(bias_param) = &network.vf_head.bias {
                 bias_param.val().into_data().to_vec::<f32>().unwrap_or_default()
             } else {
                 vec![0.0; dims[1]]
