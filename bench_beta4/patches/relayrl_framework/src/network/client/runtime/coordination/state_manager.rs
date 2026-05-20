@@ -1048,19 +1048,15 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                         trainer.apply_epoch_result(output);
                                         AlgorithmTrait::<RelayRLTrajectory>::log_epoch(&mut trainer);
                                         epoch_count_learner.fetch_add(1, std::sync::atomic::Ordering::Release);
+                                        // Push updated weights synchronously so inference model is
+                                        // current before the next training epoch starts on new data.
                                         let pi_module = trainer.acquire_model_module();
                                         let vf_module = trainer.acquire_value_module();
-                                        if pi_module.is_some() || vf_module.is_some() {
-                                            let rt = Arc::clone(&runtime_learner);
-                                            let dev = device_learner.clone();
-                                            tokio::spawn(async move {
-                                                if let Some(m) = pi_module {
-                                                    let _ = rt.perform_refresh_model(m, dev.clone()).await;
-                                                }
-                                                if let Some(v) = vf_module {
-                                                    let _ = rt.perform_refresh_value_model(v, dev).await;
-                                                }
-                                            });
+                                        if let Some(m) = pi_module {
+                                            let _ = runtime_learner.perform_refresh_model(m, device_learner.clone()).await;
+                                        }
+                                        if let Some(v) = vf_module {
+                                            let _ = runtime_learner.perform_refresh_value_model(v, device_learner.clone()).await;
                                         }
                                         // Drain any data accumulated while training was in flight
                                         pending_train = trainer.start_epoch_training();
@@ -1080,17 +1076,11 @@ impl<B: Backend + BackendMatcher<Backend = B>, const D_IN: usize, const D_OUT: u
                                                         epoch_count_learner.fetch_add(1, std::sync::atomic::Ordering::Release);
                                                         let pi_module = trainer.acquire_model_module();
                                                         let vf_module = trainer.acquire_value_module();
-                                                        if pi_module.is_some() || vf_module.is_some() {
-                                                            let rt = Arc::clone(&runtime_learner);
-                                                            let dev = device_learner.clone();
-                                                            tokio::spawn(async move {
-                                                                if let Some(m) = pi_module {
-                                                                    let _ = rt.perform_refresh_model(m, dev.clone()).await;
-                                                                }
-                                                                if let Some(v) = vf_module {
-                                                                    let _ = rt.perform_refresh_value_model(v, dev).await;
-                                                                }
-                                                            });
+                                                        if let Some(m) = pi_module {
+                                                            let _ = runtime_learner.perform_refresh_model(m, device_learner.clone()).await;
+                                                        }
+                                                        if let Some(v) = vf_module {
+                                                            let _ = runtime_learner.perform_refresh_value_model(v, device_learner.clone()).await;
                                                         }
                                                     }
                                                 }

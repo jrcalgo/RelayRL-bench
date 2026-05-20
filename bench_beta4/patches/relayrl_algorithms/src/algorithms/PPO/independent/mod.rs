@@ -485,7 +485,19 @@ where
             match slot.replay_buffer
                 .finalize_and_drain_first_n_blocking(fresh_values, current_version, max_version_lag, n, self.hyperparams.normalize_returns)
             {
-                Some(batch) => jobs.push((kernel, batch)),
+                Some(mut batch) => {
+                    // Recompute logp_old from the current burn model — eliminates both the
+                    // ORT/burn numerical mismatch and same-epoch staleness. Values are already
+                    // refreshed above (fresh_values); this completes the picture for log-probs.
+                    // Cost: one extra CPU forward pass per epoch (no backward).
+                    let fresh_logp = kernel.get_pi_logprobs_flat(
+                        &batch.obs_flat, batch.obs_dim, &batch.act_flat,
+                    );
+                    if fresh_logp.len() == batch.logp_flat.len() {
+                        batch.logp_flat = fresh_logp;
+                    }
+                    jobs.push((kernel, batch))
+                },
                 None => { slot.kernel = Some(kernel); continue; }
             }
         }

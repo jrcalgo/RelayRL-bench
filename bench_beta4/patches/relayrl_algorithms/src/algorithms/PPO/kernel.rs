@@ -111,9 +111,12 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         act_flat: &[i64],
     ) -> Vec<f32>;
 
+<<<<<<< HEAD
     /// Update persistent Welford return statistics and return normalized returns
     /// clamped to ±5σ (matching SF's returns_normalizer behaviour).
     fn normalize_returns_persistent(&mut self, ret: &[f32]) -> Vec<f32>;
+=======
+>>>>>>> b3580f2 (PPO refactor for convergence, benchmarks updated accordingly)
 }
 
 // Training module: compiled when either ndarray or tch backend is available.
