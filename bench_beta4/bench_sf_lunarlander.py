@@ -29,7 +29,7 @@ from sample_factory.train import run_rl
 
 
 def make_lunarlander(full_env_name, cfg=None, env_config=None, render_mode=None):
-    return gymnasium.make("LunarLander-v3")
+    return gymnasium.make("LunarLander-v2")
 
 
 register_env("LunarLander-v3", make_lunarlander)

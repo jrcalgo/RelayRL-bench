@@ -43,11 +43,13 @@ const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent 
 const TRAJ_PER_EPOCH: u64 = 64;
 // Step-count epoch trigger: 64 envs × 90-step rollout = 5760, matches SF exactly
 const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64; // 5760
-// 2× drain-epoch cap: 2 × ~64 eps = 128 eps max in buffer
-const MAX_BUFFERED_EPISODES: u64 = 128;
+// Drain at most one epoch's worth of episodes per update (~36 eps at EpLen≈160)
+const MAX_BUFFERED_EPISODES: u64 = 40;
 // 600_000 loop iterations × 64 envs ≈ 38.4M total env frames
 const TOTAL_STEPS: usize = 600_000;
-const BUFFER_SIZE: ReplayBufferSize = 500_000;
+// One epoch of on-policy data only — evicts stale transitions immediately.
+// Matches SF's collect-train-discard loop: 64 envs × 90 steps = 5760 transitions.
+const BUFFER_SIZE: ReplayBufferSize = 6_000;
 
 // ─────────────────────────── Main ───────────────────────────────────────────
 
