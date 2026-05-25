@@ -73,6 +73,8 @@ use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 
 use std::path::PathBuf;
 
+pub use algorithms::SFPPO::SFPPOParams;
+
 pub use algorithms::DDPG::{
     DDPGAlgorithm, DDPGKernelTrait, DDPGParams, IDDPGAlgorithm, IDDPGParams, MADDPGAlgorithm,
     MADDPGParams, MultiagentDDPGKernelTrait,

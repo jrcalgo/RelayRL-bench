@@ -1,6 +1,8 @@
 #[allow(non_snake_case)]
 pub mod DDPG;
 #[allow(non_snake_case)]
+pub mod SFPPO;
+#[allow(non_snake_case)]
 pub mod PPO;
 #[allow(non_snake_case)]
 pub mod REINFORCE;
@@ -18,6 +20,8 @@ pub use DDPG::IDDPGAlgorithm;
 pub use DDPG::IndependentDDPGAlgorithm;
 pub use DDPG::MADDPGAlgorithm;
 pub use DDPG::MultiagentDDPGAlgorithm;
+
+pub use SFPPO::SFPPOParams;
 
 pub use PPO::IPPOAlgorithm;
 pub use PPO::IndependentPPOAlgorithm;
