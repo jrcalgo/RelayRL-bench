@@ -76,3 +76,7 @@ path = "src/bin/bench_lunar_eval_py.rs"
 [[bin]]
 name = "bench_lunar_sfppo_py"
 path = "src/bin/bench_lunar_sfppo_py.rs"
+
+[[bin]]
+name = "bench_lunar_eval_envpool"
+path = "src/bin/bench_lunar_eval_envpool.rs"
