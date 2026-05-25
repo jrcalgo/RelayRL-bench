@@ -68,3 +68,7 @@ path = "src/bin/bench_lunar_ppo_py.rs"
 [[bin]]
 name = "bench_start_latency"
 path = "src/bin/bench_start_latency.rs"
+
+[[bin]]
+name = "bench_lunar_eval_py"
+path = "src/bin/bench_lunar_eval_py.rs"
