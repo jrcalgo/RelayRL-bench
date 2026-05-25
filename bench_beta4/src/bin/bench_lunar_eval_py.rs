@@ -35,7 +35,7 @@ use bench_beta4::py_env::make_lunar_lander_vec;
 
 const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
-const ENV_COUNT: u32 = 64;
+const ENV_COUNT: u32 = 1024;
 
 // Warm-up: 500 steps × 64 envs = 32k transitions (amortises ONNX JIT / first-call overhead)
 const WARMUP_STEPS: usize = 500;
