@@ -9,11 +9,13 @@
 //!
 //! Run:
 //!   /usr/bin/time -v ./target/release/bench_lunar_eval_envpool
+//!   /usr/bin/time -v ./target/release/bench_lunar_eval_envpool --envs 4096
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use burn_ndarray::NdArray;
+use clap::Parser;
 
 use relayrl_framework::prelude::network::{
     ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, ModelMode,
@@ -26,11 +28,19 @@ use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
 
 use bench_beta4::py_env::make_envpool_lunar_lander_vec;
 
+// ─────────────────────────── CLI ────────────────────────────────────────────
+
+#[derive(Parser)]
+struct Cli {
+    /// Number of parallel environments
+    #[arg(long, default_value_t = 1024)]
+    envs: u32,
+}
+
 // ─────────────────────────── Constants ──────────────────────────────────────
 
 const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
-const ENV_COUNT: u32 = 1024;
 
 const WARMUP_STEPS: usize = 500;
 const TIMED_STEPS: usize = 5_000;
@@ -100,19 +110,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     type B = NdArray;
 
+    let cli = Cli::parse();
+    let env_count = cli.envs;
+
     let num_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
 
     let model = load_lunarlander_model()?;
     println!("══════════════════════════════════════════════════════════════════");
-    println!("  RelayRL beta4 — eval — LunarLander-v3 — EnvPool — {} envs", ENV_COUNT);
+    println!("  RelayRL beta4 — eval — LunarLander-v3 — EnvPool — {} envs", env_count);
     println!("  model  : {MODEL_DIR}/lunarlander_policy.onnx  (8→64→64→4, 4996 params)");
     println!("  backend: NdArray (ONNX-runtime inference, CPU) + EnvPool C++ thread pool");
     println!("  warmup : {} steps × {} envs = {} transitions",
-             WARMUP_STEPS, ENV_COUNT, WARMUP_STEPS * ENV_COUNT as usize);
+             WARMUP_STEPS, env_count, WARMUP_STEPS * env_count as usize);
     println!("  timed  : {} steps × {} envs = {} transitions",
-             TIMED_STEPS, ENV_COUNT, TIMED_STEPS * ENV_COUNT as usize);
+             TIMED_STEPS, env_count, TIMED_STEPS * env_count as usize);
     println!("  cores  : {num_cores} logical");
     println!("══════════════════════════════════════════════════════════════════\n");
 
@@ -135,25 +148,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actor_id = actor_ids[0];
 
     // ── EnvPool env ───────────────────────────────────────────────────────────
-    let ep_env = make_envpool_lunar_lander_vec(ENV_COUNT as usize, OBS_DIM, ACT_DIM)
+    let ep_env = make_envpool_lunar_lander_vec(env_count as usize, OBS_DIM, ACT_DIM)
         .map_err(|e| format!("EnvPool env creation failed: {e}"))?;
     let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(ep_env);
-    agent.set_env(actor_id, boxed, ENV_COUNT).await?;
-    println!("set_env OK — {} EnvPool LunarLander-v3 sub-envs registered\n", ENV_COUNT);
+    agent.set_env(actor_id, boxed, env_count).await?;
+    println!("set_env OK — {} EnvPool LunarLander-v3 sub-envs registered\n", env_count);
 
     // ── Warm-up ───────────────────────────────────────────────────────────────
-    println!("Warming up ({} steps × {} envs)…", WARMUP_STEPS, ENV_COUNT);
+    println!("Warming up ({} steps × {} envs)…", WARMUP_STEPS, env_count);
     let t_warmup = Instant::now();
     agent.run_env(actor_id, WARMUP_STEPS).await?;
     let warmup_wall = t_warmup.elapsed().as_secs_f64();
     println!("Warm-up done in {warmup_wall:.2}s  ({:.0} env transitions/sec)\n",
-             (WARMUP_STEPS * ENV_COUNT as usize) as f64 / warmup_wall);
+             (WARMUP_STEPS * env_count as usize) as f64 / warmup_wall);
 
     // ── Baseline /proc snapshot ───────────────────────────────────────────────
     let before = read_proc_stats();
 
     // ── Timed run ─────────────────────────────────────────────────────────────
-    println!("Starting timed run ({} steps × {} envs)…", TIMED_STEPS, ENV_COUNT);
+    println!("Starting timed run ({} steps × {} envs)…", TIMED_STEPS, env_count);
     let t0 = Instant::now();
     agent.run_env(actor_id, TIMED_STEPS).await?;
     let wall = t0.elapsed().as_secs_f64();
@@ -162,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let after = read_proc_stats();
 
     // ── Derived metrics ───────────────────────────────────────────────────────
-    let total_transitions = TIMED_STEPS * ENV_COUNT as usize;
+    let total_transitions = TIMED_STEPS * env_count as usize;
     let steps_per_sec     = TIMED_STEPS as f64 / wall;
     let transitions_sec   = total_transitions as f64 / wall;
     let us_per_step       = 1_000_000.0 / steps_per_sec;
@@ -176,12 +189,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("══════════════════════════════════════════════════════════════════");
-    println!("  RESULTS — LunarLander-v3 eval — RelayRL+EnvPool — {} envs", ENV_COUNT);
+    println!("  RESULTS — LunarLander-v3 eval — RelayRL+EnvPool — {} envs", env_count);
     println!("══════════════════════════════════════════════════════════════════");
 
     println!();
     println!("─── Throughput ────────────────────────────────────────────────────");
-    println!("  env count              : {:>10}", ENV_COUNT);
+    println!("  env count              : {:>10}", env_count);
     println!("  loop steps (timed)     : {:>10}", TIMED_STEPS);
     println!("  total env transitions  : {:>10}", total_transitions);
     println!("  wall time              : {:>10.3} s", wall);
@@ -207,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("─── Timing breakdown ──────────────────────────────────────────────");
     println!("  warmup  ({:>5} steps): {:>8.2} s  ({:.0} transitions/sec)",
-             WARMUP_STEPS, warmup_wall, (WARMUP_STEPS * ENV_COUNT as usize) as f64 / warmup_wall);
+             WARMUP_STEPS, warmup_wall, (WARMUP_STEPS * env_count as usize) as f64 / warmup_wall);
     println!("  timed   ({:>5} steps): {:>8.2} s  ({:.0} transitions/sec)",
              TIMED_STEPS, wall, transitions_sec);
     println!("══════════════════════════════════════════════════════════════════");
