@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  RelayRL PPO — LunarLander-v3 — 64 envs — Python/gymnasium backend");
     println!("  lr={PI_LR}  batch={MINI_BATCH_SIZE}  epochs={TRAIN_PI_ITERS}  normalize_returns={NORMALIZE_RETURNS}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  ent={ENT_COEF}  vf_coef={VF_COEF}");
-    println!("  net=[128,128]  seed=42  max_ep_steps={MAX_STEPS}  env_count={ENV_COUNT}");
+    println!("  net=[128,128]  seed=1  max_ep_steps={MAX_STEPS}  env_count={ENV_COUNT}");
     println!("============================================================");
 
     let config_path = PathBuf::from("./config.json");
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_env(actor_id, boxed, ENV_COUNT).await?;
 
     let burn_device = <B as burn_tensor::backend::Backend>::Device::default();
-    <B as burn_tensor::backend::Backend>::seed(&burn_device, 42);
+    <B as burn_tensor::backend::Backend>::seed(&burn_device, 1);
     let kernel = PPOKernel::<B, Float, Float>::new_with_schedule(
         OBS_DIM,
         ACT_DIM,

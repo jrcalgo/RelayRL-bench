@@ -324,6 +324,199 @@ impl VectorEnvironment for PyVectorEnv {
     }
 }
 
+// ─────────────────────────── EnvPoolVecEnv ───────────────────────────────────
+
+/// Wraps an EnvPool gymnasium-mode env as a [`VectorEnvironment`].
+///
+/// EnvPool differences vs gymnasium SyncVectorEnv:
+///   - Releases the GIL during `env.step()` and steps all envs on a C++ thread pool.
+///   - Returns obs/rewards as float32 natively — no `astype` conversions needed.
+///   - Returns term/trunc as bool natively — no `astype` conversions needed.
+///   - Expects actions as int32, not int64.
+pub struct EnvPoolVecEnv {
+    env_obj: PyObject,
+    np: PyObject,
+    n_envs: usize,
+    obs_dim: usize,
+    act_dim: usize,
+    act_discrete: bool,
+    uuids: Mutex<Vec<EnvironmentUuid>>,
+    uuid_to_idx: Mutex<HashMap<EnvironmentUuid, usize>>,
+    obs_cache: Mutex<Vec<u8>>,
+    obs_stats: Mutex<ObsRunningStats>,
+}
+
+unsafe impl Send for EnvPoolVecEnv {}
+unsafe impl Sync for EnvPoolVecEnv {}
+
+impl EnvPoolVecEnv {
+    pub fn new(
+        env_obj: PyObject,
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        act_discrete: bool,
+    ) -> Self {
+        let np: PyObject = Python::with_gil(|py| py.import("numpy").unwrap().into());
+        Self {
+            env_obj,
+            np,
+            n_envs,
+            obs_dim,
+            act_dim,
+            act_discrete,
+            uuids: Mutex::new(Vec::new()),
+            uuid_to_idx: Mutex::new(HashMap::new()),
+            obs_cache: Mutex::new(vec![0u8; n_envs * obs_dim * 4]),
+            obs_stats: Mutex::new(ObsRunningStats::new(obs_dim)),
+        }
+    }
+
+    fn normalize_obs(&self, raw: Vec<u8>) -> Vec<u8> {
+        let floats: &[f32] = bytemuck::cast_slice(&raw);
+        let mut stats = self.obs_stats.lock().unwrap();
+        stats.update_batch(floats, self.n_envs);
+        let normed = stats.normalize(floats);
+        bytemuck::cast_slice::<f32, u8>(&normed).to_vec()
+    }
+
+    /// Extract flat f32 bytes from a numpy array already guaranteed float32 C-contiguous.
+    /// Skips the `ascontiguousarray` cast used by PyVectorEnv since EnvPool guarantees this.
+    fn extract_flat_obs(&self, _py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<Vec<u8>> {
+        let raw: Vec<u8> = obj.call_method0("tobytes").ok()?.extract().ok()?;
+        if raw.len() == self.n_envs * self.obs_dim * 4 {
+            Some(raw)
+        } else {
+            None
+        }
+    }
+}
+
+/// Convert 1-byte-per-env discrete actions to `int32[n_envs]` numpy array for EnvPool.
+fn batch_actions_to_py_i32<'py>(
+    py: Python<'py>,
+    np: &Bound<'py, PyAny>,
+    actions: &[u8],
+    n_envs: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let i32s: Vec<i32> = actions[..n_envs.min(actions.len())]
+        .iter()
+        .map(|&b| b as i32)
+        .collect();
+    let i32_bytes: &[u8] = bytemuck::cast_slice(&i32s);
+    let bytes_obj = PyBytes::new(py, i32_bytes);
+    np.call_method1("frombuffer", (bytes_obj, "int32"))
+}
+
+impl relayrl_env_trait::Environment for EnvPoolVecEnv {
+    fn run_environment(&self) -> Result<(), EnvironmentError> { Ok(()) }
+
+    fn build_observation(&self) -> Result<Box<dyn Any>, EnvironmentError> {
+        Err(EnvironmentError::EnvironmentError(
+            "EnvPoolVecEnv: call VectorEnvironment::reset instead of build_observation".into(),
+        ))
+    }
+
+    fn observation_dtype(&self) -> EnvDType { EnvDType::NdArray(EnvNdArrayDType::F32) }
+    fn action_dtype(&self) -> EnvDType { EnvDType::NdArray(EnvNdArrayDType::F32) }
+    fn observation_dim(&self) -> usize { self.obs_dim }
+    fn action_dim(&self) -> usize { self.act_dim }
+    fn flat_observation_bytes(&self) -> Vec<u8> { self.obs_cache.lock().unwrap().clone() }
+    fn action_is_discrete(&self) -> bool { self.act_discrete }
+    fn kind(&self) -> EnvironmentKind { EnvironmentKind::Vector }
+
+    fn into_handle(self: Box<Self>) -> EnvironmentHandle {
+        EnvironmentHandle::Vector(self as Box<dyn VectorEnvironment>)
+    }
+}
+
+impl VectorEnvironment for EnvPoolVecEnv {
+    fn init_num_envs(&self, num_envs: usize) -> Result<Vec<EnvironmentUuid>, EnvironmentError> {
+        let ids: Vec<Uuid> = (0..num_envs).map(|_| Uuid::new_v4()).collect();
+        let map: HashMap<_, _> = ids.iter().copied().enumerate().map(|(i, u)| (u, i)).collect();
+        *self.uuids.lock().unwrap() = ids.clone();
+        *self.uuid_to_idx.lock().unwrap() = map;
+        Ok(ids)
+    }
+
+    fn reset(&self, env_ids: &[EnvironmentUuid]) -> Result<Vec<VectorEnvReset>, EnvironmentError> {
+        Python::with_gil(|py| {
+            let result = self
+                .env_obj
+                .bind(py)
+                .call_method0("reset")
+                .map_err(|e| EnvironmentError::EnvironmentError(e.to_string()))?;
+
+            let obs_obj = if let Ok(tup) = result.downcast::<PyTuple>() {
+                tup.get_item(0)
+                    .map_err(|e| EnvironmentError::ObservationBuildingError(e.to_string()))?
+            } else {
+                result.clone()
+            };
+
+            let raw = self.extract_flat_obs(py, &obs_obj).ok_or_else(|| {
+                EnvironmentError::ObservationBuildingError(format!(
+                    "reset: expected [{} × {}] float32 obs",
+                    self.n_envs, self.obs_dim
+                ))
+            })?;
+            let flat = self.normalize_obs(raw);
+            *self.obs_cache.lock().unwrap() = flat.clone();
+
+            let stride = self.obs_dim * 4;
+            let idx_map = self.uuid_to_idx.lock().unwrap();
+            let resets = env_ids
+                .iter()
+                .filter_map(|uuid| {
+                    let &idx = idx_map.get(uuid)?;
+                    Some(VectorEnvReset {
+                        env_id: *uuid,
+                        observation: flat[idx * stride..(idx + 1) * stride].to_vec(),
+                        info: None,
+                    })
+                })
+                .collect();
+            Ok(resets)
+        })
+    }
+
+    fn n_envs(&self) -> usize { self.n_envs }
+
+    fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Vec<f32>, Vec<bool>)> {
+        Python::with_gil(|py| {
+            let np = self.np.bind(py);
+            // EnvPool expects int32 actions
+            let py_actions = batch_actions_to_py_i32(py, &np, actions, self.n_envs).ok()?;
+
+            let result = self
+                .env_obj
+                .bind(py)
+                .call_method1("step", (py_actions,))
+                .ok()?;
+            let tup = result.downcast::<PyTuple>().ok()?;
+
+            // obs: already float32 C-contiguous from EnvPool — skip ascontiguousarray
+            let raw_obs = self.extract_flat_obs(py, &tup.get_item(0).ok()?)?;
+            let flat_obs = self.normalize_obs(raw_obs);
+            *self.obs_cache.lock().unwrap() = flat_obs.clone();
+
+            // rewards: already float32 from EnvPool — tobytes directly
+            let rew_bytes: Vec<u8> = tup
+                .get_item(1).ok()?
+                .call_method0("tobytes").ok()?
+                .extract().ok()?;
+            let rewards: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&rew_bytes).to_vec();
+
+            // dones: term/trunc already bool from EnvPool
+            let t_raw: Vec<u8> = tup.get_item(2).ok()?.call_method0("tobytes").ok()?.extract().ok()?;
+            let u_raw: Vec<u8> = tup.get_item(3).ok()?.call_method0("tobytes").ok()?.extract().ok()?;
+            let dones: Vec<bool> = t_raw.iter().zip(u_raw.iter()).map(|(&t, &u)| t != 0 || u != 0).collect();
+
+            Some((flat_obs, rewards, dones))
+        })
+    }
+}
+
 // ─────────────────────────── gymnasium factory helpers ───────────────────────
 
 /// Create a `gymnasium.SyncVectorEnv` wrapping `num_envs` LunarLander-v3 instances.
@@ -337,12 +530,42 @@ pub fn make_lunar_lander_vec(
         let gym = py.import("gymnasium")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("num_envs", num_envs as i64)?;
-        kwargs.set_item("max_episode_steps", 500i64)?;
+        // max_episode_steps is a TimeLimit wrapper kwarg passed via wrappers in gymnasium 1.x
+        // LunarLander-v3 has a built-in 500-step limit; no extra wrapper needed
         let vec_env = gym.call_method("make_vec", ("LunarLander-v3",), Some(&kwargs))?;
         // Initial reset so the env is in a clean state before set_env hands it to the framework
         vec_env.call_method0("reset")?;
         Ok(PyVectorEnv::new(
             vec_env.unbind(),
+            num_envs,
+            obs_dim,
+            act_dim,
+            true, // discrete
+        ))
+    })
+}
+
+/// Create an EnvPool `LunarLander-v3` vec-env with `num_envs` parallel envs.
+/// EnvPool releases the GIL during step and uses a C++ thread pool internally.
+pub fn make_envpool_lunar_lander_vec(
+    num_envs: usize,
+    obs_dim: usize,
+    act_dim: usize,
+) -> PyResult<EnvPoolVecEnv> {
+    Python::with_gil(|py| {
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let ep = py.import("envpool")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("env_type", "gymnasium")?;
+        kwargs.set_item("num_envs", num_envs as i64)?;
+        kwargs.set_item("seed", 0i64)?;
+        kwargs.set_item("num_threads", num_threads as i64)?;
+        let env = ep.call_method("make", ("LunarLander-v3",), Some(&kwargs))?;
+        env.call_method0("reset")?;
+        Ok(EnvPoolVecEnv::new(
+            env.unbind(),
             num_envs,
             obs_dim,
             act_dim,

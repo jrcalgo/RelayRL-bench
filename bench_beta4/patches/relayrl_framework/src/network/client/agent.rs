@@ -103,6 +103,7 @@ pub enum RuntimeStatisticsReturnType {
 pub enum AlgorithmCfg {
     PPO(Option<relayrl_algorithms::PPOParams>),
     IPPO(Option<relayrl_algorithms::IPPOParams>),
+    SFPPO(Option<relayrl_algorithms::SFPPOParams>),
     MAPPO(Option<relayrl_algorithms::MAPPOParams>),
     REINFORCE(Option<relayrl_algorithms::REINFORCEParams>),
     IREINFORCE(Option<relayrl_algorithms::IREINFORCEParams>),

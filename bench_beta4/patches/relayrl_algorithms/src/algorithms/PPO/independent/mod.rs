@@ -485,7 +485,19 @@ where
             match slot.replay_buffer
                 .finalize_and_drain_first_n_blocking(fresh_values, current_version, max_version_lag, n, self.hyperparams.normalize_returns)
             {
-                Some(batch) => jobs.push((kernel, batch)),
+                Some(mut batch) => {
+                    // Recompute logp_old from the current burn model — eliminates both the
+                    // ORT/burn numerical mismatch and same-epoch staleness. Values are already
+                    // refreshed above (fresh_values); this completes the picture for log-probs.
+                    // Cost: one extra CPU forward pass per epoch (no backward).
+                    let fresh_logp = kernel.get_pi_logprobs_flat(
+                        &batch.obs_flat, batch.obs_dim, &batch.act_flat,
+                    );
+                    if fresh_logp.len() == batch.logp_flat.len() {
+                        batch.logp_flat = fresh_logp;
+                    }
+                    jobs.push((kernel, batch))
+                },
                 None => { slot.kernel = Some(kernel); continue; }
             }
         }
@@ -616,8 +628,6 @@ where
     OutK: TensorKind<B>,
     KN: self::kernel::PPOKernelTrait<B, InK, OutK>,
 {
-    use rand::seq::SliceRandom;
-
     let n = batch.act_flat.len();
     let obs_dim = batch.obs_dim;
 
@@ -638,8 +648,9 @@ where
     let mb_size = mb_size_opt.unwrap_or(n).clamp(1, n);
     let full_batch = mb_size >= n;
 
-    let mut rng = rand::rng();
-    let mut idx: Vec<usize> = (0..n).collect();
+    // Persistent return normalization (SF-aligned): update running stats on full batch,
+    // then use normalized returns for all mini-batch iterations this epoch.
+    let ret_normalized = kernel.normalize_returns_persistent(&batch.ret_flat);
 
     let mut first_pi_loss: Option<f32> = None;
     let mut first_vf_loss: Option<f32> = None;
@@ -651,7 +662,9 @@ where
     let mut stop_iter = 0u64;
 
     'outer: for i in 0..train_iters {
-        idx.shuffle(&mut rng);
+        // Disabled shuffling to match SF's shuffle_minibatches=False
+        // Keeping sequential order preserves value-bootstrap correlation within trajectories
+        // idx.shuffle(&mut rng);
         let mut epoch_pi_loss = 0.0f32;
         let mut epoch_vf_loss = 0.0f32;
         let mut epoch_kl = 0.0f32;
@@ -663,12 +676,13 @@ where
 
         for start in (0..n).step_by(mb_size) {
             let end = (start + mb_size).min(n);
-            let mb = &idx[start..end];
+            // Use sequential indices instead of shuffled
+            let mb: Vec<usize> = (start..end).collect();
             let compute_stats = is_last_mb || mb_count == 0;
             let (pi_loss, vf_loss, info) = if full_batch {
                 kernel.ppo_combined_loss_flat(
                     &batch.obs_flat, obs_dim,
-                    &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &batch.ret_flat,
+                    &batch.act_flat, &batch.adv_norm, &batch.logp_flat, &ret_normalized,
                     clip_ratio, ent_coef, vf_coef, compute_stats,
                 )
             } else {
@@ -679,7 +693,7 @@ where
                 let act_mb: Vec<i64> = mb.iter().map(|&j| batch.act_flat[j]).collect();
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp_flat[j]).collect();
-                let ret_mb: Vec<f32> = mb.iter().map(|&j| batch.ret_flat[j]).collect();
+                let ret_mb: Vec<f32> = mb.iter().map(|&j| ret_normalized[j]).collect();
                 kernel.ppo_combined_loss_flat(
                     &obs_mb, obs_dim, &act_mb, &adv_mb, &logp_mb, &ret_mb,
                     clip_ratio, ent_coef, vf_coef, compute_stats,

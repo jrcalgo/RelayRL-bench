@@ -1,0 +1,19 @@
+{
+    "model_file": "lunarlander_policy.pt",
+    "model_type": "pt",
+    "input_dtype": {
+        "Tch": "F32"
+    },
+    "output_dtype": {
+        "Tch": "F32"
+    },
+    "input_shape": [
+        1,
+        8
+    ],
+    "output_shape": [
+        1,
+        4
+    ],
+    "default_device": "Cpu"
+}

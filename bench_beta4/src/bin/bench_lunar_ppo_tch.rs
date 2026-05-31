@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  RelayRL PPO — LunarLander-v3 — 64 envs — LibTorch backend");
     println!("  lr={PI_LR}  batch={MINI_BATCH_SIZE}  epochs={TRAIN_PI_ITERS}  normalize_returns={NORMALIZE_RETURNS}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  ent={ENT_COEF}  vf_coef={VF_COEF}");
-    println!("  net=[128,128]  seed=42  max_ep_steps={MAX_STEPS}  env_count={ENV_COUNT}");
+    println!("  net=[128,128]  seed=1  max_ep_steps={MAX_STEPS}  env_count={ENV_COUNT}");
     println!("============================================================");
 
     let config_path = PathBuf::from("./config.json");
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actor_ids = agent.get_actor_ids()?;
     let actor_id = actor_ids[0];
 
-    let env = LunarLanderEnv::<B>::new_with_seed(MAX_STEPS, Default::default(), 42);
+    let env = LunarLanderEnv::<B>::new_with_seed(MAX_STEPS, Default::default(), 1);
     let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(env);
     agent.set_env(actor_id, boxed, ENV_COUNT).await?;
 
@@ -125,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
                 max_version_lag: 1,
                 normalize_returns: NORMALIZE_RETURNS,
+                rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),
                 ..Default::default()
             })),
             SaveModelPath::from("./models/lunar_ppo_tch"),

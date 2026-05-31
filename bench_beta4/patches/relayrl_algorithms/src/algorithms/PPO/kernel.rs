@@ -110,6 +110,10 @@ pub trait PPOKernelTrait<B: Backend + BackendMatcher, InK: TensorKind<B>, OutK: 
         obs_dim: usize,
         act_flat: &[i64],
     ) -> Vec<f32>;
+
+    /// Update persistent Welford return statistics and return normalized returns
+    /// clamped to ±5σ (matching SF's returns_normalizer behaviour).
+    fn normalize_returns_persistent(&mut self, ret: &[f32]) -> Vec<f32>;
 }
 
 // Training module: compiled when either ndarray or tch backend is available.
@@ -483,6 +487,10 @@ pub struct PPOPolicyWithBaseline<
     pub baseline: BaselineValueNetwork<B, InK, OutK>,
     input_dim: usize,
     output_dim: usize,
+    // Persistent return normalization (SF-aligned): running mean and variance of returns
+    returns_mean: f32,
+    returns_variance: f32,
+    returns_count: u64,
     #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
     actor_critic_trainer: Option<training::ActorCriticTrainer>,
 }
@@ -554,6 +562,9 @@ where
             baseline,
             input_dim: obs_dim,
             output_dim: act_dim,
+            returns_mean: 0.0,
+            returns_variance: 1.0,
+            returns_count: 0,
             #[cfg(any(feature = "ndarray-backend", feature = "tch-backend"))]
             actor_critic_trainer,
         }
@@ -786,6 +797,25 @@ where
         let mask_t = burn_tensor::Tensor::<B, 2, OutK>::ones([n, self.output_dim], &device);
         let v = self.baseline.forward(obs_t, mask_t);
         v.into_data().to_vec::<f32>().unwrap_or_else(|_| vec![0.0; n])
+    }
+
+    fn normalize_returns_persistent(&mut self, ret: &[f32]) -> Vec<f32> {
+        // Welford online update of return mean/variance (SF-aligned persistent stats)
+        for &r in ret {
+            self.returns_count += 1;
+            let delta = r - self.returns_mean;
+            self.returns_mean += delta / self.returns_count as f32;
+            let delta2 = r - self.returns_mean;
+            self.returns_variance += delta * delta2;
+        }
+        let std = if self.returns_count > 1 {
+            (self.returns_variance / (self.returns_count - 1) as f32).sqrt().max(1e-8)
+        } else {
+            1.0
+        };
+        ret.iter()
+            .map(|&r| ((r - self.returns_mean) / std).clamp(-5.0, 5.0))
+            .collect()
     }
 }
 
