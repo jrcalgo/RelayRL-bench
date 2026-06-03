@@ -8,7 +8,9 @@ use crate::network::client::agent::AlgorithmInitArgs;
 use crate::network::client::agent::{ActorInferenceMode, ClientModes};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::coordination::lifecycle_manager::SharedTransportAddresses;
-use crate::network::client::runtime::coordination::state_manager::{ActorUuid, env_dtype_to_dtype};
+use crate::network::client::runtime::coordination::state_manager::{
+    ActorUuid, decode_argmax, decode_continuous_bytes, env_dtype_to_dtype,
+};
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
 use crate::network::client::runtime::data::sinks::transport_sink::TransportError;
 #[cfg(any(feature = "nats-transport", feature = "zmq-transport"))]
@@ -115,6 +117,22 @@ pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
         model_module: ModelModule<B>,
         device: DeviceType,
     ) -> Pin<Box<dyn Future<Output = Result<(), ActorError>> + Send + 'a>>;
+
+    /// Combined inference + action decode in one call.  Mirrors beta4's
+    /// `perform_local_byte_inference`: takes raw `EnvDType`s, runs the primary
+    /// `reloadable_model`, decodes argmax/continuous, and returns action bytes directly
+    /// — avoiding the intermediate `TensorData` allocation in the eval loop.
+    #[allow(clippy::too_many_arguments)]
+    fn perform_local_byte_inference_erased<'a>(
+        &'a self,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &'a EnvDType,
+        act_dtype: &'a EnvDType,
+        discrete: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>>;
 }
 
 struct ActorTrajectoryState {
@@ -421,6 +439,51 @@ impl<
             .unwrap_or_else(|_| module.flat_batch_zeros(n_envs)))
     }
 
+    /// Combined inference + decode for the eval loop.  Mirrors beta4's
+    /// `perform_local_byte_inference`: takes raw `EnvDType` params, runs the primary
+    /// `reloadable_model`, decodes argmax/continuous actions, and returns action bytes —
+    /// all without an intermediate `TensorData` allocation at the call site.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn perform_local_byte_inference(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &EnvDType,
+        act_dtype: &EnvDType,
+        discrete: bool,
+    ) -> Result<Vec<u8>, ActorError> {
+        let model = self.reloadable_model.load_full().ok_or_else(|| {
+            ActorError::SystemError(
+                "Model not loaded/available for actor inference".to_string(),
+            )
+        })?;
+        let module = model.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            env_dtype_to_dtype(obs_dtype)?,
+            obs_bytes.to_vec(),
+            B::get_supported_backend(),
+        );
+        let output = module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
+
+        let action_bytes = if discrete {
+            decode_argmax(&output.data, &env_dtype_to_dtype(act_dtype)?, n_envs, act_dim)
+        } else {
+            decode_continuous_bytes(
+                &output.data,
+                &output.dtype,
+                n_envs * act_dim,
+                &env_dtype_to_dtype(act_dtype)?,
+            )
+        };
+        Ok(action_bytes)
+    }
+
     pub(crate) async fn flag_last_action(
         &self,
         reward: f32,
@@ -624,6 +687,24 @@ where
         Box::pin(async move {
             self.perform_env_refresh_model(name, model_module, device)
                 .await
+        })
+    }
+
+    fn perform_local_byte_inference_erased<'a>(
+        &'a self,
+        obs_bytes: &'a [u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &'a EnvDType,
+        act_dtype: &'a EnvDType,
+        discrete: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.perform_local_byte_inference(
+                obs_bytes, n_envs, obs_dim, act_dim, obs_dtype, act_dtype, discrete,
+            )
+            .await
         })
     }
 }

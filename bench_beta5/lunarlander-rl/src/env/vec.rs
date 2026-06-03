@@ -217,8 +217,9 @@ impl relayrl_env_trait::Environment for SyncLunarVectorEnvFramework {
     fn observation_dim(&self) -> usize { OBS_DIM }
     fn action_dim(&self) -> usize { ACT_DIM }
     fn flat_observation_bytes(&self) -> Vec<u8> {
-        let obs = self.inner.lock().unwrap().env.get_stacked_obs();
-        bytemuck::cast_slice::<f32, u8>(&obs).to_vec()
+        // get_stacked_obs_ref borrows the buffer in-place; one cast + alloc instead of two.
+        let inner = self.inner.lock().unwrap();
+        bytemuck::cast_slice::<f32, u8>(inner.env.get_stacked_obs_ref()).to_vec()
     }
     fn flat_mask_bytes(&self) -> Option<Vec<u8>> { None }
     fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError> {
@@ -280,15 +281,15 @@ impl VectorEnvironment for SyncLunarVectorEnvFramework {
     fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         let mut inner = self.inner.lock().unwrap();
         let step_results = inner.env.step_all(actions);
-        let new_obs_f32 = inner.env.get_stacked_obs();
-        let mut rewards   = Vec::with_capacity(step_results.len());
-        let mut dones     = Vec::with_capacity(step_results.len());
-        let mut truncated = Vec::with_capacity(step_results.len());
+        // Obs bytes are omitted: the framework eval loop reads them separately via
+        // flat_observation_bytes() on the next iteration, so returning them here is waste.
+        // Truncated is always false for LunarLander; returning Vec::new() avoids the alloc.
+        let mut rewards = Vec::with_capacity(step_results.len());
+        let mut dones   = Vec::with_capacity(step_results.len());
         for (r, d) in step_results {
             rewards.push(r);
             dones.push(d);
-            truncated.push(false);
         }
-        Some((bytemuck::cast_slice::<f32, u8>(&new_obs_f32).to_vec(), None, rewards, dones, truncated))
+        Some((Vec::new(), None, rewards, dones, Vec::new()))
     }
 }

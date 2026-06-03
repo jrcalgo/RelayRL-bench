@@ -911,33 +911,20 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
                             "[StateManager] flat_observation_bytes returned None".to_string(),
                         )
                     })?;
-                    let obs_dtype_conv = env_dtype_to_dtype(&obs_dtype)?;
-                    let raw_output = runtime
-                        .perform_env_byte_inference_erased(
-                            "model",
+                    // Use combined inference+decode (mirrors beta4's perform_local_byte_inference):
+                    // eliminates the TensorData intermediate alloc and returns Vec<u8> directly.
+                    let action_bytes = runtime
+                        .perform_local_byte_inference_erased(
                             &obs_bytes,
                             n_envs,
                             obs_dim,
-                            &obs_dtype_conv,
+                            act_dim,
+                            &obs_dtype,
+                            &act_dtype,
+                            discrete,
                         )
                         .await
                         .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-
-                    let action_bytes = if discrete {
-                        decode_argmax(
-                            &raw_output.data,
-                            &env_dtype_to_dtype(&act_dtype)?,
-                            n_envs,
-                            act_dim,
-                        )
-                    } else {
-                        decode_continuous_bytes(
-                            &raw_output.data,
-                            &raw_output.dtype,
-                            n_envs * act_dim,
-                            &env_dtype_to_dtype(&act_dtype)?,
-                        )
-                    };
 
                     let _ = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
                         StateManagerError::GetEnvInfoError(
@@ -1065,7 +1052,7 @@ pub(crate) fn env_dtype_to_dtype(dtype: &EnvDType) -> Result<DType, ActorError> 
 }
 
 /// Argmax over `[n_envs × act_dim]` output bytes; handles f32 and f64 output dtypes.
-fn decode_argmax(
+pub(crate) fn decode_argmax(
     data: &[u8],
     dtype: &relayrl_types::data::tensor::DType,
     n_envs: usize,
@@ -1132,7 +1119,7 @@ fn decode_argmax(
     }
 }
 
-fn decode_continuous_bytes(
+pub(crate) fn decode_continuous_bytes(
     data: &[u8],
     src_dtype: &DType,
     count: usize,

@@ -507,10 +507,10 @@ impl VectorEnvironment for EnvPoolVecEnv {
                 .ok()?;
             let tup = result.downcast::<PyTuple>().ok()?;
 
-            // obs: already float32 C-contiguous from EnvPool — skip ascontiguousarray
+            // obs: move into cache (no clone) — framework eval loop reads via flat_observation_bytes().
             let raw_obs = self.extract_flat_obs(py, &tup.get_item(0).ok()?)?;
             let flat_obs = self.normalize_obs(raw_obs);
-            *self.obs_cache.lock().unwrap() = flat_obs.clone();
+            *self.obs_cache.lock().unwrap() = flat_obs;
 
             // rewards: already float32 from EnvPool — tobytes directly
             let rew_bytes: Vec<u8> = tup
@@ -519,13 +519,13 @@ impl VectorEnvironment for EnvPoolVecEnv {
                 .extract().ok()?;
             let rewards: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&rew_bytes).to_vec();
 
-            // terminated and truncated: already bool from EnvPool
+            // terminated: needed for episode tracking
             let t_raw: Vec<u8> = tup.get_item(2).ok()?.call_method0("tobytes").ok()?.extract().ok()?;
-            let u_raw: Vec<u8> = tup.get_item(3).ok()?.call_method0("tobytes").ok()?.extract().ok()?;
             let terminated: Vec<bool> = t_raw.iter().map(|&t| t != 0).collect();
-            let truncated: Vec<bool> = u_raw.iter().map(|&u| u != 0).collect();
 
-            Some((flat_obs, None, rewards, terminated, truncated))
+            // Obs return and truncated omitted: eval loop discards the full step result.
+            // flat_observation_bytes() on the next iter reads from obs_cache above.
+            Some((Vec::new(), None, rewards, terminated, Vec::new()))
         })
     }
 }
