@@ -1,6 +1,8 @@
 /target/
 bench_beta2/target/
 bench_beta3/target/
+bench_beta4/target/
+bench_beta5/target/
 trajectories/
 trajectories_ippo8/
 trajectories_mappo8/

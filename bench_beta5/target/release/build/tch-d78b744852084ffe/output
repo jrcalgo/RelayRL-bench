@@ -1,3 +1,0 @@
-cargo:rustc-link-arg=-Wl,-rpath=/usr/local/lib/python3.11/dist-packages/torch/lib
-cargo:rustc-link-arg=-Wl,--no-as-needed
-cargo:rustc-link-arg=-ltorch
