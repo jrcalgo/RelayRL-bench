@@ -11,11 +11,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BETA5_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BETA4_DIR="$(cd "${SCRIPT_DIR}/../../bench_beta4" && pwd)"
 
-# ── Runtime dependency paths ───────────────────────────────────────────────────
-ORT_PATH_BETA4="/usr/local/lib/python3.11/dist-packages/onnxruntime/capi/libonnxruntime.so.1.25.0"
-ORT_PATH_BETA5="/usr/local/lib/python3.11/dist-packages/onnxruntime/capi/libonnxruntime.so.1.26.0"
-LIBTORCH_DIR="/usr/local/lib/python3.11/dist-packages/torch/lib"
-
 # ── Cargo package names per workspace ─────────────────────────────────────────
 declare -A WS_PACKAGE
 WS_PACKAGE[beta4]="bench-beta4"
@@ -93,10 +88,12 @@ CATEGORY_BINARIES["LunarLander/Eval-tch"]="bench_lunar_eval_envpool_tch"
 CATEGORY_BINARIES["GridWorld/PPO"]="bench_grid_ppo_scalar1"
 CATEGORY_BINARIES["Latency"]="bench_start_latency"
 
-# ── Globals set by menu functions ──────────────────────────────────────────────
+# ── Globals set by menu / config functions ────────────────────────────────────
 SELECTED_WORKSPACE=""
 SELECTED_CATEGORY=""
 SELECTED_BINARY=""
+CONF_ORT_PATH=""       # ORT_DYLIB_PATH; defaults to $ORT_DYLIB_PATH from env, else empty
+CONF_LIBTORCH_DIR=""   # prepended to LD_LIBRARY_PATH; defaults to $LIBTORCH_DIR from env, else empty
 CONF_RAYON_THREADS=""
 CONF_ENVS=""
 CONF_PROFILE=""
@@ -140,8 +137,8 @@ print_banner() {
   hrtop
   row ""
   row "   RelayRL Benchmark Launcher"
-  row "   bench_beta4  (0.5.0-beta.4 · ORT 1.25.0)"
-  row "   bench_beta5  (0.5.0-beta.5 · ORT 1.26.0)"
+  row "   bench_beta4  (RelayRL 0.5.0-beta.4)"
+  row "   bench_beta5  (RelayRL 0.5.0-beta.5)"
   row ""
   hrbot
   echo ""
@@ -151,16 +148,14 @@ print_banner() {
 # Prerequisite checks  (one-line errors, exit 1)
 # ═══════════════════════════════════════════════════════════════════════════════
 check_prereqs() {
-  local ws="$1" binary="$2"
-  local ort_path
-  if [[ "$ws" == "beta4" ]]; then ort_path="$ORT_PATH_BETA4"; else ort_path="$ORT_PATH_BETA5"; fi
+  local binary="$1"
 
-  if [[ -n "${NEEDS_ORT[$binary]+_}" ]] && [[ ! -f "$ort_path" ]]; then
-    echo "Error: ONNX Runtime not found at $ort_path — install onnxruntime or set ORT_DYLIB_PATH"; exit 1
+  if [[ -n "${NEEDS_ORT[$binary]+_}" ]] && [[ -z "$CONF_ORT_PATH" || ! -f "$CONF_ORT_PATH" ]]; then
+    echo "Error: ORT_DYLIB_PATH not set or file not found — set it in the config prompt or export ORT_DYLIB_PATH before running"; exit 1
   fi
 
-  if [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]] && [[ ! -d "$LIBTORCH_DIR" ]]; then
-    echo "Error: LibTorch not found at $LIBTORCH_DIR — run: pip install torch"; exit 1
+  if [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]] && [[ -n "$CONF_LIBTORCH_DIR" ]] && [[ ! -d "$CONF_LIBTORCH_DIR" ]]; then
+    echo "Error: LibTorch dir '$CONF_LIBTORCH_DIR' does not exist — set LIBTORCH_DIR or export LD_LIBRARY_PATH before running"; exit 1
   fi
 
   if [[ -n "${NEEDS_GYMNASIUM[$binary]+_}" ]]; then
@@ -175,34 +170,29 @@ check_prereqs() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ORT mismatch warning
+# ORT override notice
 # Most PPO/eval binaries call std::env::set_var("ORT_DYLIB_PATH", ...) at startup,
-# overriding the script's export with their compile-time path. If that .so is
-# absent on disk, the binary will fail at ORT-load time.
+# baking in their compile-time ORT path and overriding the script's export.
+# Only bench_lunar_direct_scalar1 and bench_lunar_set_env_scalar1 respect the
+# exported value. Show a one-time notice so the user knows what to expect.
 # ═══════════════════════════════════════════════════════════════════════════════
-warn_ort_mismatch() {
-  local ws="$1" binary="$2"
-  local ort_path
-  if [[ "$ws" == "beta4" ]]; then ort_path="$ORT_PATH_BETA4"; else ort_path="$ORT_PATH_BETA5"; fi
-
-  if [[ -n "${OVERRIDES_ORT_INTERNALLY[$binary]+_}" ]] && [[ ! -f "$ort_path" ]]; then
+warn_ort_internal_override() {
+  local binary="$1"
+  if [[ -n "${OVERRIDES_ORT_INTERNALLY[$binary]+_}" ]]; then
     echo ""
     hrtop
-    row "  ⚠  ORT VERSION MISMATCH"
+    row "  ℹ  ORT path note"
     hrsep
-    row "This binary hardcodes its ORT path at compile time:"
-    wrap_row "  $ort_path"
-    row "That file does not exist on disk. The binary may fail"
-    row "at ORT-load time regardless of what this script exports."
+    row "This binary sets ORT_DYLIB_PATH internally at startup"
+    row "using the path it was compiled against, overriding any"
+    row "value exported by this script."
     row ""
-    row "Fix options:"
-    row "  1. symlink the missing .so to the installed version"
-    row "  2. recompile the binary against the available ORT"
+    row "If it was compiled against a different ORT version than"
+    row "what is installed, it will fail at runtime. To fix:"
+    row "  · symlink the missing libonnxruntime.so to the one"
+    row "    that is installed, or recompile the binary."
     hrbot
     echo ""
-    local ans
-    read -rp "  Continue anyway? [y/N]: " ans || true
-    [[ "${ans:-N}" =~ ^[Yy]$ ]] || { echo "  Aborted."; exit 1; }
   fi
 }
 
@@ -245,8 +235,8 @@ select_workspace() {
   echo "  Select workspace:"
   echo ""
   local -a items=(
-    "bench_beta5   RelayRL 0.5.0-beta.5  ORT 1.26.0  (current)"
-    "bench_beta4   RelayRL 0.5.0-beta.4  ORT 1.25.0  (reference)"
+    "bench_beta5   RelayRL 0.5.0-beta.5  (current)"
+    "bench_beta4   RelayRL 0.5.0-beta.4  (reference)"
     "Quit"
   )
   PS3=$'\n  Workspace: '
@@ -303,12 +293,8 @@ select_binary() {
 # ═══════════════════════════════════════════════════════════════════════════════
 show_bench_info() {
   local ws="$1" binary="$2"
-  local ws_dir ort_path bin_path
-  if [[ "$ws" == "beta4" ]]; then
-    ws_dir="$BETA4_DIR"; ort_path="$ORT_PATH_BETA4"
-  else
-    ws_dir="$BETA5_DIR"; ort_path="$ORT_PATH_BETA5"
-  fi
+  local ws_dir bin_path
+  if [[ "$ws" == "beta4" ]]; then ws_dir="$BETA4_DIR"; else ws_dir="$BETA5_DIR"; fi
   bin_path="${ws_dir}/target/release/${binary}"
 
   echo ""
@@ -321,7 +307,7 @@ show_bench_info() {
   wrap_row "${BENCH_CONSTANTS[$binary]}"
   hrsep
 
-  # Build dependency string
+  # Dependencies
   local deps="none"
   [[ -n "${NEEDS_ORT[$binary]+_}" ]]       && deps="ORT"
   [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]]  && { [[ "$deps" == "none" ]] && deps="LibTorch"   || deps="${deps} + LibTorch"; }
@@ -329,19 +315,22 @@ show_bench_info() {
   [[ -n "${NEEDS_ENVPOOL[$binary]+_}" ]]   && { [[ "$deps" == "none" ]] && deps="envpool"    || deps="${deps} + envpool"; }
   row "  Deps     : $deps"
 
+  # Show current env var values (or unset notice) so the user knows what they're starting with
   if [[ -n "${NEEDS_ORT[$binary]+_}" ]]; then
-    if [[ -f "$ort_path" ]]; then
-      row "  ORT      : OK   $(basename "$ort_path")"
+    local cur_ort="${ORT_DYLIB_PATH:-}"
+    if [[ -n "$cur_ort" ]]; then
+      row "  ORT_DYLIB_PATH  : $cur_ort"
     else
-      row "  ORT      : MISSING  $(basename "$ort_path")"
+      row "  ORT_DYLIB_PATH  : (not set — will prompt)"
     fi
   fi
 
   if [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]]; then
-    if [[ -d "$LIBTORCH_DIR" ]]; then
-      row "  LibTorch : OK   $LIBTORCH_DIR"
+    local cur_lt="${LIBTORCH_DIR:-}"
+    if [[ -n "$cur_lt" ]]; then
+      row "  LIBTORCH_DIR    : $cur_lt"
     else
-      row "  LibTorch : MISSING  $LIBTORCH_DIR"
+      row "  LIBTORCH_DIR    : (not set — will prompt)"
     fi
   fi
 
@@ -368,6 +357,24 @@ collect_config() {
   row "  Runtime Configuration"
   hrbot
   echo ""
+
+  # ORT_DYLIB_PATH — shown only for ORT-dependent binaries
+  CONF_ORT_PATH=""
+  if [[ -n "${NEEDS_ORT[$binary]+_}" ]]; then
+    local cur_ort="${ORT_DYLIB_PATH:-}"
+    local ort_hint="${cur_ort:-not set}"
+    read -rp "  ORT_DYLIB_PATH  [${ort_hint}]: " CONF_ORT_PATH || true
+    CONF_ORT_PATH="${CONF_ORT_PATH:-$cur_ort}"
+  fi
+
+  # LIBTORCH_DIR — prepended to LD_LIBRARY_PATH for LibTorch-dependent binaries
+  CONF_LIBTORCH_DIR=""
+  if [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]]; then
+    local cur_lt="${LIBTORCH_DIR:-}"
+    local lt_hint="${cur_lt:-not set}"
+    read -rp "  LIBTORCH_DIR (prepended to LD_LIBRARY_PATH)  [${lt_hint}]: " CONF_LIBTORCH_DIR || true
+    CONF_LIBTORCH_DIR="${CONF_LIBTORCH_DIR:-$cur_lt}"
+  fi
 
   # RAYON_NUM_THREADS — all benchmarks except bench_start_latency
   CONF_RAYON_THREADS=""
@@ -411,22 +418,20 @@ collect_config() {
 # ═══════════════════════════════════════════════════════════════════════════════
 show_run_summary() {
   local ws="$1" binary="$2"
-  local ws_dir ort_path bin_path
-  if [[ "$ws" == "beta4" ]]; then
-    ws_dir="$BETA4_DIR"; ort_path="$ORT_PATH_BETA4"
-  else
-    ws_dir="$BETA5_DIR"; ort_path="$ORT_PATH_BETA5"
-  fi
+  local ws_dir bin_path
+  if [[ "$ws" == "beta4" ]]; then ws_dir="$BETA4_DIR"; else ws_dir="$BETA5_DIR"; fi
   bin_path="${ws_dir}/target/release/${binary}"
 
-  # Build env prefix (for display)
-  local env_str="ORT_DYLIB_PATH=$(basename "$ort_path")"
-  if [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]]; then
-    env_str="${env_str}  LD_LIBRARY_PATH=<torch/lib>  LIBTORCH_USE_PYTORCH=1  LIBTORCH_BYPASS_VERSION_CHECK=1"
-  fi
-  [[ -n "$CONF_RAYON_THREADS" ]] && env_str="${env_str}  RAYON_NUM_THREADS=${CONF_RAYON_THREADS}"
+  # Build env display string from configured values only (omit unset entries)
+  local env_str=""
+  [[ -n "$CONF_ORT_PATH" ]]       && env_str="${env_str:+$env_str  }ORT_DYLIB_PATH=${CONF_ORT_PATH}"
+  [[ -n "$CONF_LIBTORCH_DIR" ]]   && env_str="${env_str:+$env_str  }LD_LIBRARY_PATH=${CONF_LIBTORCH_DIR}:..."
+  [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]] && \
+    env_str="${env_str:+$env_str  }LIBTORCH_USE_PYTORCH=1  LIBTORCH_BYPASS_VERSION_CHECK=1"
+  [[ -n "$CONF_RAYON_THREADS" ]]  && env_str="${env_str:+$env_str  }RAYON_NUM_THREADS=${CONF_RAYON_THREADS}"
+  [[ -z "$env_str" ]] && env_str="(none)"
 
-  # Build command string (for display)
+  # Build command display string
   local cmd_str="$bin_path"
   [[ "$binary" == "bench_lunar_eval_envpool" ]] && cmd_str="${cmd_str} --envs ${CONF_ENVS}"
   [[ "$CONF_PROFILE" =~ ^[Yy] ]]               && cmd_str="/usr/bin/time -v  ${cmd_str}"
@@ -457,12 +462,8 @@ show_run_summary() {
 # ═══════════════════════════════════════════════════════════════════════════════
 confirm_and_run() {
   local ws="$1" binary="$2"
-  local ws_dir ort_path bin_path
-  if [[ "$ws" == "beta4" ]]; then
-    ws_dir="$BETA4_DIR"; ort_path="$ORT_PATH_BETA4"
-  else
-    ws_dir="$BETA5_DIR"; ort_path="$ORT_PATH_BETA5"
-  fi
+  local ws_dir bin_path
+  if [[ "$ws" == "beta4" ]]; then ws_dir="$BETA4_DIR"; else ws_dir="$BETA5_DIR"; fi
   bin_path="${ws_dir}/target/release/${binary}"
 
   local ans
@@ -473,11 +474,12 @@ confirm_and_run() {
   echo "  ── Started: $(date '+%Y-%m-%d %H:%M:%S')  ──  Ctrl-C to abort ──"
   echo ""
 
-  # ── Export environment ───────────────────────────────────────────────────
-  export ORT_DYLIB_PATH="$ort_path"
+  # ── Export environment (only set vars that were actually configured) ──────
+  [[ -n "$CONF_ORT_PATH" ]]      && export ORT_DYLIB_PATH="$CONF_ORT_PATH"
 
   if [[ -n "${NEEDS_LIBTORCH[$binary]+_}" ]]; then
-    export LD_LIBRARY_PATH="${LIBTORCH_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    [[ -n "$CONF_LIBTORCH_DIR" ]] && \
+      export LD_LIBRARY_PATH="${CONF_LIBTORCH_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     export LIBTORCH_USE_PYTORCH=1
     export LIBTORCH_BYPASS_VERSION_CHECK=1
   fi
@@ -518,11 +520,11 @@ main() {
 
     while true; do
       if select_binary "$SELECTED_CATEGORY"; then
-        show_bench_info   "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
-        warn_ort_mismatch "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
-        collect_config    "$SELECTED_BINARY"
-        check_prereqs     "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
-        ensure_binary     "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
+        show_bench_info            "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
+        warn_ort_internal_override "$SELECTED_BINARY"
+        collect_config             "$SELECTED_BINARY"
+        check_prereqs              "$SELECTED_BINARY"
+        ensure_binary              "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
         show_run_summary  "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
         confirm_and_run   "$SELECTED_WORKSPACE" "$SELECTED_BINARY"
 
