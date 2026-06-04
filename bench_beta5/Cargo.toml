@@ -5,6 +5,7 @@ members = [".", "lunarlander-rl", "gridworld-bench"]
 relayrl_types      = { path = "./patches/relayrl_types" }
 relayrl_framework  = { path = "./patches/relayrl_framework" }
 relayrl_algorithms = { path = "./patches/relayrl_algorithms" }
+relayrl_env_trait  = { path = "./patches/relayrl_env_trait" }
 
 [package]
 name = "bench-beta5"

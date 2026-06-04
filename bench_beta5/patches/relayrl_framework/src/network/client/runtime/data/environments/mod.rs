@@ -215,6 +215,17 @@ impl EnvironmentInterface {
             .and_then(|env| env.flat_observation_bytes())
     }
 
+    /// Fill `buf` with the current observation bytes, reusing its allocation.
+    /// Returns `false` when no environment is set.
+    pub(crate) fn fill_obs_bytes(&self, buf: &mut Vec<u8>) -> bool {
+        if let Some(env) = self.env.as_ref() {
+            env.flat_observation_bytes_fill(buf);
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
         self.env.as_ref().and_then(|env| env.flat_mask_bytes())
     }

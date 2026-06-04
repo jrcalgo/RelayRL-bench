@@ -133,6 +133,24 @@ pub(crate) trait ErasedActorRuntime<B: Backend + BackendMatcher<Backend = B>>:
         act_dtype: &'a EnvDType,
         discrete: bool,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ActorError>> + Send + 'a>>;
+
+    /// Synchronous variant of `perform_local_byte_inference_erased`.
+    ///
+    /// Local ONNX inference is inherently synchronous (no I/O, no yield points); wrapping it
+    /// in `Box::pin(async move { ... })` adds one heap allocation per step in the eval loop.
+    /// This method exposes the same combined inference+decode path without `async`, so the
+    /// caller can avoid that allocation when running inside `block_in_place`.
+    #[allow(clippy::too_many_arguments)]
+    fn perform_local_byte_inference_sync(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &EnvDType,
+        act_dtype: &EnvDType,
+        discrete: bool,
+    ) -> Result<Vec<u8>, ActorError>;
 }
 
 struct ActorTrajectoryState {
@@ -706,6 +724,45 @@ where
             )
             .await
         })
+    }
+
+    fn perform_local_byte_inference_sync(
+        &self,
+        obs_bytes: &[u8],
+        n_envs: usize,
+        obs_dim: usize,
+        act_dim: usize,
+        obs_dtype: &EnvDType,
+        act_dtype: &EnvDType,
+        discrete: bool,
+    ) -> Result<Vec<u8>, ActorError> {
+        let model = self.reloadable_model.load_full().ok_or_else(|| {
+            ActorError::SystemError(
+                "Model not loaded/available for actor inference".to_string(),
+            )
+        })?;
+        let module = model.current_module();
+
+        let input = TensorData::new(
+            vec![n_envs, obs_dim],
+            env_dtype_to_dtype(obs_dtype)?,
+            obs_bytes.to_vec(),
+            B::get_supported_backend(),
+        );
+        let output = module
+            .flat_batch_inference(input)
+            .unwrap_or_else(|_| module.flat_batch_zeros(n_envs));
+
+        if discrete {
+            Ok(decode_argmax(&output.data, &env_dtype_to_dtype(act_dtype)?, n_envs, act_dim))
+        } else {
+            Ok(decode_continuous_bytes(
+                &output.data,
+                &output.dtype,
+                n_envs * act_dim,
+                &env_dtype_to_dtype(act_dtype)?,
+            ))
+        }
     }
 }
 

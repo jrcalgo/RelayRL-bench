@@ -217,9 +217,16 @@ impl relayrl_env_trait::Environment for SyncLunarVectorEnvFramework {
     fn observation_dim(&self) -> usize { OBS_DIM }
     fn action_dim(&self) -> usize { ACT_DIM }
     fn flat_observation_bytes(&self) -> Vec<u8> {
-        // get_stacked_obs_ref borrows the buffer in-place; one cast + alloc instead of two.
         let inner = self.inner.lock().unwrap();
         bytemuck::cast_slice::<f32, u8>(inner.env.get_stacked_obs_ref()).to_vec()
+    }
+
+    fn flat_observation_bytes_fill(&self, buf: &mut Vec<u8>) {
+        // Lock once, cast f32 slice to bytes, fill buf in-place — no intermediate Vec.
+        let inner = self.inner.lock().unwrap();
+        let raw: &[u8] = bytemuck::cast_slice(inner.env.get_stacked_obs_ref());
+        buf.clear();
+        buf.extend_from_slice(raw);
     }
     fn flat_mask_bytes(&self) -> Option<Vec<u8>> { None }
     fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError> {
