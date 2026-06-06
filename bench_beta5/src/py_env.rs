@@ -428,13 +428,6 @@ impl relayrl_env_trait::Environment for EnvPoolVecEnv {
     fn action_dim(&self) -> usize { self.act_dim }
     fn flat_observation_bytes(&self) -> Vec<u8> { self.obs_cache.lock().unwrap().clone() }
 
-    fn flat_observation_bytes_fill(&self, buf: &mut Vec<u8>) {
-        // Lock once, extend in-place — no intermediate Vec allocation.
-        let guard = self.obs_cache.lock().unwrap();
-        buf.clear();
-        buf.extend_from_slice(&guard);
-    }
-
     fn flat_mask_bytes(&self) -> Option<Vec<u8>> { None }
 
     fn build_mask(&self) -> Result<Box<dyn Any>, EnvironmentError> {

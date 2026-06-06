@@ -879,64 +879,61 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         env_map: Arc<DashMap<ActorUuid, EnvironmentInterface>>,
         loop_iters: usize,
     ) -> Result<(), StateManagerError> {
-        // The inner loop is fully synchronous (fill_obs_bytes + sync inference + step_bytes
-        // have no async yield points), so block_on(async { ... }) would just spin-complete.
-        // Use block_in_place directly to unblock the Tokio worker thread without the
-        // extra async wrapper allocation.
         tokio::task::block_in_place(|| {
-            let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
-                StateManagerError::GetEnvInfoError(format!(
-                    "[StateManager] Environment interface not found for {}",
-                    actor_id
-                ))
-            })?;
-
-            env_interface.ensure_ready()?;
-
-            let (n_envs, obs_dim, act_dim) = env_interface.n_envs_dims().ok_or_else(|| {
-                StateManagerError::StepEnvError(format!(
-                    "[StateManager] Failed to get environment dimensions for {}",
-                    actor_id
-                ))
-            })?;
-
-            let obs_dtype = env_interface
-                .obs_dtype()
-                .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
-            let act_dtype = env_interface
-                .act_dtype()
-                .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
-            let discrete = env_interface.action_is_discrete().unwrap_or(true);
-
-            // Pre-allocate obs buffer once; fill_obs_bytes refills it in-place each step.
-            let mut obs_buf: Vec<u8> = Vec::with_capacity(n_envs * obs_dim * 4);
-
-            for _ in 0..loop_iters {
-                if !env_interface.fill_obs_bytes(&mut obs_buf) {
-                    return Err(StateManagerError::StepEnvError(
-                        "[StateManager] fill_obs_bytes: no environment set".to_string(),
-                    ));
-                }
-                // Synchronous inference: no Box::pin allocation per step.
-                let action_bytes = runtime
-                    .perform_local_byte_inference_sync(
-                        &obs_buf,
-                        n_envs,
-                        obs_dim,
-                        act_dim,
-                        &obs_dtype,
-                        &act_dtype,
-                        discrete,
-                    )
-                    .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
-
-                let _ = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
-                    StateManagerError::GetEnvInfoError(
-                        "[StateManager] step_bytes returned None".to_string(),
-                    )
+            tokio::runtime::Handle::current().block_on(async {
+                let mut env_interface = env_map.get_mut(&actor_id).ok_or_else(|| {
+                    StateManagerError::GetEnvInfoError(format!(
+                        "[StateManager] Environment interface not found for {}",
+                        actor_id
+                    ))
                 })?;
-            }
-            Ok(())
+
+                env_interface.ensure_ready()?;
+
+                let (n_envs, obs_dim, act_dim) = env_interface.n_envs_dims().ok_or_else(|| {
+                    StateManagerError::StepEnvError(format!(
+                        "[StateManager] Failed to get environment dimensions for {}",
+                        actor_id
+                    ))
+                })?;
+
+                let obs_dtype = env_interface
+                    .obs_dtype()
+                    .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                let act_dtype = env_interface
+                    .act_dtype()
+                    .unwrap_or(EnvDType::NdArray(EnvNdArrayDType::F32));
+                let discrete = env_interface.action_is_discrete().unwrap_or(true);
+
+                for _ in 0..loop_iters {
+                    let obs_bytes = env_interface.flat_observation_bytes().ok_or_else(|| {
+                        StateManagerError::StepEnvError(
+                            "[StateManager] flat_observation_bytes returned None".to_string(),
+                        )
+                    })?;
+                    // Use combined inference+decode (mirrors beta4's perform_local_byte_inference):
+                    // eliminates the TensorData intermediate alloc and returns Vec<u8> directly.
+                    let action_bytes = runtime
+                        .perform_local_byte_inference_erased(
+                            &obs_bytes,
+                            n_envs,
+                            obs_dim,
+                            act_dim,
+                            &obs_dtype,
+                            &act_dtype,
+                            discrete,
+                        )
+                        .await
+                        .map_err(|e| StateManagerError::InferenceRequestError(e.to_string()))?;
+
+                    let _ = env_interface.step_bytes(&action_bytes).ok_or_else(|| {
+                        StateManagerError::GetEnvInfoError(
+                            "[StateManager] step_bytes returned None".to_string(),
+                        )
+                    })?;
+                }
+                Ok(())
+            })
         })
     }
 

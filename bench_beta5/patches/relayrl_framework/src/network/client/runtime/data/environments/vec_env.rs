@@ -70,16 +70,6 @@ pub(crate) trait VecEnvTrait: Send + Sync {
         None
     }
 
-    /// Fill `buf` with current observation bytes, reusing its allocation.
-    /// Default impl falls back to `flat_observation_bytes()`; impls with an
-    /// internal buffer should override to avoid the intermediate Vec.
-    fn flat_observation_bytes_fill(&self, buf: &mut Vec<u8>) {
-        if let Some(obs) = self.flat_observation_bytes() {
-            buf.clear();
-            buf.extend_from_slice(&obs);
-        }
-    }
-
     /// Current masks as raw bytes (`[n_envs × action_bytes_per_env]`).
     fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
         None
@@ -352,14 +342,6 @@ impl VecEnvTrait for ScalarVecEnv {
         Some(self.obs_flat.clone())
     }
 
-    fn flat_observation_bytes_fill(&self, buf: &mut Vec<u8>) {
-        if self.obs_bytes_per_env == 0 {
-            return;
-        }
-        buf.clear();
-        buf.extend_from_slice(&self.obs_flat);
-    }
-
     fn step_bytes(
         &mut self,
         actions: &[u8],
@@ -555,10 +537,6 @@ impl VecEnvTrait for BatchVecEnv {
 
     fn flat_observation_bytes(&self) -> Option<Vec<u8>> {
         Some(self.env.flat_observation_bytes())
-    }
-
-    fn flat_observation_bytes_fill(&self, buf: &mut Vec<u8>) {
-        self.env.flat_observation_bytes_fill(buf);
     }
 
     fn flat_mask_bytes(&self) -> Option<Vec<u8>> {
