@@ -1,22 +1,24 @@
 //! bench_lunar_eval_envpool_2actor — two concurrent actors on LunarLander-v3 via EnvPool.
 //!
 //! Creates two independent actors inside a single RelayRL agent.  Each actor owns a
-//! separate 64-env EnvPool instance.  Both eval loops run concurrently (each via
-//! tokio::spawn so their block_in_place calls land on separate OS threads).
+//! separate N-env EnvPool instance (default 64; set via --envs).  Both eval loops run
+//! concurrently via tokio::spawn so their block_in_place calls land on separate OS threads.
 //!
-//! Measures aggregate throughput (2 × 64 × steps transitions) and per-actor timing.
+//! Measures aggregate throughput (2 × N × steps transitions) and per-actor timing.
 //!
 //! Build:
 //!   cargo build --release -p bench-beta5 --bin bench_lunar_eval_envpool_2actor
 //!
 //! Run:
 //!   /usr/bin/time -v ./target/release/bench_lunar_eval_envpool_2actor
+//!   /usr/bin/time -v ./target/release/bench_lunar_eval_envpool_2actor --envs 4096
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use burn_ndarray::NdArray;
+use clap::Parser;
 
 use relayrl_framework::prelude::network::{
     ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, ModelMode,
@@ -29,13 +31,21 @@ use relayrl_types::model::{ModelFileType, ModelMetadata, ModelModule};
 
 use bench_beta5::py_env::make_envpool_lunar_lander_vec;
 
+// ─────────────────────────── CLI ────────────────────────────────────────────
+
+#[derive(Parser)]
+struct Cli {
+    /// Number of parallel environments per actor
+    #[arg(long, default_value_t = 64)]
+    envs: u32,
+}
+
 // ─────────────────────────── Constants ──────────────────────────────────────
 
 const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
 
 const ACTOR_COUNT: u32 = 2;
-const ENV_COUNT: usize = 64;
 
 const WARMUP_STEPS: usize = 500;
 const TIMED_STEPS: usize = 5_000;
@@ -105,18 +115,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     type B = NdArray;
 
+    let cli = Cli::parse();
+    let env_count = cli.envs as usize;
+
     let num_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
 
     let model = load_lunarlander_model()?;
-    let total_envs = ACTOR_COUNT as usize * ENV_COUNT;
+    let total_envs = ACTOR_COUNT as usize * env_count;
 
     println!("══════════════════════════════════════════════════════════════════");
     println!("  RelayRL beta5 — eval — LunarLander-v3 — EnvPool — 2 actors");
     println!("  model  : {MODEL_DIR}/lunarlander_policy.onnx  (8→64→64→4, 4996 params)");
     println!("  backend: NdArray (ONNX-runtime inference, CPU) + EnvPool C++ thread pool");
-    println!("  actors : {} × {} envs = {} total envs", ACTOR_COUNT, ENV_COUNT, total_envs);
+    println!("  actors : {} × {} envs = {} total envs", ACTOR_COUNT, env_count, total_envs);
     println!("  warmup : {} steps × {} total envs = {} transitions",
              WARMUP_STEPS, total_envs, WARMUP_STEPS * total_envs);
     println!("  timed  : {} steps × {} total envs = {} transitions",
@@ -145,21 +158,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actor1_id = actor_ids[1];
 
     // ── EnvPool envs ─────────────────────────────────────────────────────────
-    // Each actor gets an independent EnvPool instance with ENV_COUNT sub-envs.
-    let ep_env0 = make_envpool_lunar_lander_vec(ENV_COUNT, OBS_DIM, ACT_DIM)
+    // Each actor gets an independent EnvPool instance with env_count sub-envs.
+    let ep_env0 = make_envpool_lunar_lander_vec(env_count, OBS_DIM, ACT_DIM)
         .map_err(|e| format!("EnvPool env0 creation failed: {e}"))?;
-    let ep_env1 = make_envpool_lunar_lander_vec(ENV_COUNT, OBS_DIM, ACT_DIM)
+    let ep_env1 = make_envpool_lunar_lander_vec(env_count, OBS_DIM, ACT_DIM)
         .map_err(|e| format!("EnvPool env1 creation failed: {e}"))?;
 
-    agent.set_env(actor0_id, Box::new(ep_env0), ENV_COUNT as u32).await?;
-    agent.set_env(actor1_id, Box::new(ep_env1), ENV_COUNT as u32).await?;
-    println!("set_env OK — actor0: {} envs | actor1: {} envs\n", ENV_COUNT, ENV_COUNT);
+    agent.set_env(actor0_id, Box::new(ep_env0), env_count as u32).await?;
+    agent.set_env(actor1_id, Box::new(ep_env1), env_count as u32).await?;
+    println!("set_env OK — actor0: {} envs | actor1: {} envs\n", env_count, env_count);
 
     // Wrap in Arc so both spawned tasks share the agent via &self (run_env_eval is &self)
     let agent = Arc::new(agent);
 
     // ── Concurrent warm-up ────────────────────────────────────────────────────
-    println!("Warming up ({} steps × {} actors × {} envs)…", WARMUP_STEPS, ACTOR_COUNT, ENV_COUNT);
+    println!("Warming up ({} steps × {} actors × {} envs)…", WARMUP_STEPS, ACTOR_COUNT, env_count);
     let t_warmup = Instant::now();
     {
         let a0 = Arc::clone(&agent);
@@ -180,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let before = read_proc_stats();
 
     // ── Concurrent timed run ─────────────────────────────────────────────────
-    println!("Starting timed run ({} steps × {} actors × {} envs)…", TIMED_STEPS, ACTOR_COUNT, ENV_COUNT);
+    println!("Starting timed run ({} steps × {} actors × {} envs)…", TIMED_STEPS, ACTOR_COUNT, env_count);
     let t0 = Instant::now();
     {
         let a0 = Arc::clone(&agent);
@@ -199,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Derived metrics ───────────────────────────────────────────────────────
     let total_transitions = TIMED_STEPS * total_envs;
-    let per_actor_transitions = TIMED_STEPS * ENV_COUNT;
+    let per_actor_transitions = TIMED_STEPS * env_count;
     let steps_per_sec     = TIMED_STEPS as f64 / wall;
     let transitions_sec   = total_transitions as f64 / wall;
     let us_per_step       = 1_000_000.0 / steps_per_sec;
@@ -219,7 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("─── Setup ─────────────────────────────────────────────────────────");
     println!("  actors                 : {:>10}", ACTOR_COUNT);
-    println!("  envs per actor         : {:>10}", ENV_COUNT);
+    println!("  envs per actor         : {:>10}", env_count);
     println!("  total envs             : {:>10}", total_envs);
 
     println!();
