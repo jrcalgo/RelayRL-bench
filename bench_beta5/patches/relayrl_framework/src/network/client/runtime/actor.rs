@@ -454,7 +454,10 @@ impl<
         act_dtype: &EnvDType,
         discrete: bool,
     ) -> Result<Vec<u8>, ActorError> {
-        let model = self.reloadable_model.load_full().ok_or_else(|| {
+        // No .await in this function — Guard never crosses a suspension point, so
+        // the future remains Send despite Guard being !Send.
+        let model_guard = self.reloadable_model.load();
+        let model = model_guard.as_ref().ok_or_else(|| {
             ActorError::SystemError(
                 "Model not loaded/available for actor inference".to_string(),
             )
