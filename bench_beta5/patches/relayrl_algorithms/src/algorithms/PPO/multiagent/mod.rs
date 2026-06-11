@@ -13,9 +13,9 @@ pub type MAPPOParams = crate::algorithms::PPO::independent::IPPOParams;
 pub struct MultiAgentPPOAlgorithm<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     _phantom: PhantomData<(B, KindIn, KindOut, Pi)>,
 }
@@ -23,9 +23,9 @@ where
 impl<B, KindIn, KindOut, Pi> MultiAgentPPOAlgorithm<B, KindIn, KindOut, Pi>
 where
     B: Backend + BackendMatcher<Backend = B> + Default,
-    KindIn: TensorKind<B> + BasicOps<B> + Default,
-    KindOut: TensorKind<B> + BasicOps<B> + Default,
-    Pi: NeuralNetwork<B, KindIn, KindOut> + Default,
+    KindIn: TensorKind<B> + BasicOps<B>,
+    KindOut: TensorKind<B> + BasicOps<B>,
+    Pi: NeuralNetwork<B, KindIn, KindOut>,
 {
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]

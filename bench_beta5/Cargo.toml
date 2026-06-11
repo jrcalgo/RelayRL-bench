@@ -21,6 +21,7 @@ lunarlander-rl     = { path = "./lunarlander-rl", features = ["tch-backend"] }
 gridworld-bench    = { path = "./gridworld-bench" }
 
 burn-ndarray = { version = "0.20.1", features = ["blas-openblas-system"] }
+burn-nn      = "0.20.1"
 burn-tch     = "0.20.1"
 burn-tensor  = "0.20.1"
 rayon        = "1"

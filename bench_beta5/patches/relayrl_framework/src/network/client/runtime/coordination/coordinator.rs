@@ -297,9 +297,9 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
         loop_iters: usize,
     ) -> Result<(), CoordinatorError>;
     async fn run_env_with_ppo<
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -310,9 +310,9 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
     where
         B: Default + Send + Sync + 'static;
     async fn run_env_with_ippo<
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -323,9 +323,9 @@ pub(crate) trait ClientEnvironments<B: Backend + BackendMatcher<Backend = B>> {
     where
         B: Default + Send + Sync + 'static;
     async fn run_env_with_mappo<
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -1866,9 +1866,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), CoordinatorError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {
@@ -1918,9 +1918,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), CoordinatorError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {
@@ -1970,9 +1970,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> ClientEnvironments<B> for ClientC
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), CoordinatorError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         match &self.runtime_params {

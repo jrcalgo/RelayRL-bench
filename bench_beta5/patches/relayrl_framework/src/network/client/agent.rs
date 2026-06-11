@@ -632,9 +632,9 @@ pub trait RelayRLActorEnv<B: Backend + BackendMatcher<Backend = B>> {
     async fn run_env_eval(&self, actor_id: ActorUuid, loop_iters: usize)
     -> Result<(), ClientError>;
     async fn run_env_with_ppo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -643,9 +643,9 @@ pub trait RelayRLActorEnv<B: Backend + BackendMatcher<Backend = B>> {
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), ClientError>;
     async fn run_env_with_ippo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -654,9 +654,9 @@ pub trait RelayRLActorEnv<B: Backend + BackendMatcher<Backend = B>> {
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), ClientError>;
     async fn run_env_with_mappo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -697,9 +697,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     }
 
     async fn run_env_with_ppo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -728,9 +728,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     }
 
     async fn run_env_with_ippo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,
@@ -759,9 +759,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> RelayRLActorEnv<B> for RelayRLAge
     }
 
     async fn run_env_with_mappo<
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     >(
         &self,
         actor_id: ActorUuid,

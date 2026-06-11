@@ -947,9 +947,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), StateManagerError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_ppo(
@@ -974,9 +974,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), StateManagerError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_ippo(
@@ -1001,9 +1001,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> StateManager<B> {
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), StateManagerError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Default + Send + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Default + Send + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Default + Send + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         TrainingInterface::<B>::train_mappo(

@@ -545,6 +545,7 @@ name = "bench-beta5"
 version = "0.1.0"
 dependencies = [
  "burn-ndarray",
+ "burn-nn",
  "burn-tch",
  "burn-tensor",
  "bytemuck",

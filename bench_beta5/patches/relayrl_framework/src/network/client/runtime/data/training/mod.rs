@@ -63,9 +63,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), TrainingError>
     where
-        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + Numeric<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + Default + 'static,
+        KindIn: TensorKind<B> + burn_tensor::BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + Numeric<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Clone + Send + 'static,
         B: Default + Send + Sync + 'static,
     {
         #[inline(always)]
@@ -77,9 +77,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         ) -> Result<(), TrainingError>
         where
             B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
-            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Send + 'static,
         {
             if let Some(pi_module) = trainer.acquire_pi_module() {
                 runtime
@@ -113,9 +113,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
             epoch_count: &std::sync::atomic::AtomicU64,
         ) where
             B2: Backend + BackendMatcher<Backend = B2> + Default + Send + 'static,
-            KindIn2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            KindOut2: TensorKind<B2> + BasicOps<B2> + Default + Send + 'static,
-            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Default + Send + 'static,
+            KindIn2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            KindOut2: TensorKind<B2> + BasicOps<B2> + Send + 'static,
+            Pi2: NeuralNetwork<B2, KindIn2, KindOut2> + Send + 'static,
         {
             trainer.apply_epoch_result(output);
             trainer.log_epoch();
@@ -507,9 +507,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), TrainingError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
         unimplemented!()
     }
@@ -524,9 +524,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
         _trainer_spec: PPOTrainerSpec<B, KindIn, KindOut, Pi>,
     ) -> Result<(), TrainingError>
     where
-        KindIn: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        KindOut: TensorKind<B> + BasicOps<B> + Send + Default + 'static,
-        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + Default + 'static,
+        KindIn: TensorKind<B> + BasicOps<B> + Send + 'static,
+        KindOut: TensorKind<B> + BasicOps<B> + Send + 'static,
+        Pi: NeuralNetwork<B, KindIn, KindOut> + Send + 'static,
     {
         unimplemented!()
     }
