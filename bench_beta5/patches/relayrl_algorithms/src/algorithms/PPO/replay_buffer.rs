@@ -331,17 +331,15 @@ impl PPOReplayBuffer {
         let (adv_mean, adv_std) = scalar_stats(&fresh_adv);
         let adv_norm = compute_normed_advantages(&fresh_adv, adv_mean, adv_std.max(1e-8));
 
-        let (ret_flat, ret_mean, ret_std) = if normalize_returns {
-            let (ret_mean, ret_std) = scalar_stats(&fresh_ret);
-            let ret_std = ret_std.max(1e-8);
-            (
-                compute_normed_advantages(&fresh_ret, ret_mean, ret_std),
-                ret_mean,
-                ret_std,
-            )
-        } else {
-            (fresh_ret, 0.0, 1.0)
-        };
+        // Pass raw lambda-returns through. `normalize_persistent_returns` (run
+        // unconditionally in run_ppo_sgd_flat) is the SF-aligned RunningMeanStd
+        // normalizer; z-scoring per-batch here first would feed it an
+        // already mean=0/std=1 stream, making it a redundant no-op and
+        // recalibrating the vf's target scale from scratch (with per-batch
+        // sampling noise) every epoch instead of tracking a smoothly-evolving
+        // running statistic.
+        let _ = normalize_returns;
+        let (ret_flat, ret_mean, ret_std) = (fresh_ret, 0.0, 1.0);
 
         Some(PPOBatch {
             obs: fresh_obs,
