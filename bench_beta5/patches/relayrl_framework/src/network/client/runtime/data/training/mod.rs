@@ -267,6 +267,12 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                     Some(d) => d,
                     None => return Err(TrainingError::EnvironmentInterfaceNotFound(actor_id)),
                 })?;
+                // Discrete envs (e.g. ScalarVecEnv with action_is_discrete()==true) step on a
+                // single raw u8 action-index byte per env, not the act_dtype-width encoding
+                // (e.g. 4-byte F32) that policy_forward_bytes produces for training storage.
+                // Without this decode, step_bytes silently misreads the action buffer and the
+                // env never receives the policy's actual chosen action.
+                let discrete_action_space = env_interface.action_is_discrete().unwrap_or(true);
 
                 let (obs_bytes_per_env, act_bytes_per_env) = {
                     #[inline(always)]
@@ -367,7 +373,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                 let loop_epoch_count = Arc::clone(&shared_epoch_count);
                 for _ in 0..loop_iters {
-                    let (mut new_obs_bytes, new_mask_bytes, rewards, dones, truncateds) = env_interface.step_bytes(&current_act_bytes).ok_or(TrainingError::EnvironmentInterfaceNotFound(actor_id))?;
+                    let (mut new_obs_bytes, new_mask_bytes, rewards, dones, truncateds) = if discrete_action_space {
+                        let act_indices = convert_byte_dtype_to_f32(current_act_bytes.clone(), act_dtype.clone())
+                            .map_err(|e| TrainingError::InferenceRequestError(format!("[TrainingInterface] {} - failed to decode action bytes for env step: {}", actor_id, e)))?;
+                        let env_step_act_bytes: Vec<u8> = act_indices.into_iter().map(|f| f.round() as u8).collect();
+                        env_interface.step_bytes(&env_step_act_bytes).ok_or(TrainingError::EnvironmentInterfaceNotFound(actor_id))?
+                    } else {
+                        env_interface.step_bytes(&current_act_bytes).ok_or(TrainingError::EnvironmentInterfaceNotFound(actor_id))?
+                    };
 
                     if normalize_obs {
                         obs_normalizer.update(&new_obs_bytes)?;
