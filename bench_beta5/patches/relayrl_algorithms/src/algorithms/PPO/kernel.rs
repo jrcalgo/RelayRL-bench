@@ -155,7 +155,10 @@ pub(crate) mod training {
         ) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
+            // epsilon=1e-6 matches Sample Factory's --adam_eps default (burn's
+            // AdamConfig default is 1e-5); betas (0.9, 0.999) already match SF defaults.
             let optimizer = AdamConfig::new()
+                .with_epsilon(1e-6)
                 .init::<TB, ActorCriticMlp<TB>>()
                 .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
