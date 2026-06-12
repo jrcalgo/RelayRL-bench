@@ -16,6 +16,14 @@ use relayrl_types::data::tensor::{DType, TensorData};
 use relayrl_types::prelude::tensor::relayrl::BackendMatcher;
 use std::{collections::HashMap, sync::Arc};
 
+/// Floor applied to per-dimension running obs std before z-score normalization.
+/// Sparse/near-binary obs dims (e.g. LunarLander leg-contact flags) have near-zero
+/// running std early in training; without a floor their z-scores explode (and get
+/// clamped to the +/-10 bound) once the policy starts producing the rare value more
+/// often, destabilizing training. 0.25 keeps such dims' normalized range reasonable
+/// while leaving genuinely high-variance dims (positions, velocities) ~unaffected.
+const OBS_NORM_STD_FLOOR: f32 = 0.25;
+
 // ---- training module  ----
 
 pub(crate) mod training {
@@ -406,7 +414,7 @@ pub(crate) mod training {
             return;
         }
         for i in 0..*in_dim {
-            let s = std[i].max(1e-6);
+            let s = std[i].max(super::OBS_NORM_STD_FLOOR);
             let scale = mean[i] / s;
             for j in 0..*out_dim {
                 let idx = i * *out_dim + j;
@@ -893,7 +901,7 @@ impl<
         }
         let std: Vec<f32> = m2
             .iter()
-            .map(|&v| (v / (count - 1) as f32).sqrt().max(1e-6))
+            .map(|&v| (v / (count - 1) as f32).sqrt().max(OBS_NORM_STD_FLOOR))
             .collect();
         Some((mean.clone(), std))
     }
