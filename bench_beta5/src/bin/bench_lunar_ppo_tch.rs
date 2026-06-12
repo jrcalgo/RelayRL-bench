@@ -154,7 +154,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         target_kl: TARGET_KL,
         traj_per_epoch: TRAJ_PER_EPOCH,
         ent_coef: ENT_COEF,
-        normalize_obs: true,
         max_episode_steps: Some(MAX_STEPS),
         minibatch: Some(MINI_BATCH_SIZE),
         normalize_returns: NORMALIZE_RETURNS,
