@@ -344,7 +344,7 @@ pub(crate) mod training {
                 .unwrap_or_else(|_| vec![0.0; n])
         }
 
-        pub fn get_pi_layer_specs(&self) -> Option<LayerSpecs> {
+        pub fn get_pi_layer_specs(&self, obs_norm: Option<&(Vec<f32>, Vec<f32>)>) -> Option<LayerSpecs> {
             let network = self.network.as_ref()?;
             let mut specs = Vec::new();
             for layer in &network.pi_layers {
@@ -362,10 +362,13 @@ pub(crate) mod training {
                 };
                 specs.push((dims[0], dims[1], weights, biases));
             }
+            if let Some((mean, std)) = obs_norm {
+                bake_obs_normalization(&mut specs, mean, std);
+            }
             Some(specs)
         }
 
-        pub fn get_vf_layer_specs(&self) -> Option<LayerSpecs> {
+        pub fn get_vf_layer_specs(&self, obs_norm: Option<&(Vec<f32>, Vec<f32>)>) -> Option<LayerSpecs> {
             let network = self.network.as_ref()?;
             let mut specs = Vec::new();
             for layer in &network.vf_layers {
@@ -383,7 +386,34 @@ pub(crate) mod training {
                 };
                 specs.push((dims[0], dims[1], weights, biases));
             }
+            if let Some((mean, std)) = obs_norm {
+                bake_obs_normalization(&mut specs, mean, std);
+            }
             Some(specs)
+        }
+    }
+
+    /// Bake a per-dimension z-score normalization `(x - mean) / std` into the first
+    /// layer's weights/biases so a network trained on normalized observations can be
+    /// exported to run on raw observations at inference time. Weight layout is
+    /// row-major [in_dim, out_dim] (flat index = in_idx * out_dim + out_idx).
+    fn bake_obs_normalization(specs: &mut LayerSpecs, mean: &[f32], std: &[f32]) {
+        if specs.is_empty() {
+            return;
+        }
+        let (in_dim, out_dim, weights, biases) = &mut specs[0];
+        if *in_dim != mean.len() || *in_dim != std.len() {
+            return;
+        }
+        for i in 0..*in_dim {
+            let s = std[i].max(1e-6);
+            let scale = mean[i] / s;
+            for j in 0..*out_dim {
+                let idx = i * *out_dim + j;
+                let w = weights[idx];
+                biases[j] -= scale * w;
+                weights[idx] = w / s;
+            }
         }
     }
 
@@ -591,6 +621,11 @@ pub struct DiscretePPOKernel<
     pub returns_count: u64,
     pub ret_denorm_mean: f32,
     pub ret_denorm_std: f32,
+    /// Running per-dimension obs stats (Welford), used for SF-style input normalization.
+    pub obs_mean: Vec<f32>,
+    pub obs_m2: Vec<f32>,
+    pub obs_count: u64,
+    pub normalize_obs: bool,
 }
 
 pub struct ContinuousPPOKernel<
@@ -607,6 +642,11 @@ pub struct ContinuousPPOKernel<
     pub returns_count: u64,
     pub ret_denorm_mean: f32,
     pub ret_denorm_std: f32,
+    /// Running per-dimension obs stats (Welford), used for SF-style input normalization.
+    pub obs_mean: Vec<f32>,
+    pub obs_m2: Vec<f32>,
+    pub obs_count: u64,
+    pub normalize_obs: bool,
 }
 
 pub enum PPOKernel<
@@ -647,6 +687,7 @@ pub struct PPOKernelTrainingArgs {
     pub pi_lr: f64,
     pub vf_coef: f32,
     pub lr_schedule_steps: Option<u64>,
+    pub normalize_obs: bool,
 }
 
 impl<
@@ -716,6 +757,10 @@ impl<
                         returns_count: 0,
                         ret_denorm_mean: 0.0,
                         ret_denorm_std: 1.0,
+                        obs_mean: vec![0.0; obs_dim],
+                        obs_m2: vec![0.0; obs_dim],
+                        obs_count: 0,
+                        normalize_obs: training_args.normalize_obs,
                     },
                 ))
             }
@@ -750,6 +795,10 @@ impl<
                         returns_count: 0,
                         ret_denorm_mean: 0.0,
                         ret_denorm_std: 1.0,
+                        obs_mean: vec![0.0; obs_dim],
+                        obs_m2: vec![0.0; obs_dim],
+                        obs_count: 0,
+                        normalize_obs: training_args.normalize_obs,
                     },
                 ))
             }
@@ -777,6 +826,10 @@ impl<
                 returns_count: kernel.returns_count,
                 ret_denorm_mean: kernel.ret_denorm_mean,
                 ret_denorm_std: kernel.ret_denorm_std,
+                obs_mean: kernel.obs_mean.clone(),
+                obs_m2: kernel.obs_m2.clone(),
+                obs_count: kernel.obs_count,
+                normalize_obs: kernel.normalize_obs,
             }),
             PPOKernel::Continuous(kernel) => PPOKernel::Continuous(ContinuousPPOKernel {
                 pi: kernel.pi.clone(),
@@ -787,6 +840,10 @@ impl<
                 returns_count: kernel.returns_count,
                 ret_denorm_mean: kernel.ret_denorm_mean,
                 ret_denorm_std: kernel.ret_denorm_std,
+                obs_mean: kernel.obs_mean.clone(),
+                obs_m2: kernel.obs_m2.clone(),
+                obs_count: kernel.obs_count,
+                normalize_obs: kernel.normalize_obs,
             }),
         }
     }
@@ -824,12 +881,60 @@ impl<
     Pi: NeuralNetwork<B, KindIn, KindOut>,
 > PPOKernel<B, KindIn, KindOut, Pi>
 {
+    /// Compute (mean, std) per obs dim from the running Welford accumulators, or `None`
+    /// if obs normalization is disabled or there aren't enough samples yet.
+    fn obs_norm_stats(&self) -> Option<(Vec<f32>, Vec<f32>)> {
+        let (mean, m2, count, enabled) = match self {
+            PPOKernel::Discrete(k) => (&k.obs_mean, &k.obs_m2, k.obs_count, k.normalize_obs),
+            PPOKernel::Continuous(k) => (&k.obs_mean, &k.obs_m2, k.obs_count, k.normalize_obs),
+        };
+        if !enabled || count < 2 {
+            return None;
+        }
+        let std: Vec<f32> = m2
+            .iter()
+            .map(|&v| (v / (count - 1) as f32).sqrt().max(1e-6))
+            .collect();
+        Some((mean.clone(), std))
+    }
+
+    /// Update the running per-dimension obs mean/variance (Welford's algorithm) from a
+    /// batch of observations. No-op if obs normalization is disabled.
+    pub fn update_obs_stats(&mut self, obs: &[TensorData], obs_dim: usize) {
+        let (mean, m2, count, enabled) = match self {
+            PPOKernel::Discrete(k) => (&mut k.obs_mean, &mut k.obs_m2, &mut k.obs_count, k.normalize_obs),
+            PPOKernel::Continuous(k) => (&mut k.obs_mean, &mut k.obs_m2, &mut k.obs_count, k.normalize_obs),
+        };
+        if !enabled {
+            return;
+        }
+        let Ok(obs_flat) = training::obs_flat_from_tdata(obs) else {
+            return;
+        };
+        for row in obs_flat.chunks_exact(obs_dim) {
+            *count += 1;
+            for (i, &x) in row.iter().enumerate() {
+                let delta = x - mean[i];
+                mean[i] += delta / *count as f32;
+                let delta2 = x - mean[i];
+                m2[i] += delta * delta2;
+            }
+        }
+    }
+
+    /// Z-score normalize a flat obs buffer using this kernel's running stats, clamped to
+    /// [-10, 10]. Returns a copy of the input unchanged if obs normalization is disabled.
+    fn normalize_obs_flat(&self, obs_flat: &[f32], obs_dim: usize) -> Vec<f32> {
+        normalize_obs_with_stats(obs_flat, obs_dim, self.obs_norm_stats().as_ref())
+    }
+
     /// Extract pi layer specs from the trainer (after training); falls back to inference pi.
     pub fn get_pi_layer_specs(&self) -> Option<LayerSpecs> {
+        let norm_stats = self.obs_norm_stats();
         match self {
             PPOKernel::Discrete(kernel) => {
                 if let Some(t) = &kernel.trainer
-                    && let Some(specs) = t.get_pi_layer_specs()
+                    && let Some(specs) = t.get_pi_layer_specs(norm_stats.as_ref())
                 {
                     return Some(specs);
                 }
@@ -838,7 +943,7 @@ impl<
             }
             PPOKernel::Continuous(kernel) => {
                 if let Some(t) = &kernel.trainer
-                    && let Some(specs) = t.get_pi_layer_specs()
+                    && let Some(specs) = t.get_pi_layer_specs(norm_stats.as_ref())
                 {
                     return Some(specs);
                 }
@@ -849,10 +954,11 @@ impl<
     }
 
     pub fn get_vf_layer_specs(&self) -> Option<LayerSpecs> {
+        let norm_stats = self.obs_norm_stats();
         match self {
             PPOKernel::Discrete(kernel) => {
                 if let Some(t) = &kernel.trainer
-                    && let Some(specs) = t.get_vf_layer_specs()
+                    && let Some(specs) = t.get_vf_layer_specs(norm_stats.as_ref())
                 {
                     return Some(specs);
                 }
@@ -861,7 +967,7 @@ impl<
             }
             PPOKernel::Continuous(kernel) => {
                 if let Some(t) = &kernel.trainer
-                    && let Some(specs) = t.get_vf_layer_specs()
+                    && let Some(specs) = t.get_vf_layer_specs(norm_stats.as_ref())
                 {
                     return Some(specs);
                 }
@@ -870,6 +976,27 @@ impl<
             }
         }
     }
+}
+
+/// Z-score normalize a flat obs buffer (row-major `[n, obs_dim]`) using the given
+/// per-dimension `(mean, std)` stats, clamped to `[-10, 10]`. Returns a copy of the
+/// input unchanged if `stats` is `None`.
+fn normalize_obs_with_stats(
+    obs_flat: &[f32],
+    obs_dim: usize,
+    stats: Option<&(Vec<f32>, Vec<f32>)>,
+) -> Vec<f32> {
+    let Some((mean, std)) = stats else {
+        return obs_flat.to_vec();
+    };
+    obs_flat
+        .iter()
+        .enumerate()
+        .map(|(idx, &x)| {
+            let i = idx % obs_dim;
+            ((x - mean[i]) / std[i]).clamp(-10.0, 10.0)
+        })
+        .collect()
 }
 
 // ---- action byte encoding helpers ----
@@ -1027,6 +1154,7 @@ impl<
                     Ok(f) => f,
                     Err(_) => return vec![0.0; act.len()],
                 };
+                let obs_flat = self.normalize_obs_flat(&obs_flat, obs_dim);
                 let act_flat = training::action_indices_from_tdata(act);
                 return t.logprobs_flat(&obs_flat, obs_dim, &act_flat);
             }
@@ -1065,6 +1193,7 @@ impl<
             Ok(f) => f,
             Err(_) => return vec![0.0; obs.len()],
         };
+        let obs_flat = self.normalize_obs_flat(&obs_flat, obs_dim);
         let v_norm = t.value_forward_flat(&obs_flat, obs_dim);
 
         // The vf is trained on returns that are normalized in two stages:
@@ -1148,6 +1277,7 @@ impl<
         ent_coef: f32,
         compute_stats: bool,
     ) -> (PiLoss, VfLoss, Info) {
+        let norm_stats = self.obs_norm_stats();
         {
             match self {
                 PPOKernel::Discrete(kernel) => {
@@ -1156,6 +1286,7 @@ impl<
                             Ok(f) => f,
                             Err(_) => return (0.0, 0.0, HashMap::new()),
                         };
+                        let obs_flat = normalize_obs_with_stats(&obs_flat, obs_dim, norm_stats.as_ref());
                         let act_flat = training::action_indices_from_tdata(act);
                         return trainer.train_step_discrete(
                             &obs_flat,

@@ -310,6 +310,7 @@ where
             pi_lr: hyperparams.pi_lr as f64,
             vf_coef: hyperparams.vf_coef,
             lr_schedule_steps: None,
+            normalize_obs: hyperparams.normalize_obs,
         };
         let kernel: PPOKernel<B, KindIn, KindOut, Pi> =
             PPOKernelFactory::new(pi_head, vf_mlp, training_args)?;
@@ -687,6 +688,10 @@ fn run_ppo_sgd_flat<
 
     let mb_size = mb_size_opt.unwrap_or(n).clamp(1, n);
     let full_batch = mb_size >= n;
+
+    // SF-aligned input normalization: update running per-dimension obs mean/std
+    // (Welford) on this epoch's full batch before training.
+    kernel.update_obs_stats(&batch.obs, obs_dim);
 
     // Persistent return normalization (SF-aligned): update running stats on full batch,
     // then use normalized returns for all mini-batch iterations this epoch.
