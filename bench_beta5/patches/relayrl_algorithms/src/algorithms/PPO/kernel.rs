@@ -188,7 +188,6 @@ pub(crate) mod training {
             adv: &[f32],
             logp_old: &[f32],
             ret: &[f32],
-            val_old: &[f32],
             clip_ratio: f32,
             ent_coef: f32,
             compute_stats: bool,
@@ -197,8 +196,7 @@ pub(crate) mod training {
                 .min(act_flat.len())
                 .min(adv.len())
                 .min(logp_old.len())
-                .min(ret.len())
-                .min(val_old.len());
+                .min(ret.len());
             if n == 0 {
                 return (0.0, 0.0, zero_pi_info().1);
             }
@@ -247,18 +245,7 @@ pub(crate) mod training {
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
                 &device,
             );
-            let val_old_tensor = Tensor::<TB, 1, Float>::from_data(
-                BurnTensorData::new(val_old[..n].to_vec(), [n]),
-                &device,
-            );
-            // PPO2-style value loss clipping: limit how far the value update can
-            // move from the old value prediction, taking the worse (max) of the
-            // clipped and unclipped squared errors.
-            let v_clipped = val_old_tensor.clone()
-                + (v_pred.clone() - val_old_tensor).clamp(-clip_ratio, clip_ratio);
-            let vf_loss_unclipped = (v_pred - ret_tensor.clone()).powf_scalar(2.0);
-            let vf_loss_clipped = (v_clipped - ret_tensor).powf_scalar(2.0);
-            let vf_loss_t = vf_loss_unclipped.max_pair(vf_loss_clipped).mean();
+            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
 
             // ── Combined loss → single backward pass ──────────────────────
             let vf_coef_t = self.vf_coef;
@@ -548,7 +535,6 @@ pub trait PPOKernelTraining<
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
-        val_old: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         compute_stats: bool,
@@ -575,11 +561,6 @@ pub trait PPOKernelOps<
     fn get_pi_logprobs(&self, obs: &[TensorData], obs_dim: usize, act: &[TensorData]) -> Vec<f32>;
     fn value_forward(&self, obs: &[TensorData], obs_dim: usize) -> Vec<f32>;
     fn normalize_persistent_returns(&mut self, ret: &[f32]) -> Vec<f32>;
-    /// Apply the current persistent return-normalization stats (read-only; does not
-    /// update running statistics), with the same z-score + clamp(-5, 5) as
-    /// `normalize_persistent_returns`. Used to bring old value predictions onto the
-    /// same normalized scale as `ret` for PPO value-loss clipping.
-    fn normalize_with_persistent_stats(&self, values: &[f32]) -> Vec<f32>;
     /// Record the per-batch (mean, std) used to normalize returns before vf training,
     /// so `value_forward` can map the network's normalized output back to reward
     /// scale for the next epoch's GAE computation.
@@ -1134,22 +1115,6 @@ impl<
             .collect()
     }
 
-    fn normalize_with_persistent_stats(&self, values: &[f32]) -> Vec<f32> {
-        let (mean, variance, count) = match self {
-            PPOKernel::Discrete(k) => (k.returns_mean, k.returns_variance, k.returns_count),
-            PPOKernel::Continuous(k) => (k.returns_mean, k.returns_variance, k.returns_count),
-        };
-        let std = if count > 1 {
-            (variance / (count - 1) as f32).sqrt().max(1e-8)
-        } else {
-            1.0
-        };
-        values
-            .iter()
-            .map(|&v| ((v - mean) / std).clamp(-5.0, 5.0))
-            .collect()
-    }
-
     fn set_return_denorm_stats(&mut self, mean: f32, std: f32) {
         match self {
             PPOKernel::Discrete(k) => {
@@ -1179,7 +1144,6 @@ impl<
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
-        val_old: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         compute_stats: bool,
@@ -1200,7 +1164,6 @@ impl<
                             adv,
                             logp_old,
                             ret,
-                            val_old,
                             clip_ratio,
                             ent_coef,
                             compute_stats,
