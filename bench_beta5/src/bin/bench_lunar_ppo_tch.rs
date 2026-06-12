@@ -53,6 +53,7 @@ const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
+const NORMALIZE_OBS: bool = true; // matches SF --normalize_input=True (running obs RunningMeanStd)
 
 // 64 trajs/epoch x 64 envs -> ~90 loop iters/epoch -> ~1100 training epochs in 600k steps
 const TRAJ_PER_EPOCH: u64 = 64;
@@ -157,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_episode_steps: Some(MAX_STEPS),
         minibatch: Some(MINI_BATCH_SIZE),
         normalize_returns: NORMALIZE_RETURNS,
+        normalize_obs: NORMALIZE_OBS,
         min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
         max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
         rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),
