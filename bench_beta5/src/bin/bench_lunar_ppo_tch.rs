@@ -39,6 +39,7 @@ const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 64;
+const SEED: u64 = 1;
 
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
@@ -92,6 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── PPO networks: [128, 128] MLPs for obs=8, act=4 ──────────────────────
     let burn_device = <B as burn_tensor::backend::Backend>::Device::default();
+    // Seed the burn backend so network initialization is reproducible across
+    // runs (previously unseeded, contributing to large run-to-run MeanReturn
+    // variance even with a fixed env seed).
+    <B as burn_tensor::backend::Backend>::seed(&burn_device, SEED);
     let obs_dtype = DType::Tch(TchDType::F32);
     let act_dtype = DType::Tch(TchDType::F32);
 
@@ -182,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actor_id = actor_ids[0];
 
     // ── Environment ──────────────────────────────────────────────────────────
-    let env = LunarLanderEnv::<B>::new_with_seed(MAX_STEPS, Default::default(), 1);
+    let env = LunarLanderEnv::<B>::new_with_seed(MAX_STEPS, Default::default(), SEED);
     let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(env);
     agent.set_env(actor_id, boxed, ENV_COUNT).await?;
     println!(
