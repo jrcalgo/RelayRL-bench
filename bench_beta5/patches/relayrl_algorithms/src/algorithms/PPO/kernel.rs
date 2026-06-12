@@ -561,6 +561,10 @@ pub trait PPOKernelOps<
     fn get_pi_logprobs(&self, obs: &[TensorData], obs_dim: usize, act: &[TensorData]) -> Vec<f32>;
     fn value_forward(&self, obs: &[TensorData], obs_dim: usize) -> Vec<f32>;
     fn normalize_persistent_returns(&mut self, ret: &[f32]) -> Vec<f32>;
+    /// Record the per-batch (mean, std) used to normalize returns before vf training,
+    /// so `value_forward` can map the network's normalized output back to reward
+    /// scale for the next epoch's GAE computation.
+    fn set_return_denorm_stats(&mut self, mean: f32, std: f32);
 }
 
 /// Factory for constructing continuous or discrete PPO kernels.
@@ -585,6 +589,8 @@ pub struct DiscretePPOKernel<
     pub returns_mean: f32,
     pub returns_variance: f32,
     pub returns_count: u64,
+    pub ret_denorm_mean: f32,
+    pub ret_denorm_std: f32,
 }
 
 pub struct ContinuousPPOKernel<
@@ -599,6 +605,8 @@ pub struct ContinuousPPOKernel<
     pub returns_mean: f32,
     pub returns_variance: f32,
     pub returns_count: u64,
+    pub ret_denorm_mean: f32,
+    pub ret_denorm_std: f32,
 }
 
 pub enum PPOKernel<
@@ -706,6 +714,8 @@ impl<
                         returns_mean: 0.0,
                         returns_variance: 1.0,
                         returns_count: 0,
+                        ret_denorm_mean: 0.0,
+                        ret_denorm_std: 1.0,
                     },
                 ))
             }
@@ -738,6 +748,8 @@ impl<
                         returns_mean: 0.0,
                         returns_variance: 1.0,
                         returns_count: 0,
+                        ret_denorm_mean: 0.0,
+                        ret_denorm_std: 1.0,
                     },
                 ))
             }
@@ -763,6 +775,8 @@ impl<
                 returns_mean: kernel.returns_mean,
                 returns_variance: kernel.returns_variance,
                 returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
             }),
             PPOKernel::Continuous(kernel) => PPOKernel::Continuous(ContinuousPPOKernel {
                 pi: kernel.pi.clone(),
@@ -771,6 +785,8 @@ impl<
                 returns_mean: kernel.returns_mean,
                 returns_variance: kernel.returns_variance,
                 returns_count: kernel.returns_count,
+                ret_denorm_mean: kernel.ret_denorm_mean,
+                ret_denorm_std: kernel.ret_denorm_std,
             }),
         }
     }
@@ -1023,18 +1039,50 @@ impl<
             return Vec::new();
         }
 
-        let trainer = match self {
-            PPOKernel::Discrete(k) => k.trainer.as_ref(),
-            PPOKernel::Continuous(k) => k.trainer.as_ref(),
-        };
-        if let Some(t) = trainer {
-            let obs_flat = match training::obs_flat_from_tdata(obs) {
-                Ok(f) => f,
-                Err(_) => return vec![0.0; obs.len()],
+        let (trainer, returns_mean, returns_variance, returns_count, ret_denorm_mean, ret_denorm_std) =
+            match self {
+                PPOKernel::Discrete(k) => (
+                    k.trainer.as_ref(),
+                    k.returns_mean,
+                    k.returns_variance,
+                    k.returns_count,
+                    k.ret_denorm_mean,
+                    k.ret_denorm_std,
+                ),
+                PPOKernel::Continuous(k) => (
+                    k.trainer.as_ref(),
+                    k.returns_mean,
+                    k.returns_variance,
+                    k.returns_count,
+                    k.ret_denorm_mean,
+                    k.ret_denorm_std,
+                ),
             };
-            return t.value_forward_flat(&obs_flat, obs_dim);
-        }
-        vec![0.0; obs.len()]
+        let Some(t) = trainer else {
+            return vec![0.0; obs.len()];
+        };
+        let obs_flat = match training::obs_flat_from_tdata(obs) {
+            Ok(f) => f,
+            Err(_) => return vec![0.0; obs.len()],
+        };
+        let v_norm = t.value_forward_flat(&obs_flat, obs_dim);
+
+        // The vf is trained on returns that are normalized in two stages:
+        // (1) per-batch z-score (ret_denorm_mean/std), then (2) a persistent
+        // running z-score (returns_mean/variance). Invert both so V(s) is
+        // back on reward scale, matching the raw rewards used in GAE.
+        let persistent_std = if returns_count > 1 {
+            (returns_variance / (returns_count - 1) as f32)
+                .sqrt()
+                .max(1e-8)
+        } else {
+            1.0
+        };
+        let persistent_mean = if returns_count > 0 { returns_mean } else { 0.0 };
+        v_norm
+            .into_iter()
+            .map(|v| (v * persistent_std + persistent_mean) * ret_denorm_std + ret_denorm_mean)
+            .collect()
     }
 
     fn normalize_persistent_returns(&mut self, ret: &[f32]) -> Vec<f32> {
@@ -1065,6 +1113,19 @@ impl<
         ret.iter()
             .map(|&r| ((r - *mean) / std).clamp(-5.0, 5.0))
             .collect()
+    }
+
+    fn set_return_denorm_stats(&mut self, mean: f32, std: f32) {
+        match self {
+            PPOKernel::Discrete(k) => {
+                k.ret_denorm_mean = mean;
+                k.ret_denorm_std = std;
+            }
+            PPOKernel::Continuous(k) => {
+                k.ret_denorm_mean = mean;
+                k.ret_denorm_std = std;
+            }
+        }
     }
 }
 

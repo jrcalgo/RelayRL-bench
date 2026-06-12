@@ -46,6 +46,10 @@ name = "bench_lunar_ppo_scalar1"
 path = "src/bin/bench_lunar_ppo_scalar1.rs"
 
 [[bin]]
+name = "bench_lunar_ppo_sweep"
+path = "src/bin/bench_lunar_ppo_sweep.rs"
+
+[[bin]]
 name = "bench_grid_ppo_scalar1"
 path = "src/bin/bench_grid_ppo_scalar1.rs"
 

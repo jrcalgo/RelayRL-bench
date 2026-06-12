@@ -46,7 +46,7 @@ pub fn build_pt_mlp_temp(
     }
 
     // Create a variable store for building the model
-    let vs = nn::VarStore::new(Device::Cpu);
+    let mut vs = nn::VarStore::new(Device::Cpu);
     let root = vs.root();
 
     // Build sequential layers
@@ -90,6 +90,14 @@ pub fn build_pt_mlp_temp(
             seq = seq.add_fn(|x| x.relu());
         }
     }
+
+    // Tracing fails if the closure references tensors with requires_grad=true,
+    // since `create_by_tracing` embeds any non-input tensor it touches as a
+    // constant in the graph ("Cannot insert a Tensor that requires grad as a
+    // constant"). The VarStore's parameters default to requires_grad=true, so
+    // freeze them before tracing — these weights are only being snapshotted for
+    // export, not trained further.
+    vs.freeze();
 
     // Create a temporary file for saving the model
     let temp_file = tempfile::Builder::new()

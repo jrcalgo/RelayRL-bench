@@ -288,7 +288,9 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                         }
                     }
 
-                    let obs_bytes = dtype_bytes_per_elem(&obs_dtype);
+                    // obs_i carries the full obs_dim-length observation per env, so its
+                    // byte span must cover all obs_dim elements (not just one).
+                    let obs_bytes = obs_dim * dtype_bytes_per_elem(&obs_dtype);
                     let act_bytes = dtype_bytes_per_elem(&act_dtype);
 
                     (obs_bytes, act_bytes)

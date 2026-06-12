@@ -37,6 +37,10 @@ pub struct PPOBatch {
     pub adv_norm: Vec<f32>,
     pub ret: Vec<f32>,
     pub val: Vec<f32>,
+    /// Mean/std of the raw (pre-normalization) returns for this batch. Used to
+    /// map the value network's normalized output back to reward scale for GAE.
+    pub ret_mean: f32,
+    pub ret_std: f32,
 }
 
 pub struct PPOReplayBuffer {
@@ -217,6 +221,8 @@ impl PPOReplayBuffer {
             adv_norm,
             ret,
             val,
+            ret_mean,
+            ret_std: ret_std.max(1e-8),
         })
     }
 
@@ -317,11 +323,16 @@ impl PPOReplayBuffer {
         let (adv_mean, adv_std) = scalar_stats(&fresh_adv);
         let adv_norm = compute_normed_advantages(&fresh_adv, adv_mean, adv_std.max(1e-8));
 
-        let ret_flat = if normalize_returns {
+        let (ret_flat, ret_mean, ret_std) = if normalize_returns {
             let (ret_mean, ret_std) = scalar_stats(&fresh_ret);
-            compute_normed_advantages(&fresh_ret, ret_mean, ret_std.max(1e-8))
+            let ret_std = ret_std.max(1e-8);
+            (
+                compute_normed_advantages(&fresh_ret, ret_mean, ret_std),
+                ret_mean,
+                ret_std,
+            )
         } else {
-            fresh_ret
+            (fresh_ret, 0.0, 1.0)
         };
 
         Some(PPOBatch {
@@ -332,6 +343,8 @@ impl PPOReplayBuffer {
             adv_norm,
             ret: ret_flat,
             val: fresh_val,
+            ret_mean,
+            ret_std,
         })
     }
 
