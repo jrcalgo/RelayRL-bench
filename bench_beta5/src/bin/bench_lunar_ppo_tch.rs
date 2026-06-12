@@ -45,7 +45,10 @@ const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4; // matches SF lr=2.5e-4
 const VF_LR: f64 = 2.5e-4;
-const VF_COEF: f32 = 1.0; // matches SF vf_coef default
+const VF_COEF: f32 = 0.5; // EXPERIMENT: vf gradient norm (0.9-3.5) dwarfs pi gradient norm
+// (0.02-0.3, ~10-100x smaller), and total_norm sometimes approaches the global
+// GradientClipping::Norm(4.0) cap -- clipping then suppresses the already-tiny pi
+// signal further. Halving vf_coef rebalances the combined-loss gradient toward pi.
 const TRAIN_PI_ITERS: u64 = 4; // matches SF num_epochs=4
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
