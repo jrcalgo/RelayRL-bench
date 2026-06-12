@@ -697,6 +697,18 @@ fn run_ppo_sgd_flat<
     // reward scale.
     kernel.set_return_denorm_stats(batch.ret_mean, batch.ret_std);
 
+    // Bring the collected old value predictions (raw reward scale) onto the same
+    // normalized scale as `ret_normalized`/`v_pred` for PPO2-style value loss
+    // clipping: stage-1 per-batch z-score (matching how `batch.ret` was derived
+    // from raw returns), then stage-2 persistent z-score (read-only, using the
+    // stats just updated by `normalize_persistent_returns` above).
+    let val_stage1: Vec<f32> = batch
+        .val
+        .iter()
+        .map(|&v| (v - batch.ret_mean) / batch.ret_std)
+        .collect();
+    let val_old_norm = kernel.normalize_with_persistent_stats(&val_stage1);
+
     let mut first_pi_loss: Option<f32> = None;
     let mut first_vf_loss: Option<f32> = None;
     let mut final_pi_loss = 0.0f32;
@@ -732,6 +744,7 @@ fn run_ppo_sgd_flat<
                     &batch.adv_norm,
                     &batch.logp,
                     &ret_normalized,
+                    &val_old_norm,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
@@ -742,6 +755,7 @@ fn run_ppo_sgd_flat<
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp[j]).collect();
                 let ret_mb: Vec<f32> = mb.iter().map(|&j| ret_normalized[j]).collect();
+                let val_old_mb: Vec<f32> = mb.iter().map(|&j| val_old_norm[j]).collect();
                 kernel.train_step(
                     &obs_mb,
                     obs_dim,
@@ -749,6 +763,7 @@ fn run_ppo_sgd_flat<
                     &adv_mb,
                     &logp_mb,
                     &ret_mb,
+                    &val_old_mb,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
