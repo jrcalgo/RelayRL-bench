@@ -109,8 +109,16 @@ impl PPOReplayBuffer {
         let advantages = discounted_cumsum(&deltas, gamma * lam);
         buffers.advantages[start..end].copy_from_slice(&advantages);
 
-        let full_returns = discounted_cumsum(&rews, gamma);
-        buffers.returns[start..end].copy_from_slice(&full_returns[..full_returns.len() - 1]);
+        // Value targets = GAE advantages + V(s) (SF-style lambda-return), rather than
+        // a pure Monte-Carlo discounted return (lambda=1). This keeps the value
+        // function's regression target consistent with the same lambda used for
+        // the advantage estimator feeding the policy loss.
+        let returns: Vec<f32> = advantages
+            .iter()
+            .zip(vals[..vals.len() - 1].iter())
+            .map(|(a, v)| a + v)
+            .collect();
+        buffers.returns[start..end].copy_from_slice(&returns);
     }
 
     pub fn get_obs_for_gae_blocking(&self) -> (Vec<TensorData>, usize) {
