@@ -586,8 +586,11 @@ pub struct DiscretePPOKernel<
     pub pi: DiscretePPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf: ValueFunction<B, KindIn>,
     pub trainer: Option<training::PPOActorCriticTrainer>,
-    pub returns_mean: f32,
-    pub returns_variance: f32,
+    // f64: Welford online updates accumulate `count` by ~5760/epoch, exceeding
+    // f32's exact-integer range (2^24) well before training ends, which would
+    // otherwise silently freeze the running mean/variance update.
+    pub returns_mean: f64,
+    pub returns_variance: f64,
     pub returns_count: u64,
     pub ret_denorm_mean: f32,
     pub ret_denorm_std: f32,
@@ -602,8 +605,8 @@ pub struct ContinuousPPOKernel<
     pub pi: ContinuousPPOPolicyHead<B, KindIn, KindOut, Pi>,
     pub vf: ValueFunction<B, KindIn>,
     pub trainer: Option<training::PPOActorCriticTrainer>,
-    pub returns_mean: f32,
-    pub returns_variance: f32,
+    pub returns_mean: f64,
+    pub returns_variance: f64,
     pub returns_count: u64,
     pub ret_denorm_mean: f32,
     pub ret_denorm_std: f32,
@@ -1067,12 +1070,12 @@ impl<
         };
         let v_norm = t.value_forward_flat(&obs_flat, obs_dim);
 
-        // The vf is trained on returns that are normalized in two stages:
-        // (1) per-batch z-score (ret_denorm_mean/std), then (2) a persistent
-        // running z-score (returns_mean/variance). Invert both so V(s) is
-        // back on reward scale, matching the raw rewards used in GAE.
+        // The vf is trained on returns normalized by a persistent running
+        // z-score (returns_mean/variance, f64). Invert it (plus the
+        // ret_denorm_mean/std identity left over from the per-batch stage)
+        // so V(s) is back on reward scale, matching the raw rewards used in GAE.
         let persistent_std = if returns_count > 1 {
-            (returns_variance / (returns_count - 1) as f32)
+            (returns_variance / (returns_count - 1) as f64)
                 .sqrt()
                 .max(1e-8)
         } else {
@@ -1081,7 +1084,10 @@ impl<
         let persistent_mean = if returns_count > 0 { returns_mean } else { 0.0 };
         v_norm
             .into_iter()
-            .map(|v| (v * persistent_std + persistent_mean) * ret_denorm_std + ret_denorm_mean)
+            .map(|v| {
+                ((v as f64 * persistent_std + persistent_mean) * ret_denorm_std as f64
+                    + ret_denorm_mean as f64) as f32
+            })
             .collect()
     }
 
@@ -1100,18 +1106,20 @@ impl<
         };
         for &r in ret {
             *count += 1;
-            let delta = r - *mean;
-            *mean += delta / *count as f32;
-            let delta2 = r - *mean;
+            let r64 = r as f64;
+            let delta = r64 - *mean;
+            *mean += delta / *count as f64;
+            let delta2 = r64 - *mean;
             *variance += delta * delta2;
         }
         let std = if *count > 1 {
-            (*variance / (*count - 1) as f32).sqrt().max(1e-8)
+            (*variance / (*count - 1) as f64).sqrt().max(1e-8)
         } else {
             1.0
         };
+        let mean64 = *mean;
         ret.iter()
-            .map(|&r| ((r - *mean) / std).clamp(-5.0, 5.0))
+            .map(|&r| (((r as f64 - mean64) / std).clamp(-5.0, 5.0)) as f32)
             .collect()
     }
 
