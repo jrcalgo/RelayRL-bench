@@ -134,8 +134,10 @@ pub fn build_pt_mlp_temp(
     file.read_to_end(&mut bytes)
         .map_err(|e| format!("Failed to read model bytes: {}", e))?;
 
-    // Keep the temp file alive by forgetting it - caller manages cleanup
-    std::mem::forget(temp_file);
+    // `temp_file` drops at the end of this function, deleting the backing
+    // file. The bytes are already read into `bytes` and `temp_path` is not
+    // used after this point by any caller, so nothing depends on the file
+    // persisting.
 
     Ok((bytes, temp_path))
 }
