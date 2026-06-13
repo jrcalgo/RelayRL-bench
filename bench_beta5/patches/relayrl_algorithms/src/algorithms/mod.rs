@@ -1,4 +1,4 @@
-use burn_nn::{Initializer, Linear, LinearConfig};
+use burn_nn::{Linear, LinearConfig};
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, Tensor, TensorKind};
 use relayrl_types::data::tensor::DType;
@@ -138,14 +138,7 @@ impl<
 
         let layers = dims
             .windows(2)
-            .map(|w| {
-                let mut layer: Linear<B> = LinearConfig::new(w[0], w[1]).init(device);
-                layer.weight = Initializer::Orthogonal { gain: 1.0 }.init([w[0], w[1]], device);
-                if layer.bias.is_some() {
-                    layer.bias = Some(Initializer::Zeros.init([w[1]], device));
-                }
-                layer
-            })
+            .map(|w| LinearConfig::new(w[0], w[1]).init(device))
             .collect();
 
         Self {
