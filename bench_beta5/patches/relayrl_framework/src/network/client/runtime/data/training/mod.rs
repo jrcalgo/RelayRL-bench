@@ -395,6 +395,14 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                             TensorData::new(vec![obs_dim], obs_dtype.clone(), current_obs_bytes[start..start + obs_bytes_per_env].to_vec(), backend.clone())
                         };
 
+                        // s_{t+1}: the observation reached after this step's action,
+                        // attached to truncated trajectories below so PPO can
+                        // bootstrap V(s_{t+1}) instead of reusing V(s_t).
+                        let final_obs_i = {
+                            let start = i * obs_bytes_per_env;
+                            TensorData::new(vec![obs_dim], obs_dtype.clone(), new_obs_bytes[start..start + obs_bytes_per_env].to_vec(), backend.clone())
+                        };
+
                         let action_i = {
                             let start = i * act_bytes_per_env;
                             TensorData::new(vec![act_dim], act_dtype.clone(), current_act_bytes[start..start + act_bytes_per_env].to_vec(), backend.clone())
@@ -460,9 +468,11 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
 
                             if truncateds[i] {
                                 traj.set_truncated();
+                                traj.set_final_obs(final_obs_i.clone());
                             } else if let Some(max_steps) = max_episode_steps &&
                                 per_env_step_count[i] >= max_steps {
                                     traj.set_truncated();
+                                    traj.set_final_obs(final_obs_i.clone());
                                 }
 
 
@@ -489,6 +499,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                 );
                                 traj.set_episode(per_env_episode[i]);
                                 traj.set_truncated();
+                                traj.set_final_obs(final_obs_i.clone());
                                 per_env_rollout_step[i] = 0;
                                 let _ = traj_tx.send(traj).await;
                                 continue;

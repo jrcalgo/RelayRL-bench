@@ -19,6 +19,11 @@ struct Buffers {
     values: Vec<f32>,
     episode_boundaries: Vec<(usize, usize, bool)>,
     episode_versions: Vec<i64>,
+    /// s_{t+1} after each episode's final action, when that episode ended via
+    /// truncation (rollout cutoff, env truncation, or max-episode-steps).
+    /// Parallel to `episode_boundaries`/`episode_versions`; `None` for
+    /// non-truncated episodes (bootstrap = 0) or if unavailable.
+    final_obs: Vec<Option<TensorData>>,
 }
 
 struct BufferMetadata {
@@ -73,6 +78,7 @@ impl PPOReplayBuffer {
             values: Vec::with_capacity(buffer_size),
             episode_boundaries: Vec::new(),
             episode_versions: Vec::new(),
+            final_obs: Vec::new(),
         };
         Self {
             buffers: Arc::new(Mutex::new(buffers)),
@@ -144,6 +150,23 @@ impl PPOReplayBuffer {
         }
         let cut_step = buffers.episode_boundaries[n - 1].1;
         (buffers.obs[..cut_step].to_vec(), obs_dim)
+    }
+
+    /// Returns the s_{t+1} bootstrap observations for the truncated episodes
+    /// among the first `n` episodes that have one recorded, in boundary order.
+    /// Pass these through `value_forward` and feed the results back into
+    /// `finalize_and_drain_first_n_blocking` as `bootstrap_values` (same order).
+    pub fn get_bootstrap_obs_for_first_n_episodes(&self, n: usize) -> Vec<TensorData> {
+        let buffers = self.buffers.lock().unwrap();
+        if buffers.episode_boundaries.len() < n {
+            return Vec::new();
+        }
+        buffers.episode_boundaries[..n]
+            .iter()
+            .zip(buffers.final_obs[..n].iter())
+            .filter(|((_, _, is_truncated), _)| *is_truncated)
+            .filter_map(|(_, final_obs)| final_obs.clone())
+            .collect()
     }
 
     pub fn finalize_gae_blocking(&self, values: Vec<f32>) {
@@ -238,6 +261,7 @@ impl PPOReplayBuffer {
     pub fn finalize_and_drain_first_n_blocking(
         &self,
         values: Vec<f32>,
+        bootstrap_values: Vec<f32>,
         current_version: i64,
         max_version_lag: i64,
         n: usize,
@@ -259,13 +283,29 @@ impl PPOReplayBuffer {
 
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
-        for (start, end, is_truncated) in &boundaries_n {
+        let final_obs_n: Vec<Option<TensorData>> = buffers.final_obs[..n].to_vec();
+        let mut bootstrap_values_iter = bootstrap_values.into_iter();
+        for ((start, end, is_truncated), fo) in boundaries_n.iter().zip(final_obs_n.iter()) {
             let bootstrap = if *is_truncated {
-                buffers
-                    .values
-                    .get(end.saturating_sub(1))
-                    .copied()
-                    .unwrap_or(0.0)
+                if fo.is_some() {
+                    // s_{t+1} was recorded; V(s_{t+1}) was precomputed by the
+                    // caller and supplied in boundary order via bootstrap_values.
+                    bootstrap_values_iter.next().unwrap_or_else(|| {
+                        buffers
+                            .values
+                            .get(end.saturating_sub(1))
+                            .copied()
+                            .unwrap_or(0.0)
+                    })
+                } else {
+                    // Fallback for trajectories without a recorded s_{t+1}
+                    // (e.g. pre-upgrade data): reuse V(s_t) as before.
+                    buffers
+                        .values
+                        .get(end.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(0.0)
+                }
             } else {
                 0.0
             };
@@ -315,6 +355,7 @@ impl PPOReplayBuffer {
             .collect();
         buffers.episode_boundaries = remaining_boundaries;
         buffers.episode_versions = buffers.episode_versions[n..].to_vec();
+        buffers.final_obs = buffers.final_obs[n..].to_vec();
 
         self.metadata
             .buffer_pointer
@@ -393,6 +434,7 @@ impl PPOReplayBuffer {
             .collect();
         buffers.episode_boundaries = remaining_boundaries;
         buffers.episode_versions = buffers.episode_versions[stale_count..].to_vec();
+        buffers.final_obs = buffers.final_obs[stale_count..].to_vec();
 
         self.metadata
             .buffer_pointer
@@ -503,6 +545,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
                     .episode_boundaries
                     .push((start, end, trajectory.is_truncated));
                 buffers.episode_versions.push(trajectory.policy_version);
+                buffers.final_obs.push(trajectory.final_obs.clone());
                 self.metadata
                     .buffer_path_start_idx
                     .store(end, Ordering::Relaxed);

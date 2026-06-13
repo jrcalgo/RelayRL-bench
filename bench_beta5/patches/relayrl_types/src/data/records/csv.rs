@@ -357,6 +357,7 @@ impl CsvTrajectory {
             training_step,
             is_truncated: false,
             policy_version: 0,
+            final_obs: None,
         };
 
         let mut validation_cache = TrajectoryValidationCache {
