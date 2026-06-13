@@ -2,8 +2,10 @@
 //! Sample-Factory-matched hyperparameters.
 //!
 //! Hyperparameters mirror the Sample Factory LunarLander-v2 config used for the
-//! comparison benchmark: pi_lr=vf_lr=2.5e-4, vf_coef=1.0, train_pi/vf_iters=4
-//! (matches SF num_epochs=4), target_kl effectively disabled (matches SF having
+//! comparison benchmark: pi_lr=vf_lr=2.5e-4, vf_coef=1.0, train_pi/vf_iters=8
+//! (more gradient-update epochs per collected batch than SF's num_epochs=4 to
+//! improve sample reuse; target_kl is disabled so this is safe from KL blowup),
+//! target_kl effectively disabled (matches SF having
 //! no KL early-stop), mini_batch=5760 (= 64 envs x 90-step rollout, matches SF
 //! batch_size), ent_coef=0.01, normalize_returns=true, traj_per_epoch=64,
 //! total_steps=600_000 -> 38.4M env frames.
@@ -47,8 +49,8 @@ const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4; // matches SF lr=2.5e-4
 const VF_LR: f64 = 2.5e-4;
 const VF_COEF: f32 = 1.0; // matches SF vf_coef default
-const TRAIN_PI_ITERS: u64 = 4; // matches SF num_epochs=4
-const TRAIN_VF_ITERS: u64 = 4;
+const TRAIN_PI_ITERS: u64 = 8; // 2x SF's num_epochs=4: more gradient steps per batch
+const TRAIN_VF_ITERS: u64 = 8;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
