@@ -1,4 +1,4 @@
-use burn_nn::{Initializer, Linear, LinearConfig};
+use burn_nn::{Linear, LinearConfig};
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, Tensor, TensorKind};
 use relayrl_types::data::tensor::DType;
@@ -151,21 +151,6 @@ impl<
             _in_k: std::marker::PhantomData,
             _out_k: std::marker::PhantomData,
         }
-    }
-
-    /// Re-initializes the final (output) layer's weight with orthogonal init at the
-    /// given gain and zeroes its bias, leaving all other layers at their existing
-    /// initialization. Used for a policy head's action-logit layer to start with
-    /// near-uniform action probabilities (small-gain output init).
-    pub fn with_output_layer_init(mut self, gain: f64, device: &B::Device) -> Self {
-        if let Some(layer) = self.layers.last_mut() {
-            let [d_in, d_out] = layer.weight.val().dims();
-            layer.weight = Initializer::Orthogonal { gain }.init([d_in, d_out], device);
-            if layer.bias.is_some() {
-                layer.bias = Some(Initializer::Zeros.init([d_out], device));
-            }
-        }
-        self
     }
 }
 
