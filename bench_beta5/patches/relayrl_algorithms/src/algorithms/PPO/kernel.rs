@@ -25,12 +25,13 @@ pub(crate) mod training {
 
     use burn_autodiff::Autodiff;
     use burn_core::module::Initializer;
-    use burn_core::module::Module;
+    use burn_core::module::{Module, ModuleMapper, Param};
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
     use burn_optim::grad_clipping::GradientClipping;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
     use burn_tensor::activation::log_softmax;
+    use burn_tensor::backend::AutodiffBackend;
 
     #[cfg(feature = "tch-backend")]
     use burn_tch::LibTorch;
@@ -41,6 +42,13 @@ pub(crate) mod training {
     use burn_ndarray::NdArray;
     #[cfg(not(feature = "tch-backend"))]
     pub type TB = Autodiff<NdArray>;
+
+    /// Inner (non-autodiff) backend, used for gradient tensors held in `GradientsParams`.
+    type InnerB = <TB as AutodiffBackend>::InnerBackend;
+
+    /// Value-function parameters are updated with `vf_lr = lr * VF_LR_MULTIPLIER`, applied via a
+    /// separate Adam optimizer with its own moment estimates (SpinningUp-style higher vf_lr).
+    const VF_LR_MULTIPLIER: f64 = 4.0;
 
     /// Separate pi and vf layer stacks. Trained with one shared Adam optimizer.
     #[derive(Module, Debug)]
@@ -138,6 +146,7 @@ pub(crate) mod training {
     pub struct PPOActorCriticTrainer {
         pub network: Option<ActorCriticMlp<TB>>,
         pub optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<TB>, TB>,
+        pub vf_optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<TB>, TB>,
         pub lr: f64,
         pub vf_coef: f32,
         pub lr_schedule_steps: Option<u64>,
@@ -158,9 +167,13 @@ pub(crate) mod training {
             let optimizer = AdamConfig::new()
                 .init::<TB, ActorCriticMlp<TB>>()
                 .with_grad_clipping(GradientClipping::Norm(4.0));
+            let vf_optimizer = AdamConfig::new()
+                .init::<TB, ActorCriticMlp<TB>>()
+                .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
                 network: Some(network),
                 optimizer,
+                vf_optimizer,
                 lr,
                 vf_coef,
                 lr_schedule_steps,
@@ -176,6 +189,11 @@ pub(crate) mod training {
                 }
                 _ => self.lr,
             }
+        }
+
+        /// Value-function learning rate: `effective_lr() * VF_LR_MULTIPLIER`.
+        pub fn effective_vf_lr(&self) -> f64 {
+            self.effective_lr() * VF_LR_MULTIPLIER
         }
 
         /// Combined pi+vf forward+backward. `act_flat` is i64 action indices. Returns (pi_loss, vf_loss, stats).
@@ -255,9 +273,37 @@ pub(crate) mod training {
             let vf_loss_val = scalar_from_tensor(&vf_loss_t);
 
             let grads = total_loss.backward();
-            let grads_params = GradientsParams::from_grads(grads, &net);
+            let mut grads_params = GradientsParams::from_grads(grads, &net);
+
+            // Split off the value-function gradients so they can be applied with their
+            // own Adam optimizer at a higher learning rate (effective_vf_lr).
+            let mut grads_vf = GradientsParams::new();
+            let net = {
+                let ActorCriticMlp {
+                    pi_layers,
+                    vf_layers,
+                    relu,
+                    obs_dim: net_obs_dim,
+                    act_dim: net_act_dim,
+                } = net;
+                let mut splitter = GradSplitMapper {
+                    grads_params: &mut grads_params,
+                    grads_vf: &mut grads_vf,
+                };
+                let vf_layers = vf_layers.map(&mut splitter);
+                ActorCriticMlp {
+                    pi_layers,
+                    vf_layers,
+                    relu,
+                    obs_dim: net_obs_dim,
+                    act_dim: net_act_dim,
+                }
+            };
+
             let lr = self.effective_lr();
+            let vf_lr = self.effective_vf_lr();
             let net = self.optimizer.step(lr, net, grads_params);
+            let net = self.vf_optimizer.step(vf_lr, net, grads_vf);
             self.network = Some(net);
             self.grad_step_count += 1;
 
@@ -384,6 +430,26 @@ pub(crate) mod training {
                 specs.push((dims[0], dims[1], weights, biases));
             }
             Some(specs)
+        }
+    }
+
+    /// Moves the gradient for each visited float param out of `grads_params` and into
+    /// `grads_vf`, leaving the param tensor itself unchanged. Used to apply `vf_layers`'
+    /// gradients via a separate optimizer/learning-rate.
+    struct GradSplitMapper<'a> {
+        grads_params: &'a mut GradientsParams,
+        grads_vf: &'a mut GradientsParams,
+    }
+
+    impl<'a> ModuleMapper<TB> for GradSplitMapper<'a> {
+        fn map_float<const D: usize>(
+            &mut self,
+            param: Param<Tensor<TB, D>>,
+        ) -> Param<Tensor<TB, D>> {
+            if let Some(grad) = self.grads_params.remove::<InnerB, D>(param.id) {
+                self.grads_vf.register::<InnerB, D>(param.id, grad);
+            }
+            param
         }
     }
 
