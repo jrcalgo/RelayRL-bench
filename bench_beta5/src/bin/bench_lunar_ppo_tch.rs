@@ -108,7 +108,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         act_dtype.clone(),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
         &burn_device,
-    );
+    )
+    // Small-gain orthogonal init for the policy's action-logit layer only:
+    // starts the policy near-uniform over actions (low initial KL / high
+    // initial entropy) without disturbing hidden-layer or value-net init.
+    .with_output_layer_init(0.01, &burn_device);
     // Seed the actor with a TorchScript export of the freshly-initialized policy
     // so `new_actor` doesn't try (and fail) to load a model from local_model_path.
     let initial_model = acquire_model_module::<B>(
