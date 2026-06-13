@@ -506,25 +506,15 @@ where
             // eliminating stale-value bias in GAE (stored values came from the old TorchScript model).
             let kernel = slot.kernel.take()?;
             let (obs_flat, obs_dim_peek) = slot.replay_buffer.get_obs_for_first_n_episodes(n);
-            // Also recompute V(s_{t+1}) for truncated episodes' final observations in
-            // the same forward pass, so GAE can bootstrap from the post-transition
-            // state instead of reusing V(s_t) for the truncated tail.
-            let bootstrap_obs = slot.replay_buffer.get_bootstrap_obs_for_first_n_episodes(n);
-            let (fresh_values, bootstrap_values) = if !obs_flat.is_empty() || !bootstrap_obs.is_empty() {
-                let mut combined = obs_flat.clone();
-                combined.extend(bootstrap_obs.iter().cloned());
-                let all_values = kernel.value_forward(&combined, obs_dim_peek);
-                let split = obs_flat.len().min(all_values.len());
-                let (fresh, boot) = all_values.split_at(split);
-                (fresh.to_vec(), boot.to_vec())
+            let fresh_values = if !obs_flat.is_empty() {
+                kernel.value_forward(&obs_flat, obs_dim_peek)
             } else {
-                (Vec::new(), Vec::new())
+                Vec::new()
             };
             // finalize_and_drain drains all n episodes but only includes fresh ones in the batch.
             // If all n were stale, it returns None — restore kernel so the next epoch can use it.
             match slot.replay_buffer.finalize_and_drain_first_n_blocking(
                 fresh_values,
-                bootstrap_values,
                 current_version,
                 max_version_lag,
                 n,

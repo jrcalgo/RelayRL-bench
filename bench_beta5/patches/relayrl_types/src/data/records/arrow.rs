@@ -117,7 +117,6 @@ impl ArrowTrajectory {
             training_step,
             is_truncated: false,
             policy_version: 0,
-            final_obs: None,
         });
 
         for index in 0..batch.num_rows() {

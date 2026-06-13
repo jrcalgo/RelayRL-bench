@@ -4,7 +4,6 @@
 //! Supports batching, compression, and network transmission optimizations.
 
 use crate::data::action::{ActionError, RelayRLAction};
-use crate::data::tensor::TensorData;
 #[cfg(any(feature = "metadata", feature = "compression", feature = "encryption"))]
 use bincode::config;
 use serde::{Deserialize, Serialize};
@@ -49,13 +48,6 @@ pub struct RelayRLTrajectory {
     pub training_step: Option<u64>,
     pub is_truncated: bool,
     pub policy_version: i64,
-    /// Observation reached immediately after the trajectory's final action,
-    /// i.e. s_{t+1} for the last stored transition. Populated only when the
-    /// trajectory is truncated (rollout-length cutoff, env truncation, or
-    /// max-episode-steps cutoff) so algorithms can bootstrap V(s_{t+1})
-    /// instead of reusing V(s_t) for the truncated tail.
-    #[serde(default)]
-    pub final_obs: Option<TensorData>,
 }
 
 impl Default for RelayRLTrajectory {
@@ -72,7 +64,6 @@ impl Default for RelayRLTrajectory {
             training_step: None,
             is_truncated: false,
             policy_version: 0,
-            final_obs: None,
         }
     }
 }
@@ -90,7 +81,6 @@ impl RelayRLTrajectory {
             training_step: None,
             is_truncated: false,
             policy_version: 0,
-            final_obs: None,
         }
     }
 
@@ -106,7 +96,6 @@ impl RelayRLTrajectory {
             training_step: None,
             is_truncated: false,
             policy_version: 0,
-            final_obs: None,
         }
     }
 
@@ -129,7 +118,6 @@ impl RelayRLTrajectory {
             training_step,
             is_truncated: false,
             policy_version: 0,
-            final_obs: None,
         }
     }
 
@@ -231,14 +219,6 @@ impl RelayRLTrajectory {
 
     pub fn set_truncated(&mut self) {
         self.is_truncated = true;
-    }
-
-    pub fn set_final_obs(&mut self, obs: TensorData) {
-        self.final_obs = Some(obs);
-    }
-
-    pub fn get_final_obs(&self) -> Option<&TensorData> {
-        self.final_obs.as_ref()
     }
 }
 
