@@ -26,12 +26,11 @@ pub(crate) mod training {
     use burn_autodiff::Autodiff;
     use burn_core::module::Initializer;
     use burn_core::module::Module;
-    use burn_core::module::{ModuleMapper, ModuleVisitor, Param};
     use burn_nn::{Linear, LinearConfig, Relu};
     use burn_optim::adaptor::OptimizerAdaptor;
+    use burn_optim::grad_clipping::GradientClipping;
     use burn_optim::{Adam, AdamConfig, GradientsParams, Optimizer};
     use burn_tensor::activation::log_softmax;
-    use burn_tensor::backend::AutodiffBackend;
 
     #[cfg(feature = "tch-backend")]
     use burn_tch::LibTorch;
@@ -136,52 +135,6 @@ pub(crate) mod training {
         }
     }
 
-    /// Inner (non-autodiff) backend that `GradientsParams` tensors are stored in.
-    type InnerB = <TB as AutodiffBackend>::InnerBackend;
-
-    /// Max L2 norm for the *global* gradient norm clip across all pi+vf
-    /// parameters combined, matching PyTorch's `clip_grad_norm_` semantics
-    /// (and SF's `max_grad_norm=4.0`). Burn's built-in `GradientClipping::Norm`
-    /// clips each parameter tensor's gradient independently, which is a much
-    /// looser constraint than a single shared norm budget across the whole
-    /// network; this reimplements the global-norm variant manually.
-    const MAX_GRAD_NORM: f32 = 4.0;
-
-    /// Accumulates the sum of squared gradient norms across all parameters.
-    struct GradNormVisitor<'a> {
-        grads: &'a GradientsParams,
-        sum_sq: Option<Tensor<InnerB, 1>>,
-    }
-
-    impl ModuleVisitor<TB> for GradNormVisitor<'_> {
-        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<TB, D>>) {
-            if let Some(g) = self.grads.get::<InnerB, D>(param.id) {
-                let sq = g.powf_scalar(2.0).sum();
-                self.sum_sq = Some(match self.sum_sq.take() {
-                    Some(acc) => acc + sq,
-                    None => sq,
-                });
-            }
-        }
-    }
-
-    /// Rescales every parameter's gradient in-place by a shared `clip_coef`.
-    struct GradClipMapper<'a> {
-        grads: &'a mut GradientsParams,
-        clip_coef: Tensor<InnerB, 1>,
-    }
-
-    impl ModuleMapper<TB> for GradClipMapper<'_> {
-        fn map_float<const D: usize>(&mut self, param: Param<Tensor<TB, D>>) -> Param<Tensor<TB, D>> {
-            let (id, tensor, mapper) = param.consume();
-            if let Some(g) = self.grads.remove::<InnerB, D>(id) {
-                let clipped = g.mul(self.clip_coef.clone().unsqueeze());
-                self.grads.register::<InnerB, D>(id, clipped);
-            }
-            Param::from_mapped_value(id, tensor, mapper)
-        }
-    }
-
     pub struct PPOActorCriticTrainer {
         pub network: Option<ActorCriticMlp<TB>>,
         pub optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<TB>, TB>,
@@ -202,7 +155,9 @@ pub(crate) mod training {
         ) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
-            let optimizer = AdamConfig::new().init::<TB, ActorCriticMlp<TB>>();
+            let optimizer = AdamConfig::new()
+                .init::<TB, ActorCriticMlp<TB>>()
+                .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
                 network: Some(network),
                 optimizer,
@@ -300,26 +255,7 @@ pub(crate) mod training {
             let vf_loss_val = scalar_from_tensor(&vf_loss_t);
 
             let grads = total_loss.backward();
-            let mut grads_params = GradientsParams::from_grads(grads, &net);
-
-            // Global gradient-norm clip across all pi+vf parameters combined
-            // (matches PyTorch's clip_grad_norm_ / SF's max_grad_norm=4.0).
-            let mut norm_visitor = GradNormVisitor {
-                grads: &grads_params,
-                sum_sq: None,
-            };
-            net.visit(&mut norm_visitor);
-            let global_norm = norm_visitor
-                .sum_sq
-                .expect("network has at least one parameter")
-                .sqrt();
-            let clip_coef = (MAX_GRAD_NORM / global_norm.add_scalar(1e-6f32)).clamp_max(1.0);
-            let mut clip_mapper = GradClipMapper {
-                grads: &mut grads_params,
-                clip_coef,
-            };
-            let net = net.map(&mut clip_mapper);
-
+            let grads_params = GradientsParams::from_grads(grads, &net);
             let lr = self.effective_lr();
             let net = self.optimizer.step(lr, net, grads_params);
             self.network = Some(net);
