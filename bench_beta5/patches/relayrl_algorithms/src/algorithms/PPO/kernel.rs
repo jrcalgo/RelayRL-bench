@@ -135,6 +135,9 @@ pub(crate) mod training {
         }
     }
 
+    /// PPO2-style value-function clip range, matches SF's ppo_clip_value default (1.0).
+    const VALUE_CLIP: f32 = 1.0;
+
     pub struct PPOActorCriticTrainer {
         pub network: Option<ActorCriticMlp<TB>>,
         pub optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<TB>, TB>,
@@ -188,6 +191,7 @@ pub(crate) mod training {
             adv: &[f32],
             logp_old: &[f32],
             ret: &[f32],
+            old_val: &[f32],
             clip_ratio: f32,
             ent_coef: f32,
             compute_stats: bool,
@@ -196,7 +200,8 @@ pub(crate) mod training {
                 .min(act_flat.len())
                 .min(adv.len())
                 .min(logp_old.len())
-                .min(ret.len());
+                .min(ret.len())
+                .min(old_val.len());
             if n == 0 {
                 return (0.0, 0.0, zero_pi_info().1);
             }
@@ -245,7 +250,18 @@ pub(crate) mod training {
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
                 &device,
             );
-            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
+            let old_val_tensor = Tensor::<TB, 1, Float>::from_data(
+                BurnTensorData::new(old_val[..n].to_vec(), [n]),
+                &device,
+            );
+            // PPO2-style value clipping (matches SF's _value_loss): clamps how far the
+            // new value estimate may move from the rollout-time estimate per update,
+            // taking the worse (max) of the clipped/unclipped squared error.
+            let v_clipped = old_val_tensor.clone()
+                + (v_pred.clone() - old_val_tensor).clamp(-VALUE_CLIP, VALUE_CLIP);
+            let vf_loss_unclipped = (v_pred - ret_tensor.clone()).powf_scalar(2.0);
+            let vf_loss_clipped = (v_clipped - ret_tensor).powf_scalar(2.0);
+            let vf_loss_t = vf_loss_unclipped.max_pair(vf_loss_clipped).mean();
 
             // ── Combined loss → single backward pass ──────────────────────
             let vf_coef_t = self.vf_coef;
@@ -535,6 +551,7 @@ pub trait PPOKernelTraining<
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
+        old_val: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         compute_stats: bool,
@@ -561,6 +578,11 @@ pub trait PPOKernelOps<
     fn get_pi_logprobs(&self, obs: &[TensorData], obs_dim: usize, act: &[TensorData]) -> Vec<f32>;
     fn value_forward(&self, obs: &[TensorData], obs_dim: usize) -> Vec<f32>;
     fn normalize_persistent_returns(&mut self, ret: &[f32]) -> Vec<f32>;
+    /// Project raw-reward-scale value estimates onto the same persistent
+    /// return z-score used by `normalize_persistent_returns`, without
+    /// updating the running statistics. Used for PPO2-style value clipping,
+    /// which needs `old_val` on the same scale as `v_pred`/`ret_normalized`.
+    fn normalize_value_estimates(&self, val: &[f32]) -> Vec<f32>;
     /// Record the per-batch (mean, std) used to normalize returns before vf training,
     /// so `value_forward` can map the network's normalized output back to reward
     /// scale for the next epoch's GAE computation.
@@ -1123,6 +1145,21 @@ impl<
             .collect()
     }
 
+    fn normalize_value_estimates(&self, val: &[f32]) -> Vec<f32> {
+        let (mean, variance, count) = match self {
+            PPOKernel::Discrete(k) => (k.returns_mean, k.returns_variance, k.returns_count),
+            PPOKernel::Continuous(k) => (k.returns_mean, k.returns_variance, k.returns_count),
+        };
+        let std = if count > 1 {
+            (variance / (count - 1) as f64).sqrt().max(1e-8)
+        } else {
+            1.0
+        };
+        val.iter()
+            .map(|&v| (((v as f64 - mean) / std).clamp(-5.0, 5.0)) as f32)
+            .collect()
+    }
+
     fn set_return_denorm_stats(&mut self, mean: f32, std: f32) {
         match self {
             PPOKernel::Discrete(k) => {
@@ -1152,6 +1189,7 @@ impl<
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
+        old_val: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         compute_stats: bool,
@@ -1172,6 +1210,7 @@ impl<
                             adv,
                             logp_old,
                             ret,
+                            old_val,
                             clip_ratio,
                             ent_coef,
                             compute_stats,
