@@ -155,13 +155,7 @@ pub(crate) mod training {
         ) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
-            // Larger-than-default epsilon (1e-4 vs burn's default 1e-5) more
-            // strongly dampens the adaptive step size for low-variance
-            // gradients. A prior test moving epsilon to 1e-6 (toward
-            // PyTorch's 1e-8 default) regressed vs the 1e-5 default,
-            // suggesting larger epsilon is the beneficial direction here.
             let optimizer = AdamConfig::new()
-                .with_epsilon(1e-4)
                 .init::<TB, ActorCriticMlp<TB>>()
                 .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
