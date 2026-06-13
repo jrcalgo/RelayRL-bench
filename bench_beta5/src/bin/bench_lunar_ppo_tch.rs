@@ -4,9 +4,9 @@
 //! Hyperparameters mirror the Sample Factory LunarLander-v2 config used for the
 //! comparison benchmark: pi_lr=vf_lr=2.5e-4, vf_coef=1.0, train_pi/vf_iters=4
 //! (matches SF num_epochs=4), target_kl effectively disabled (matches SF having
-//! no KL early-stop), mini_batch=5760 (= 64 envs x 90-step rollout, matches SF
-//! batch_size), ent_coef=0.01, normalize_returns=true, traj_per_epoch=64,
-//! total_steps=600_000 -> 38.4M env frames.
+//! no KL early-stop), mini_batch=2048 (= 64 envs x 32-step rollout, matches SF's
+//! smaller-batch sfppo_py config), ent_coef=0.01, normalize_returns=true,
+//! traj_per_epoch=64, total_steps=600_000 -> 38.4M env frames.
 //!
 //! Build & run:
 //!   LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 \
@@ -50,14 +50,18 @@ const VF_COEF: f32 = 1.0; // matches SF vf_coef default
 const TRAIN_PI_ITERS: u64 = 4; // matches SF num_epochs=4
 const TRAIN_VF_ITERS: u64 = 4;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
-const MINI_BATCH_SIZE: usize = 5760; // matches SF batch_size = 64 envs x 90-step rollout
+// Smaller batch/rollout than the 90-step/5760 SF-matched config above, taken
+// from SF's smaller-batch LunarLander variant (bench_lunar_sfppo_py:
+// rollout=32, batch_size=2048). More frequent, smaller-batch training updates
+// per env-step relative to the 5760/90 config, for improved sample efficiency.
+const MINI_BATCH_SIZE: usize = 2048;
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
 
-// 64 trajs/epoch x 64 envs -> ~90 loop iters/epoch -> ~1100 training epochs in 600k steps
+// 64 trajs/epoch x 64 envs -> ~32 loop iters/epoch -> ~2800 training epochs in 600k steps
 const TRAJ_PER_EPOCH: u64 = 64;
-// Step-count epoch trigger: 64 envs x 90-step rollout = 5760, matches SF exactly
-const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64; // 5760
+// Step-count epoch trigger: 64 envs x 32-step rollout = 2048
+const MIN_STEPS_PER_EPOCH: u64 = MINI_BATCH_SIZE as u64; // 2048
 // 2x drain-epoch cap: 2 x ~64 eps = 128 eps max in buffer
 const MAX_BUFFERED_EPISODES: u64 = 128;
 // 600_000 loop iterations x 64 envs ~= 38.4M total env frames
