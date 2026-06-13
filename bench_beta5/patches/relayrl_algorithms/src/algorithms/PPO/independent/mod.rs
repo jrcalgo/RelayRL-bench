@@ -692,10 +692,6 @@ fn run_ppo_sgd_flat<
     // then use normalized returns for all mini-batch iterations this epoch.
     let ret_normalized = kernel.normalize_persistent_returns(&batch.ret);
 
-    // Project rollout-time value estimates onto the same persistent z-score so
-    // PPO2-style value clipping compares like-for-like with v_pred/ret_normalized.
-    let old_val_normalized = kernel.normalize_value_estimates(&batch.val);
-
     // Record this batch's pre-normalization return scale so the next epoch's
     // value_forward (used for GAE) can map the vf's normalized output back to
     // reward scale.
@@ -736,7 +732,6 @@ fn run_ppo_sgd_flat<
                     &batch.adv_norm,
                     &batch.logp,
                     &ret_normalized,
-                    &old_val_normalized,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
@@ -747,7 +742,6 @@ fn run_ppo_sgd_flat<
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp[j]).collect();
                 let ret_mb: Vec<f32> = mb.iter().map(|&j| ret_normalized[j]).collect();
-                let old_val_mb: Vec<f32> = mb.iter().map(|&j| old_val_normalized[j]).collect();
                 kernel.train_step(
                     &obs_mb,
                     obs_dim,
@@ -755,7 +749,6 @@ fn run_ppo_sgd_flat<
                     &adv_mb,
                     &logp_mb,
                     &ret_mb,
-                    &old_val_mb,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
