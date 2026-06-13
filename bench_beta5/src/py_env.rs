@@ -558,6 +558,38 @@ pub fn make_lunar_lander_vec(
     })
 }
 
+/// Builds `gymnasium.make_vec("LunarLander-v2", num_envs=N, vectorization_mode="sync",
+/// wrappers=[functools.partial(TimeLimit, max_episode_steps=500)])` — matches
+/// scripts/sf_lunar_bench.py's `gym.make("LunarLander-v2", max_episode_steps=500)` exactly.
+///
+/// Uses `vectorization_mode="sync"` (single-process, sequential) rather than the default
+/// "async" (multiprocessing fork): forking a process that already has tokio + rayon + LibTorch
+/// threads running is unsafe, and sync mode measured faster anyway (23.7k vs 15.2k
+/// env-frames/sec in isolated benchmarking with 64 envs).
+pub fn make_sf_matched_lunar_lander_vec(
+    num_envs: usize,
+    obs_dim: usize,
+    act_dim: usize,
+) -> PyResult<PyVectorEnv> {
+    Python::with_gil(|py| {
+        let gym = py.import("gymnasium")?;
+        let functools = py.import("functools")?;
+        let time_limit_cls = py.import("gymnasium.wrappers")?.getattr("TimeLimit")?;
+        let partial_kwargs = PyDict::new(py);
+        partial_kwargs.set_item("max_episode_steps", 500)?;
+        let time_limit_partial =
+            functools.call_method("partial", (time_limit_cls,), Some(&partial_kwargs))?;
+
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("num_envs", num_envs as i64)?;
+        kwargs.set_item("vectorization_mode", "sync")?;
+        kwargs.set_item("wrappers", vec![time_limit_partial])?;
+        let vec_env = gym.call_method("make_vec", ("LunarLander-v2",), Some(&kwargs))?;
+        vec_env.call_method0("reset")?;
+        Ok(PyVectorEnv::new(vec_env.unbind(), num_envs, obs_dim, act_dim, true))
+    })
+}
+
 /// Create an EnvPool `LunarLander-v3` vec-env with `num_envs` parallel envs.
 /// EnvPool releases the GIL during step and uses a C++ thread pool internally.
 pub fn make_envpool_lunar_lander_vec(
