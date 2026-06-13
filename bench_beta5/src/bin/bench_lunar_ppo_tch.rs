@@ -160,6 +160,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
         max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
         rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),
+        // Linearly anneal pi_lr/vf_lr toward 0 over ~23000 grad steps
+        // (~5750 epochs x TRAIN_PI_ITERS=4), matching the typical
+        // final-epoch range observed across recent runs. Addresses the
+        // late-training MeanReturn decline seen in several runs (CleanRL's
+        // standard anneal_lr=True recipe).
+        lr_anneal_steps: Some(23_000),
         ..Default::default()
     };
     let trainer_spec = PPOTrainerSpec::ppo(

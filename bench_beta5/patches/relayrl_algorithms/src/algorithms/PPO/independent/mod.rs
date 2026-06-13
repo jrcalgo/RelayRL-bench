@@ -107,6 +107,7 @@ pub struct IPPOParams {
     pub min_steps_per_epoch: Option<u64>,
     pub max_buffered_episodes: Option<u64>,
     pub rollout_len: Option<usize>,
+    pub lr_anneal_steps: Option<u64>,
 }
 
 impl Default for IPPOParams {
@@ -132,6 +133,7 @@ impl Default for IPPOParams {
             min_steps_per_epoch: None,
             max_buffered_episodes: None,
             rollout_len: None,
+            lr_anneal_steps: None,
         }
     }
 }
@@ -309,7 +311,7 @@ where
         let training_args = PPOKernelTrainingArgs {
             pi_lr: hyperparams.pi_lr as f64,
             vf_coef: hyperparams.vf_coef,
-            lr_schedule_steps: None,
+            lr_schedule_steps: hyperparams.lr_anneal_steps,
         };
         let kernel: PPOKernel<B, KindIn, KindOut, Pi> =
             PPOKernelFactory::new(pi_head, vf_mlp, training_args)?;
