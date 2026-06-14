@@ -556,10 +556,11 @@ impl VectorEnvironment for EnvPoolVecEnv {
                 .ok()?;
             let tup = result.downcast::<PyTuple>().ok()?;
 
-            // obs: move into cache (no clone) — framework eval loop reads via flat_observation_bytes().
+            // obs: normalize and update the cache (eval loop reads via flat_observation_bytes()),
+            // and also return it directly for the training loop.
             let raw_obs = self.extract_flat_obs(py, &tup.get_item(0).ok()?)?;
             let flat_obs = self.normalize_obs(raw_obs);
-            *self.obs_cache.lock().unwrap() = flat_obs;
+            *self.obs_cache.lock().unwrap() = flat_obs.clone();
 
             // rewards: already float32 from EnvPool — tobytes directly
             let rew_bytes: Vec<u8> = tup
@@ -568,13 +569,14 @@ impl VectorEnvironment for EnvPoolVecEnv {
                 .extract().ok()?;
             let rewards: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&rew_bytes).to_vec();
 
-            // terminated: needed for episode tracking
+            // terminated/truncated: needed for episode tracking and GAE boundaries
             let t_raw: Vec<u8> = tup.get_item(2).ok()?.call_method0("tobytes").ok()?.extract().ok()?;
             let terminated: Vec<bool> = t_raw.iter().map(|&t| t != 0).collect();
 
-            // Obs return and truncated omitted: eval loop discards the full step result.
-            // flat_observation_bytes() on the next iter reads from obs_cache above.
-            Some((Vec::new(), None, rewards, terminated, Vec::new()))
+            let tr_raw: Vec<u8> = tup.get_item(3).ok()?.call_method0("tobytes").ok()?.extract().ok()?;
+            let truncated: Vec<bool> = tr_raw.iter().map(|&t| t != 0).collect();
+
+            Some((flat_obs, None, rewards, terminated, truncated))
         })
     }
 }
@@ -657,6 +659,39 @@ pub fn make_envpool_lunar_lander_vec(
         kwargs.set_item("seed", 0i64)?;
         kwargs.set_item("num_threads", num_threads as i64)?;
         let env = ep.call_method("make", ("LunarLander-v3",), Some(&kwargs))?;
+        env.call_method0("reset")?;
+        Ok(EnvPoolVecEnv::new(
+            env.unbind(),
+            num_envs,
+            obs_dim,
+            act_dim,
+            true, // discrete
+        ))
+    })
+}
+
+/// Create an EnvPool `LunarLander-v2` vec-env with `num_envs` parallel envs and
+/// `max_episode_steps=500`, matching `scripts/sf_lunar_bench.py`'s single envpool
+/// instance (`num_envs=512`, `env_type="gymnasium"`, `seed=1`, `max_episode_steps=500`).
+/// EnvPool auto-resets terminated/truncated sub-envs internally before applying the
+/// next action, so `step_bytes` needs no extra reset handling.
+pub fn make_sf_matched_envpool_lunar_lander_vec(
+    num_envs: usize,
+    obs_dim: usize,
+    act_dim: usize,
+) -> PyResult<EnvPoolVecEnv> {
+    Python::with_gil(|py| {
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let ep = py.import("envpool")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("env_type", "gymnasium")?;
+        kwargs.set_item("num_envs", num_envs as i64)?;
+        kwargs.set_item("seed", 1i64)?;
+        kwargs.set_item("num_threads", num_threads as i64)?;
+        kwargs.set_item("max_episode_steps", 500i64)?;
+        let env = ep.call_method("make", ("LunarLander-v2",), Some(&kwargs))?;
         env.call_method0("reset")?;
         Ok(EnvPoolVecEnv::new(
             env.unbind(),

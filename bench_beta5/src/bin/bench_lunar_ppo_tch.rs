@@ -1,11 +1,13 @@
 //! bench_lunar_ppo_tch — RelayRL PPO on LunarLander, 512 envs, LibTorch backend,
 //! Sample-Factory-matched hyperparameters and environment.
 //!
-//! Trains against gymnasium's `LunarLander-v2` with `max_episode_steps=500`
-//! (sync-vectorized, 512 envs) via `bench_beta5::py_env::make_sf_matched_lunar_lander_vec` —
-//! the exact same environment and conditions used by `scripts/sf_lunar_bench.py`,
-//! so the RelayRL vs Sample Factory comparison is not confounded by differences
-//! between the `lunarlander-rl` Rust port and gymnasium's real Box2D physics.
+//! Trains against EnvPool's `LunarLander-v2` with `max_episode_steps=500`
+//! (one envpool instance of 512 envs, GIL released during step) via
+//! `bench_beta5::py_env::make_sf_matched_envpool_lunar_lander_vec` — the same
+//! environment and conditions used by `scripts/sf_lunar_bench.py`'s single
+//! envpool instance, so the RelayRL vs Sample Factory comparison is not
+//! confounded by differences between the `lunarlander-rl` Rust port and
+//! envpool's real Box2D physics.
 //!
 //! Hyperparameters mirror the Sample Factory LunarLander-v2 config used for the
 //! comparison benchmark: pi_lr=vf_lr=2.5e-4, vf_coef=1.0, train_pi/vf_iters=4
@@ -37,7 +39,7 @@ use relayrl_framework::prelude::network::{
 use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
 use relayrl_types::data::tensor::{DType, TchDType};
 
-use bench_beta5::py_env::make_sf_matched_lunar_lander_vec;
+use bench_beta5::py_env::make_sf_matched_envpool_lunar_lander_vec;
 
 // ─────────────────────────── Constants ──────────────────────────────────────
 
@@ -194,14 +196,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let actor_id = actor_ids[0];
 
     // ── Environment ──────────────────────────────────────────────────────────
-    // gymnasium LunarLander-v2, max_episode_steps=500, 64 sync-vectorized envs —
-    // matches scripts/sf_lunar_bench.py exactly.
-    let py_env = make_sf_matched_lunar_lander_vec(ENV_COUNT as usize, OBS_DIM, ACT_DIM)
-        .map_err(|e| format!("gymnasium env creation failed: {e}"))?;
+    // EnvPool LunarLander-v2, max_episode_steps=500, one envpool instance of
+    // ENV_COUNT envs — matches scripts/sf_lunar_bench.py's single envpool instance.
+    let py_env = make_sf_matched_envpool_lunar_lander_vec(ENV_COUNT as usize, OBS_DIM, ACT_DIM)
+        .map_err(|e| format!("envpool env creation failed: {e}"))?;
     let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(py_env);
     agent.set_env(actor_id, boxed, ENV_COUNT).await?;
     println!(
-        "set_env OK — registered {} gymnasium LunarLander-v2 env(s) with actor {}\n",
+        "set_env OK — registered {} EnvPool LunarLander-v2 env(s) with actor {}\n",
         ENV_COUNT, actor_id
     );
 
