@@ -1,4 +1,5 @@
 /target/
+__pycache__/
 bench_beta2/target/
 bench_beta3/target/
 bench_beta4/target/
