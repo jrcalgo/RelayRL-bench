@@ -1,2 +1,3 @@
 # relayrl-bench
-End-to-end implementation of RelayRL's data collection and training processes
+
+Excuse the vibecoded mess that is this repository; Claude is nearly entirely to blame :P
