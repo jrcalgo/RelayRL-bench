@@ -71,3 +71,55 @@ efficiency gap vs SF likely lies elsewhere: minibatch/epoch cadence semantics
 scope (per-batch vs SF's running normalizer), value-loss weighting/clipping differences,
 policy/value network initialization, or LR schedule interaction with `train_pi_iters=4`
 sequential (unshuffled) minibatch passes.
+
+## Hypothesis 2: PPO2-style value-function clipping (REJECTED, rolled back)
+
+**Idea**: SF's `_value_loss` (`sample_factory/algo/learning/learner.py:438-456`) uses PPO2-style
+value clipping: `value_clipped = old_values + clamp(new_values - old_values, -clip_value,
+clip_value)`, `loss = max((new_values-target)^2, (value_clipped-target)^2)`, with
+`--ppo_clip_value` defaulting to 1.0. RelayRL's `train_step_discrete` (kernel.rs) instead used
+plain MSE: `(v_pred - ret).powf_scalar(2.0).mean()`, with no clipping. (Gradient clipping was
+separately confirmed already present and matching SF's `max_grad_norm=4.0`, ruling that out as a
+lead.)
+
+**Change** (`kernel.rs`, `independent/mod.rs`):
+1. Added `PPOKernelOps::normalize_with_current_stats(&self, vals: &[f32]) -> Vec<f32>` — a
+   read-only counterpart to `normalize_persistent_returns` that z-scores `vals` using the
+   CURRENT (pre-mutation) `returns_mean`/`returns_variance`/`returns_count`, clamped to [-5,5].
+2. In `run_ppo_sgd_flat`, computed `old_val_normalized = kernel.normalize_with_current_stats(&batch.val)`
+   BEFORE calling `normalize_persistent_returns(&batch.ret)` (which mutates the running stats),
+   to bring `PPOBatch.val` (reward-scale, from the previous epoch's `value_forward`) onto the
+   same normalized scale as `v_pred`/`ret_normalized`.
+3. Threaded `old_val` through `train_step`/`train_step_discrete`. In `train_step_discrete`,
+   implemented `value_clipped = old_val + clamp(v_pred - old_val, -1.0, 1.0)`,
+   `vf_loss = max((v_pred-ret)^2, (value_clipped-ret)^2).mean()` (clip_value=1.0, matching SF's
+   default), using Burn's `max_pair` (analogous to the existing `min_pair` used for the PPO
+   policy-clip objective).
+
+**Results** (n=3):
+- final = [77.9, 132.6, 120.6], avg **110.37** (baseline avg 141.02, range 131.8-162.3 — all 3
+  runs below baseline's lowest individual run).
+- AUC = [79.54, 60.19, 83.50], avg **74.41** (baseline avg 93.54, range 73.22-108.50 — below
+  baseline's lowest individual run).
+- Throughput: ≈34,720 / 34,821 / 33,803 env-frames/sec (~12-15% below baseline's ≈39,664) from
+  the extra value-clipping tensor ops.
+- Instability signals: AUC sample points included severe dips (-45.1 in run2, -3.7 and -0.7 in
+  runs 1/3 — MeanReturn briefly going strongly negative mid-training, never seen in the
+  baseline). Run 3's final epoch printed `ClipFrac=0.9783` (vs baseline's consistent `0.0000`),
+  i.e. nearly all policy-ratio samples were being clipped — a strong indicator the value-clipping
+  change destabilized the policy update too, likely via the combined-loss backward pass sharing
+  gradients between `pi_loss` and `vf_loss`.
+
+**Verdict**: REJECTED, reverted via `git revert` (commit 25b28e5). All 3 metrics (final, AUC,
+throughput) regressed vs baseline, with clear instability signatures.
+
+**Takeaway for future hypotheses**: the `normalize_with_current_stats` approximation for
+`old_val` may itself be miscalibrated (it re-z-scores an already-denormalized `batch.val` using
+running return stats, which is only an approximate inverse of `value_forward`'s denormalization
+— see kernel.rs's `value_forward`/`normalize_persistent_returns`/`set_return_denorm_stats`
+chain). Even if value clipping itself were beneficial, a poorly-scaled `old_val` would make the
+clip bounds meaningless or harmful, which is consistent with the observed instability. If value
+clipping is revisited, it would need a more careful scale-matched `old_val` (e.g. caching the
+network's raw `v_norm` output at rollout time, before any denormalization, rather than
+reconstructing it from `batch.val`). Absent that, focus shifts to other candidates: minibatch/
+epoch cadence, normalization scope, network initialization, or LR schedule.
