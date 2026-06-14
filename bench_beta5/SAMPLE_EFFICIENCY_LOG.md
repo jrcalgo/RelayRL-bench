@@ -123,3 +123,41 @@ clipping is revisited, it would need a more careful scale-matched `old_val` (e.g
 network's raw `v_norm` output at rollout time, before any denormalization, rather than
 reconstructing it from `batch.val`). Absent that, focus shifts to other candidates: minibatch/
 epoch cadence, normalization scope, network initialization, or LR schedule.
+
+## Hypothesis 3: enable `normalize_obs` to match SF's `--normalize_input=True` (REJECTED, rolled back)
+
+**Idea**: `scripts/sf_lunar_bench.py`'s `DEFAULT_ARGS` sets `--normalize_input=True` (SF's
+`RunningMeanStd`-based observation normalization). RelayRL's framework already implements the
+equivalent — `ObsNormalizer` (Welford running per-feature mean/variance) in
+`relayrl_framework/.../training/mod.rs`, gated by `IPPOParams.normalize_obs: bool` (default
+`false`, i.e. previously unused by `bench_lunar_ppo_tch`). This was the one major hyperparameter
+not yet matched between the two frameworks.
+
+**Change** (`bench_lunar_ppo_tch.rs`, benchmark-binary config only, no algorithm/framework edits):
+1. Set `normalize_obs: true` in the `IPPOParams { ... }` literal.
+2. Updated the printed config banner to reflect the new setting.
+
+**Results** (n=3):
+- final = [148.70, 156.00, 143.70], avg **149.47** (baseline avg 141.02, range 131.8-162.3 — a
+  modest +6% bump, but within baseline's run-to-run range).
+- AUC = [103.83, 87.54, 88.36], avg **93.24** (baseline avg 93.54, range 73.22-108.50 —
+  essentially identical to baseline, no improvement in the convergence-speed proxy).
+- Throughput: 33215 / 33720 / 33321 env-frames/sec, avg **≈33419** (~15.7% below baseline's
+  ≈39664), from the extra per-step Welford `ObsNormalizer` update/normalize on all 512 envs.
+- No instability signals: `ClipFrac=0.0000` throughout all 3 runs (consistent with baseline).
+
+**Verdict**: REJECTED, rolled back (removed `normalize_obs: true` from `bench_lunar_ppo_tch.rs`).
+AUC — the primary time-to-convergence proxy — showed no improvement (93.24 vs 93.54), while final
+return's modest bump was within baseline noise. Combined with a real ~16% throughput regression,
+this hyperparameter-matching change offers no net benefit.
+
+**Takeaway for future hypotheses**: observation normalization is NOT the source of the
+sample-efficiency gap — RelayRL's un-normalized obs (raw LunarLander-v2 state, already small-
+magnitude/well-scaled features) perform on par with SF's running-normalized obs. With H1
+(rollout-chunked GAE), H2 (PPO2 value clipping), and H3 (obs normalization) all ruled out, the
+remaining candidates are: minibatch/epoch cadence (`episodes_needed_for_steps` vs SF's fixed
+90-step rollout — see H1's takeaway), network initialization scheme details (orthogonal init
+*gains* per layer, not just orthogonality), LR schedule (SF may anneal LR/clip-ratio over
+training; RelayRL's `bench_lunar_ppo_tch` uses fixed `PI_LR`/`VF_LR`/`CLIP_RATIO`), or
+entropy-coefficient/KL-target interaction with `train_pi_iters=4` early-stopping (`StopIter`
+values, `target_kl` behavior) across the two implementations.
