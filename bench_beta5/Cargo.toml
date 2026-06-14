@@ -1,0 +1,102 @@
+[workspace]
+members = [".", "lunarlander-rl", "gridworld-bench"]
+
+[patch.crates-io]
+relayrl_types      = { path = "./patches/relayrl_types" }
+relayrl_framework  = { path = "./patches/relayrl_framework" }
+relayrl_algorithms = { path = "./patches/relayrl_algorithms" }
+
+[package]
+name = "bench-beta5"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+
+[dependencies]
+relayrl_framework  = { version = "=0.5.0-beta.5", default-features = false, features = ["client", "tch-backend"] }
+relayrl_algorithms = { version = "=0.4.0",         default-features = false, features = ["tch-backend", "tch-model"] }
+relayrl_types      = { version = "=0.8.0",         default-features = false, features = ["ndarray-backend", "tch-backend", "onnx-model", "tch-model"] }
+relayrl_env_trait  = "1.3"
+lunarlander-rl     = { path = "./lunarlander-rl", features = ["tch-backend"] }
+gridworld-bench    = { path = "./gridworld-bench" }
+
+burn-ndarray = { version = "0.20.1", features = ["blas-openblas-system"] }
+burn-nn      = "0.20.1"
+burn-tch     = "0.20.1"
+burn-tensor  = "0.20.1"
+rayon        = "1"
+
+tokio   = { version = "1", features = ["full"] }
+futures = "0.3"
+clap    = { version = "4", features = ["derive"] }
+pyo3    = { version = "0.23", features = ["auto-initialize"] }
+bytemuck = "1"
+uuid    = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "bench_lunar_direct_scalar1"
+path = "src/bin/bench_lunar_direct_scalar1.rs"
+
+[[bin]]
+name = "bench_lunar_set_env_scalar1"
+path = "src/bin/bench_lunar_set_env_scalar1.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_scalar1"
+path = "src/bin/bench_lunar_ppo_scalar1.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_sweep"
+path = "src/bin/bench_lunar_ppo_sweep.rs"
+
+[[bin]]
+name = "bench_grid_ppo_scalar1"
+path = "src/bin/bench_grid_ppo_scalar1.rs"
+
+[[bin]]
+name = "bench_grid_set_env_vec64"
+path = "src/bin/bench_grid_set_env_vec64.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_1env"
+path = "src/bin/bench_lunar_ppo_1env.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_64env"
+path = "src/bin/bench_lunar_ppo_64env.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_tch"
+path = "src/bin/bench_lunar_ppo_tch.rs"
+
+[[bin]]
+name = "bench_pyenv_step"
+path = "src/bin/bench_pyenv_step.rs"
+
+[[bin]]
+name = "bench_lunar_ppo_py"
+path = "src/bin/bench_lunar_ppo_py.rs"
+
+[[bin]]
+name = "bench_start_latency"
+path = "src/bin/bench_start_latency.rs"
+
+[[bin]]
+name = "bench_lunar_eval_py"
+path = "src/bin/bench_lunar_eval_py.rs"
+
+[[bin]]
+name = "bench_lunar_sfppo_py"
+path = "src/bin/bench_lunar_sfppo_py.rs"
+
+[[bin]]
+name = "bench_lunar_eval_envpool"
+path = "src/bin/bench_lunar_eval_envpool.rs"
+
+[[bin]]
+name = "bench_lunar_eval_envpool_tch"
+path = "src/bin/bench_lunar_eval_envpool_tch.rs"
+
+[[bin]]
+name = "bench_lunar_eval_envpool_2actor"
+path = "src/bin/bench_lunar_eval_envpool_2actor.rs"

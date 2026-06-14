@@ -1,0 +1,198 @@
+//! bench_lunar_eval_envpool_tch — pure inference eval, EnvPool envs, LibTorch backend.
+//!
+//! Identical to bench_lunar_eval_envpool except inference uses LibTorch (tch)
+//! + TorchScript (.pt) instead of NdArray + ONNX-runtime.
+//!
+//! Build:
+//!   LIBTORCH_USE_PYTORCH=1 LIBTORCH_BYPASS_VERSION_CHECK=1 \
+//!     cargo build --release -p bench-beta5 --bin bench_lunar_eval_envpool_tch
+//!
+//! Run:
+//!   LD_LIBRARY_PATH=/usr/local/lib/python3.11/dist-packages/torch/lib \
+//!     /usr/bin/time -v ./target/release/bench_lunar_eval_envpool_tch
+
+use std::path::PathBuf;
+use std::time::Instant;
+
+use burn_tch::LibTorch;
+
+use relayrl_framework::prelude::network::{
+    ActorInferenceMode, ActorTrainingDataMode, AgentBuilder, ModelMode,
+    RelayRLActorEnv, RelayRLAgentActors,
+};
+use relayrl_framework::prelude::types::tensor::relayrl::DeviceType;
+
+use relayrl_types::model::ModelModule;
+
+use bench_beta5::py_env::make_envpool_lunar_lander_vec;
+
+// ─────────────────────────── Constants ──────────────────────────────────────
+
+const OBS_DIM: usize = 8;
+const ACT_DIM: usize = 4;
+const ENV_COUNT: u32 = 1024;
+
+const WARMUP_STEPS: usize = 500;
+const TIMED_STEPS: usize = 5_000;
+
+const MODEL_DIR: &str = "/home/user/RelayRL-end2end/model_lunar_tch";
+
+// ─────────────────────────── /proc helpers ──────────────────────────────────
+
+#[derive(Default)]
+struct ProcStats {
+    rss_kb: u64,
+    vol_ctx: u64,
+    nvol_ctx: u64,
+    minor_faults: u64,
+    major_faults: u64,
+}
+
+fn read_proc_stats() -> ProcStats {
+    let mut s = ProcStats::default();
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            let mut it = line.splitn(2, ':');
+            let k = it.next().unwrap_or("").trim();
+            let v = it.next().unwrap_or("").trim();
+            match k {
+                "VmRSS"                      => s.rss_kb   = v.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0),
+                "voluntary_ctxt_switches"    => s.vol_ctx  = v.parse().unwrap_or(0),
+                "nonvoluntary_ctxt_switches" => s.nvol_ctx = v.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+        let fields: Vec<&str> = stat.split_whitespace().collect();
+        s.minor_faults = fields.get(9).and_then(|x| x.parse().ok()).unwrap_or(0);
+        s.major_faults = fields.get(11).and_then(|x| x.parse().ok()).unwrap_or(0);
+    }
+    s
+}
+
+// ─────────────────────────── Model loader ───────────────────────────────────
+
+fn load_lunarlander_model() -> Result<ModelModule<LibTorch>, Box<dyn std::error::Error>> {
+    Ok(ModelModule::<LibTorch>::load_from_path(MODEL_DIR)?)
+}
+
+// ─────────────────────────── Main ───────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    type B = LibTorch;
+
+    let num_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let model = load_lunarlander_model()?;
+    println!("══════════════════════════════════════════════════════════════════");
+    println!("  RelayRL beta5 — eval — LunarLander-v3 — EnvPool — {} envs", ENV_COUNT);
+    println!("  model  : {MODEL_DIR}/lunarlander_policy.pt  (8→64→64→4, TorchScript)");
+    println!("  backend: LibTorch (tch, TorchScript inference, CPU) + EnvPool C++ thread pool");
+    println!("  warmup : {} steps × {} envs = {} transitions",
+             WARMUP_STEPS, ENV_COUNT, WARMUP_STEPS * ENV_COUNT as usize);
+    println!("  timed  : {} steps × {} envs = {} transitions",
+             TIMED_STEPS, ENV_COUNT, TIMED_STEPS * ENV_COUNT as usize);
+    println!("  cores  : {num_cores} logical");
+    println!("══════════════════════════════════════════════════════════════════\n");
+
+    // ── Agent setup ───────────────────────────────────────────────────────────
+    let config_path = PathBuf::from("./config.json");
+    let mut builder = AgentBuilder::<B>::builder()
+        .actor_inference_mode(ActorInferenceMode::Local(ModelMode::Independent))
+        .actor_training_data_mode(ActorTrainingDataMode::Disabled)
+        .default_model(model)
+        .router_scale(1);
+    if config_path.exists() {
+        builder = builder.config_path(config_path);
+    }
+
+    let (mut agent, params) = builder.build().await?;
+    agent.start(params).await?;
+    let actor_ids = agent.get_actor_ids()?;
+    let actor_id = actor_ids[0];
+
+    // ── EnvPool env ───────────────────────────────────────────────────────────
+    let ep_env = make_envpool_lunar_lander_vec(ENV_COUNT as usize, OBS_DIM, ACT_DIM)
+        .map_err(|e| format!("EnvPool env creation failed: {e}"))?;
+    let boxed: Box<dyn relayrl_env_trait::Environment> = Box::new(ep_env);
+    agent.set_env(actor_id, boxed, ENV_COUNT).await?;
+    println!("set_env OK — {} EnvPool LunarLander-v3 sub-envs registered\n", ENV_COUNT);
+
+    // ── Warm-up ───────────────────────────────────────────────────────────────
+    println!("Warming up ({} steps × {} envs)…", WARMUP_STEPS, ENV_COUNT);
+    let t_warmup = Instant::now();
+    agent.run_env_eval(actor_id, WARMUP_STEPS).await?;
+    let warmup_wall = t_warmup.elapsed().as_secs_f64();
+    println!("Warm-up done in {warmup_wall:.2}s  ({:.0} env transitions/sec)\n",
+             (WARMUP_STEPS * ENV_COUNT as usize) as f64 / warmup_wall);
+
+    // ── Baseline /proc snapshot ───────────────────────────────────────────────
+    let before = read_proc_stats();
+
+    // ── Timed run ─────────────────────────────────────────────────────────────
+    println!("Starting timed run ({} steps × {} envs)…", TIMED_STEPS, ENV_COUNT);
+    let t0 = Instant::now();
+    agent.run_env_eval(actor_id, TIMED_STEPS).await?;
+    let wall = t0.elapsed().as_secs_f64();
+
+    // ── Post-run /proc snapshot ───────────────────────────────────────────────
+    let after = read_proc_stats();
+
+    // ── Derived metrics ───────────────────────────────────────────────────────
+    let total_transitions = TIMED_STEPS * ENV_COUNT as usize;
+    let steps_per_sec     = TIMED_STEPS as f64 / wall;
+    let transitions_sec   = total_transitions as f64 / wall;
+    let us_per_step       = 1_000_000.0 / steps_per_sec;
+    let us_per_transition = 1_000_000.0 / transitions_sec;
+
+    let vol_delta   = after.vol_ctx.saturating_sub(before.vol_ctx);
+    let nvol_delta  = after.nvol_ctx.saturating_sub(before.nvol_ctx);
+    let total_ctx   = vol_delta + nvol_delta;
+    let minor_delta = after.minor_faults.saturating_sub(before.minor_faults);
+    let major_delta = after.major_faults.saturating_sub(before.major_faults);
+
+    println!();
+    println!("══════════════════════════════════════════════════════════════════");
+    println!("  RESULTS — LunarLander-v3 eval — RelayRL+EnvPool+tch — {} envs", ENV_COUNT);
+    println!("══════════════════════════════════════════════════════════════════");
+
+    println!();
+    println!("─── Throughput ────────────────────────────────────────────────────");
+    println!("  env count              : {:>10}", ENV_COUNT);
+    println!("  loop steps (timed)     : {:>10}", TIMED_STEPS);
+    println!("  total env transitions  : {:>10}", total_transitions);
+    println!("  wall time              : {:>10.3} s", wall);
+    println!("  steps / sec            : {:>10.1}", steps_per_sec);
+    println!("  env transitions / sec  : {:>10.1}", transitions_sec);
+    println!("  µs / step              : {:>10.3}", us_per_step);
+    println!("  µs / env transition    : {:>10.3}", us_per_transition);
+
+    println!();
+    println!("─── Memory ────────────────────────────────────────────────────────");
+    println!("  RSS (after run)        : {:>8.1} MB", after.rss_kb as f64 / 1024.0);
+    println!("  minor page faults (Δ) : {:>10}", minor_delta);
+    println!("  major page faults (Δ) : {:>10}", major_delta);
+
+    println!();
+    println!("─── OS scheduling ─────────────────────────────────────────────────");
+    println!("  vol ctx switches  (Δ) : {:>10}", vol_delta);
+    println!("  nvol ctx switches (Δ) : {:>10}", nvol_delta);
+    println!("  total ctx switches(Δ) : {:>10}", total_ctx);
+    println!("  ctx switches / step   : {:>10.4}", total_ctx as f64 / TIMED_STEPS as f64);
+    println!("  logical cores         : {:>10}", num_cores);
+
+    println!();
+    println!("─── Timing breakdown ──────────────────────────────────────────────");
+    println!("  warmup  ({:>5} steps): {:>8.2} s  ({:.0} transitions/sec)",
+             WARMUP_STEPS, warmup_wall, (WARMUP_STEPS * ENV_COUNT as usize) as f64 / warmup_wall);
+    println!("  timed   ({:>5} steps): {:>8.2} s  ({:.0} transitions/sec)",
+             TIMED_STEPS, wall, transitions_sec);
+    println!("══════════════════════════════════════════════════════════════════");
+
+    agent.shutdown().await?;
+    Ok(())
+}
