@@ -445,7 +445,8 @@ impl GenericReplayBuffer for PPOReplayBuffer {
         let mut episode_return = 0.0f32;
         let mut episode_length = 0i32;
 
-        for action in &trajectory.actions {
+        let last_idx = trajectory.actions.len().saturating_sub(1);
+        for (idx, action) in trajectory.actions.iter().enumerate() {
             episode_length += 1;
             let reward = action.get_rew();
             episode_return += reward;
@@ -496,7 +497,16 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             let next = self.metadata.buffer_pointer.load(Ordering::Relaxed) + 1;
             self.metadata.buffer_pointer.store(next, Ordering::Relaxed);
 
-            if action.get_done() {
+            // A trajectory chunk ends a GAE segment either because the true env
+            // episode terminated/truncated (action.get_done()) or because the
+            // collector cut it off at rollout_len steps (trajectory.is_truncated,
+            // set via set_truncated() with the episode still ongoing). Without the
+            // latter, steps from rollout-length cutoffs never get an
+            // episode_boundaries entry and sit dead in the buffer (no GAE/return)
+            // until the underlying episode eventually ends, possibly many epochs
+            // later — starving training of fresh transitions, unlike SF's
+            // bootstrapped per-rollout GAE.
+            if idx == last_idx && (action.get_done() || trajectory.is_truncated) {
                 let start = self.metadata.buffer_path_start_idx.load(Ordering::Relaxed);
                 let end = self.metadata.buffer_pointer.load(Ordering::Relaxed);
                 buffers
