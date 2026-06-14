@@ -40,20 +40,24 @@ impl ObsRunningStats {
         }
     }
 
-    fn normalize(&self, flat: &[f32]) -> Vec<f32> {
+    /// Normalize `flat` and write the result directly as little-endian f32 bytes,
+    /// avoiding the intermediate `Vec<f32>` allocation/copy of the old
+    /// `normalize()` + `bytemuck::cast_slice().to_vec()` chain.
+    fn normalize_to_bytes(&self, flat: &[f32]) -> Vec<u8> {
         let dim = self.mean.len();
         let denom = (self.count - 1.0).max(1.0);
-        flat.chunks(dim)
-            .flat_map(|obs| {
-                obs.iter().enumerate().map(|(d, &v)| {
-                    let std = (self.var[d] / denom).sqrt().max(1e-8);
-                    ((v as f64 - self.mean[d]) / std).clamp(-10.0, 10.0) as f32
-                })
-            })
-            .collect()
+        let mut out = Vec::with_capacity(flat.len() * 4);
+        for (i, &v) in flat.iter().enumerate() {
+            let d = i % dim;
+            let std = (self.var[d] / denom).sqrt().max(1e-8);
+            let normed = ((v as f64 - self.mean[d]) / std).clamp(-10.0, 10.0) as f32;
+            out.extend_from_slice(&normed.to_le_bytes());
+        }
+        out
     }
 }
 
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use uuid::Uuid;
@@ -78,8 +82,13 @@ pub struct PyVectorEnv {
     uuids: Mutex<Vec<EnvironmentUuid>>,
     uuid_to_idx: Mutex<HashMap<EnvironmentUuid, usize>>,
     /// Cached flat `[n_envs × obs_dim × 4]` bytes; updated on every step/reset.
+    /// Required by the eval loop (`flat_observation_bytes()` is polled per step there).
     obs_cache: Mutex<Vec<u8>>,
     obs_stats: Mutex<ObsRunningStats>,
+    /// Reused scratch buffers to avoid per-step heap allocations.
+    scratch_obs_f32: Mutex<Vec<f32>>,
+    scratch_rewards_f64: Mutex<Vec<f64>>,
+    scratch_actions_i64: Mutex<Vec<i64>>,
 }
 
 // Py<PyAny> is Send + Sync in PyO3 0.14+. Mutex<...> is Send + Sync.
@@ -109,47 +118,92 @@ impl PyVectorEnv {
             uuid_to_idx: Mutex::new(HashMap::new()),
             obs_cache: Mutex::new(vec![0u8; n_envs * obs_dim * 4]),
             obs_stats: Mutex::new(ObsRunningStats::new(obs_dim)),
+            scratch_obs_f32: Mutex::new(vec![0f32; n_envs * obs_dim]),
+            scratch_rewards_f64: Mutex::new(vec![0f64; n_envs]),
+            scratch_actions_i64: Mutex::new(vec![0i64; n_envs]),
         }
     }
 
     /// Update running obs stats and return normalized f32 bytes.
-    fn normalize_obs(&self, raw: Vec<u8>) -> Vec<u8> {
-        let floats: &[f32] = bytemuck::cast_slice(&raw);
+    fn normalize_obs(&self, floats: &[f32]) -> Vec<u8> {
         let mut stats = self.obs_stats.lock().unwrap();
         stats.update_batch(floats, self.n_envs);
-        let normed = stats.normalize(floats);
-        bytemuck::cast_slice::<f32, u8>(&normed).to_vec()
+        stats.normalize_to_bytes(floats)
     }
 
-    /// Extract a flat `Vec<u8>` of f32 bytes from a `[n_envs, obs_dim]` numpy array.
-    /// Uses `ascontiguousarray` which is a no-op when the array is already C-contiguous
-    /// float32 (the common case for gymnasium LunarLander).
-    fn extract_flat_obs(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> Option<Vec<u8>> {
+    /// Fill `out` (length `n_envs * obs_dim`) with the f32 observations from a
+    /// `[n_envs, obs_dim]` numpy array.
+    ///
+    /// Fast path: `PyBuffer::<f32>::get` gives a zero-copy view of the numpy
+    /// array's underlying memory, copied directly into `out` — no Python
+    /// `bytes` object or intermediate `Vec<u8>` is allocated.
+    ///
+    /// Falls back to the old `ascontiguousarray` -> `tobytes` -> `extract`
+    /// chain if the buffer isn't a matching, C-contiguous f32 array (e.g. a
+    /// non-numpy or non-contiguous wrapper), so correctness never depends on
+    /// the fast path succeeding.
+    fn extract_flat_obs_f32(&self, py: Python<'_>, obj: &Bound<'_, PyAny>, out: &mut [f32]) -> bool {
+        if let Ok(buf) = PyBuffer::<f32>::get(obj) {
+            if buf.item_count() == out.len()
+                && buf.is_c_contiguous()
+                && buf.copy_to_slice(py, out).is_ok()
+            {
+                return true;
+            }
+        }
+
         let np = self.np.bind(py);
-        let contiguous = np.call_method1("ascontiguousarray", (obj, "float32")).ok()?;
-        let raw: Vec<u8> = contiguous.call_method0("tobytes").ok()?.extract().ok()?;
-        if raw.len() == self.n_envs * self.obs_dim * 4 {
-            Some(raw)
-        } else {
-            None
+        if let Ok(contiguous) = np.call_method1("ascontiguousarray", (obj, "float32")) {
+            if let Ok(raw) = contiguous
+                .call_method0("tobytes")
+                .and_then(|b| b.extract::<Vec<u8>>())
+            {
+                if raw.len() == out.len() * 4 {
+                    out.copy_from_slice(bytemuck::cast_slice(&raw));
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Convert a numpy `float64[n_envs]` rewards array to `Vec<f32>`.
+///
+/// Fast path: `PyBuffer::<f64>::get` copies directly into `scratch` (no Python
+/// `bytes` allocation), then casts to f32 — same rounding as numpy's
+/// `astype("float32")`. Falls back to `astype` -> `tobytes` -> `extract` for
+/// non-matching buffers.
+fn extract_rewards_f32(py: Python<'_>, rew_item: &Bound<'_, PyAny>, scratch: &mut [f64]) -> Option<Vec<f32>> {
+    if let Ok(buf) = PyBuffer::<f64>::get(rew_item) {
+        if buf.item_count() == scratch.len() && buf.copy_to_slice(py, scratch).is_ok() {
+            return Some(scratch.iter().map(|&v| v as f32).collect());
         }
     }
+    let rew_bytes: Vec<u8> = rew_item
+        .call_method1("astype", ("float32",))
+        .ok()?
+        .call_method0("tobytes")
+        .ok()?
+        .extract()
+        .ok()?;
+    Some(bytemuck::cast_slice::<u8, f32>(&rew_bytes).to_vec())
 }
 
 /// Convert 1-byte-per-env discrete action slice to `int64[n_envs]` numpy array.
 /// Uses `frombuffer` on a `PyBytes` wrapping the cast slice — avoids building a
 /// Python list and performs a single memcpy via numpy's buffer protocol.
+/// `scratch` is reused across calls to avoid a per-step `Vec<i64>` allocation.
 fn batch_actions_to_py<'py>(
     py: Python<'py>,
     np: &Bound<'py, PyAny>,
     actions: &[u8],
     n_envs: usize,
+    scratch: &mut Vec<i64>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let i64s: Vec<i64> = actions[..n_envs.min(actions.len())]
-        .iter()
-        .map(|&b| b as i64)
-        .collect();
-    let i64_bytes: &[u8] = bytemuck::cast_slice(&i64s);
+    scratch.clear();
+    scratch.extend(actions[..n_envs.min(actions.len())].iter().map(|&b| b as i64));
+    let i64_bytes: &[u8] = bytemuck::cast_slice(scratch.as_slice());
     let bytes_obj = PyBytes::new(py, i64_bytes);
     np.call_method1("frombuffer", (bytes_obj, "int64"))
 }
@@ -246,13 +300,16 @@ impl VectorEnvironment for PyVectorEnv {
                 result.clone()
             };
 
-            let raw = self.extract_flat_obs(py, &obs_obj).ok_or_else(|| {
-                EnvironmentError::ObservationBuildingError(format!(
-                    "reset: expected [{} × {}] float32 obs",
-                    self.n_envs, self.obs_dim
-                ))
-            })?;
-            let flat = self.normalize_obs(raw);
+            let flat = {
+                let mut scratch = self.scratch_obs_f32.lock().unwrap();
+                if !self.extract_flat_obs_f32(py, &obs_obj, &mut scratch) {
+                    return Err(EnvironmentError::ObservationBuildingError(format!(
+                        "reset: expected [{} × {}] float32 obs",
+                        self.n_envs, self.obs_dim
+                    )));
+                }
+                self.normalize_obs(&scratch)
+            };
             *self.obs_cache.lock().unwrap() = flat.clone();
 
             let stride = self.obs_dim * 4;
@@ -279,7 +336,10 @@ impl VectorEnvironment for PyVectorEnv {
     fn step_bytes(&self, actions: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>, Vec<f32>, Vec<bool>, Vec<bool>)> {
         Python::with_gil(|py| {
             let np = self.np.bind(py);
-            let py_actions = batch_actions_to_py(py, &np, actions, self.n_envs).ok()?;
+            let py_actions = {
+                let mut scratch = self.scratch_actions_i64.lock().unwrap();
+                batch_actions_to_py(py, &np, actions, self.n_envs, &mut scratch).ok()?
+            };
 
             let result = self
                 .env_obj
@@ -289,38 +349,28 @@ impl VectorEnvironment for PyVectorEnv {
             let tup = result.downcast::<PyTuple>().ok()?;
 
             // obs: [n_envs, obs_dim] — auto-reset obs for done envs (gymnasium semantics)
-            let raw_obs = self.extract_flat_obs(py, &tup.get_item(0).ok()?)?;
-            let flat_obs = self.normalize_obs(raw_obs);
+            let flat_obs = {
+                let mut scratch = self.scratch_obs_f32.lock().unwrap();
+                if !self.extract_flat_obs_f32(py, &tup.get_item(0).ok()?, &mut scratch) {
+                    return None;
+                }
+                self.normalize_obs(&scratch)
+            };
             *self.obs_cache.lock().unwrap() = flat_obs.clone();
 
             // rewards: gymnasium returns float64 by default; cast to float32
             let rew_item = tup.get_item(1).ok()?;
-            let rew_bytes: Vec<u8> = rew_item
-                .call_method1("astype", ("float32",))
-                .ok()?
-                .call_method0("tobytes")
-                .ok()?
-                .extract()
-                .ok()?;
-            let rewards: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&rew_bytes).to_vec();
+            let rewards = {
+                let mut scratch = self.scratch_rewards_f64.lock().unwrap();
+                extract_rewards_f32(py, &rew_item, &mut scratch)?
+            };
 
-            // terminated and truncated (gymnasium 5-tuple)
+            // terminated and truncated (gymnasium 5-tuple) — already bool dtype,
+            // no astype("bool") needed.
             let term = tup.get_item(2).ok()?;
             let trunc = tup.get_item(3).ok()?;
-            let t_raw: Vec<u8> = term
-                .call_method1("astype", ("bool",))
-                .ok()?
-                .call_method0("tobytes")
-                .ok()?
-                .extract()
-                .ok()?;
-            let u_raw: Vec<u8> = trunc
-                .call_method1("astype", ("bool",))
-                .ok()?
-                .call_method0("tobytes")
-                .ok()?
-                .extract()
-                .ok()?;
+            let t_raw: Vec<u8> = term.call_method0("tobytes").ok()?.extract().ok()?;
+            let u_raw: Vec<u8> = trunc.call_method0("tobytes").ok()?.extract().ok()?;
             let terminated: Vec<bool> = t_raw.iter().map(|&t| t != 0).collect();
             let truncated: Vec<bool> = u_raw.iter().map(|&u| u != 0).collect();
 
@@ -381,8 +431,7 @@ impl EnvPoolVecEnv {
         let floats: &[f32] = bytemuck::cast_slice(&raw);
         let mut stats = self.obs_stats.lock().unwrap();
         stats.update_batch(floats, self.n_envs);
-        let normed = stats.normalize(floats);
-        bytemuck::cast_slice::<f32, u8>(&normed).to_vec()
+        stats.normalize_to_bytes(floats)
     }
 
     /// Extract flat f32 bytes from a numpy array already guaranteed float32 C-contiguous.
