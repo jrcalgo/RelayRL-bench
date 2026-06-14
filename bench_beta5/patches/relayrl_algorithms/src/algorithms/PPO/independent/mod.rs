@@ -688,6 +688,10 @@ fn run_ppo_sgd_flat<
     let mb_size = mb_size_opt.unwrap_or(n).clamp(1, n);
     let full_batch = mb_size >= n;
 
+    // Old value estimates on the normalized scale (PPO2-style value clipping target),
+    // computed BEFORE normalize_persistent_returns mutates the running stats below.
+    let old_val_normalized = kernel.normalize_with_current_stats(&batch.val);
+
     // Persistent return normalization (SF-aligned): update running stats on full batch,
     // then use normalized returns for all mini-batch iterations this epoch.
     let ret_normalized = kernel.normalize_persistent_returns(&batch.ret);
@@ -732,6 +736,7 @@ fn run_ppo_sgd_flat<
                     &batch.adv_norm,
                     &batch.logp,
                     &ret_normalized,
+                    &old_val_normalized,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
@@ -742,6 +747,7 @@ fn run_ppo_sgd_flat<
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp[j]).collect();
                 let ret_mb: Vec<f32> = mb.iter().map(|&j| ret_normalized[j]).collect();
+                let old_val_mb: Vec<f32> = mb.iter().map(|&j| old_val_normalized[j]).collect();
                 kernel.train_step(
                     &obs_mb,
                     obs_dim,
@@ -749,6 +755,7 @@ fn run_ppo_sgd_flat<
                     &adv_mb,
                     &logp_mb,
                     &ret_mb,
+                    &old_val_mb,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
