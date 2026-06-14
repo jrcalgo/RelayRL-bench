@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """sf_lunar_bench.py — Sample Factory APPO on LunarLander-v2, hyperparameters
-matched to bench_lunar_ppo_tch (RelayRL beta.5 PPO / LibTorch, 64 envs).
+matched to bench_lunar_ppo_tch (RelayRL beta.5 PPO / LibTorch, 512 envs).
 
 Mapping from bench_lunar_ppo_tch.rs constants -> SF APPO CLI args:
   GAMMA=0.999          -> --gamma=0.999
@@ -11,12 +11,13 @@ Mapping from bench_lunar_ppo_tch.rs constants -> SF APPO CLI args:
   TRAIN_PI/VF_ITERS=4  -> --num_epochs=4
   ENT_COEF=0.01        -> --exploration_loss_coeff=0.01
   NORMALIZE_RETURNS    -> --normalize_returns=True (SF default)
-  MINI_BATCH=5760      -> --batch_size=5760 --rollout=90 (5760 = 64 envs x 90)
-  ENV_COUNT=64         -> --num_workers x --num_envs_per_worker = 64
+  MINI_BATCH=46080     -> --batch_size=46080 --rollout=90 (46080 = 512 envs x 90)
+  ENV_COUNT=512        -> --num_workers x --num_envs_per_worker = 512
   MAX_STEPS=500        -> TimeLimit(LunarLander-v2, max_episode_steps=500)
   [128,128] ReLU,      -> --encoder_mlp_layers 128 128 --nonlinearity=relu
   separate pi/vf nets  -> --use_rnn=False --actor_critic_share_weights=False
-  TOTAL_STEPS=600_000  -> --train_for_env_steps=38_400_000 (600_000 * 64)
+  TOTAL_STEPS=75_000   -> --train_for_env_steps=38_400_000 (75_000 * 512, same
+                          total budget as the 64-env config's 600_000 * 64)
 
 Run:
   python3 scripts/sf_lunar_bench.py --experiment=lunar_sf_run1
@@ -56,7 +57,7 @@ DEFAULT_ARGS = [
     "--num_epochs=4",
     "--num_batches_per_epoch=1",
     "--rollout=90",
-    "--batch_size=5760",
+    "--batch_size=46080",
     "--learning_rate=2.5e-4",
     "--lr_schedule=constant",
     "--normalize_returns=True",
@@ -69,7 +70,7 @@ DEFAULT_ARGS = [
     "--use_rnn=False",
     "--with_vtrace=False",
     "--num_workers=4",
-    "--num_envs_per_worker=16",
+    "--num_envs_per_worker=128",
     "--worker_num_splits=2",
     "--device=cpu",
     "--seed=1",
