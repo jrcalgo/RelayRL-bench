@@ -157,7 +157,11 @@ impl PPOReplayBuffer {
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
             let bootstrap = if is_truncated {
-                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
+                values
+                    .get(end)
+                    .or_else(|| values.get(end.saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -182,10 +186,13 @@ impl PPOReplayBuffer {
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if is_truncated {
                 buffers
                     .values
-                    .get(end.saturating_sub(1))
+                    .get(end)
+                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
                     .copied()
                     .unwrap_or(0.0)
             } else {
@@ -260,10 +267,13 @@ impl PPOReplayBuffer {
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
             let bootstrap = if *is_truncated {
                 buffers
                     .values
-                    .get(end.saturating_sub(1))
+                    .get(*end)
+                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
                     .copied()
                     .unwrap_or(0.0)
             } else {
@@ -477,7 +487,7 @@ impl GenericReplayBuffer for PPOReplayBuffer {
             buffers.logp.push(logp);
 
             let value = if let Some(map) = action.get_data() {
-                if let Some(RelayRLData::Tensor(val_td)) = map.get("value") {
+                if let Some(RelayRLData::Tensor(val_td)) = map.get("val") {
                     bytemuck::cast_slice::<u8, f32>(&val_td.data)
                         .first()
                         .copied()
