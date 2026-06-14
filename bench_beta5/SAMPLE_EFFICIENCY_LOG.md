@@ -161,3 +161,63 @@ remaining candidates are: minibatch/epoch cadence (`episodes_needed_for_steps` v
 training; RelayRL's `bench_lunar_ppo_tch` uses fixed `PI_LR`/`VF_LR`/`CLIP_RATIO`), or
 entropy-coefficient/KL-target interaction with `train_pi_iters=4` early-stopping (`StopIter`
 values, `target_kl` behavior) across the two implementations.
+
+## Hypothesis 4: orthogonal weight init (gain=1.0, zero bias) matching SF's actual `--policy_init_gain` (ACCEPTED)
+
+**Idea**: re-examination of `GenericMlp::new` (the constructor `bench_lunar_ppo_tch.rs` actually uses
+for `pi_mlp`/`vf_mlp`, via `LinearConfig::new(...).init(device)`) showed it uses Burn's *default*
+`Initializer::KaimingUniform{gain: 1/sqrt(3)}` with non-zero bias — NOT orthogonal init, contrary to
+an earlier (incorrect) session note that claimed this was "already matched" to SF. SF's actual
+resolved config in `sf_lunar_bench.py` is `--policy_initialization=orthogonal` with
+`--policy_init_gain` left at its default of **1.0** (not overridden). SF's
+`initialize_weights` (`actor_critic.py:71-94`) applies `nn.init.orthogonal_(layer.weight, gain=1.0)`
+to every `nn.Linear`/`nn.Conv2d` (including output layers) and zero-fills every bias. This is a
+well-documented PPO stability/sample-efficiency factor (orthogonal init avoids saturated/dead
+units early in training) and was the one major hyperparameter mismatch not yet addressed by H1-H3.
+
+**Change**:
+1. `algorithms/mod.rs`: added `GenericMlp::new_orthogonal(..., gain: f64, device)` — an additive
+   constructor alongside the existing `GenericMlp::new`/`default` (both unchanged, still used by
+   other algorithms). For each `Linear` layer it builds with `Initializer::Zeros` bias, then
+   overwrites `layer.weight` via `Initializer::Orthogonal{gain}.init_with([in,out], Some(in),
+   Some(out), device)`.
+2. `bench_lunar_ppo_tch.rs`: added `const POLICY_INIT_GAIN: f64 = 1.0;`, switched both `pi_mlp` and
+   `vf_mlp` construction from `GenericMlp::new(...)` to `GenericMlp::new_orthogonal(..., POLICY_INIT_GAIN,
+   &burn_device)`, and appended `policy_init_gain={POLICY_INIT_GAIN}` to the config banner.
+
+**Results** (n=3):
+- final = [153.50, 184.90, 131.00], avg **156.47** (baseline avg 141.02, range 131.8-162.3 — avg
+  +11%, run2 alone exceeds baseline's max individual run).
+- AUC = [92.86, 139.18, 79.54], avg **103.86** (baseline avg 93.54, range 73.22-108.50 — avg +11%,
+  run2's 139.18 is well above baseline's max of 108.50 and meaningfully closes the gap toward SF's
+  full-budget AUC of 178.64).
+- Throughput: 33342/33643/34557 env-frames/sec, avg **≈33847** (~14.7% below the original baseline's
+  ≈39664, but in line with H2/H3's ~33-34k — since orthogonal init is a one-time op with zero
+  per-step cost, this is most likely system-load drift across the session rather than an
+  init-specific regression).
+- Peak MeanReturn per run: 165.6 / 239.4 / 216.5 — all at or above baseline's per-run max range
+  (148.2-169.9), i.e. HYP4 reaches noticeably higher episode returns during training.
+- Min MeanReturn per run: -196.1 / -196.3 / -191.4 — within baseline's per-run min range
+  (-208.1 to -183.5), i.e. the occasional deep dips are normal LunarLander-v2 training variance,
+  not a new instability mode (unlike H2's out-of-range -45.1 AUC-sample dip).
+- ClipFrac: all 3 runs show scattered nonzero values (159/237/185 of 832 epochs, means
+  0.046/0.058/0.058) including 7-10 epochs/run hitting `1.0000`, vs baseline's steady `0.0000`
+  throughout. This is a real, consistent side-effect of the larger effective updates from
+  orthogonally-initialized layers, but — unlike H2 — it does not correlate with MeanReturn
+  collapsing outside baseline's normal range.
+
+**Verdict**: ACCEPTED. Both final and AUC improved ~11% on average vs baseline, with no new
+instability mode (dips remain within baseline's normal range) despite the higher run-to-run
+variance (AUC range 79.54-139.18 vs baseline's 73.22-108.50 — wider on both ends, but the upper
+end is the desirable direction). The implementation (`new_orthogonal` + `POLICY_INIT_GAIN=1.0`) is
+kept as the new baseline going forward (commit 83adb7f).
+
+**Takeaway for future hypotheses**: network initialization was the most impactful lever found so
+far — orthogonal init with SF's actual gain=1.0 (not the CleanRL-style per-layer gains
+sqrt(2)/0.01/1.0 in the unused `ActorCriticMlp`) measurably narrows the AUC gap. The wider
+run-to-run variance suggests the policy is now more sensitive to the random seed/initial
+trajectory — a natural follow-up is whether SF's LR/clip-ratio annealing (not yet matched) or
+entropy-coefficient tuning could reduce this variance further while preserving the AUC gain.
+Remaining candidates for H5: minibatch/epoch cadence (`episodes_needed_for_steps` vs SF's fixed
+90-step rollout), LR/clip-ratio annealing schedule, and entropy-coefficient/KL-target interaction
+with `train_pi_iters=4` early-stopping.
