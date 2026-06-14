@@ -61,6 +61,9 @@ const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
+// matches SF's --policy_initialization=orthogonal --policy_init_gain=1.0 (default), applied
+// uniformly to every pi/vf layer with zero bias.
+const POLICY_INIT_GAIN: f64 = 1.0;
 
 // 512 trajs/epoch x 512 envs -> ~90 loop iters/epoch
 const TRAJ_PER_EPOCH: u64 = 512;
@@ -95,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  loop_steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  vf_coef={VF_COEF}");
     println!(
-        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}"
+        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  policy_init_gain={POLICY_INIT_GAIN}"
     );
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -109,13 +112,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obs_dtype = DType::Tch(TchDType::F32);
     let act_dtype = DType::Tch(TchDType::F32);
 
-    let pi_mlp = GenericMlp::<B, Float, Float>::new(
+    let pi_mlp = GenericMlp::<B, Float, Float>::new_orthogonal(
         OBS_DIM,
         obs_dtype.clone(),
         &[128, 128],
         ACT_DIM,
         act_dtype.clone(),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
+        POLICY_INIT_GAIN,
         &burn_device,
     );
     // Seed the actor with a TorchScript export of the freshly-initialized policy
@@ -130,13 +134,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(DeviceType::Cpu),
     );
     let pi_head = PPOPolicyHead::Discrete(DiscretePPOPolicyHead::new(pi_mlp)?);
-    let vf_mlp = GenericMlp::<B, Float, Float>::new(
+    let vf_mlp = GenericMlp::<B, Float, Float>::new_orthogonal(
         OBS_DIM,
         obs_dtype.clone(),
         &[128, 128],
         1,
         DType::Tch(TchDType::F32),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
+        POLICY_INIT_GAIN,
         &burn_device,
     );
 
