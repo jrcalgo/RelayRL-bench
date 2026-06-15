@@ -155,16 +155,14 @@ impl PPOReplayBuffer {
         buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
-        for (start, end, is_truncated) in boundaries {
-            let bootstrap = if is_truncated {
-                values
-                    .get(end)
-                    .or_else(|| values.get(end.saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            };
+        for (start, end, _is_truncated) in boundaries {
+            // SF's APPO (`value_bootstrap=False`, the default and what
+            // sf_lunar_bench.py uses) sets `dones = terminated | truncated` and
+            // its GAE recursion multiplies the bootstrap term by `(1 - dones)`,
+            // so a real `max_episode_steps` truncation gets bootstrap=0 exactly
+            // like a true termination. Match that here: bootstrap=0 for every
+            // episode-boundary cut, truncated or not.
+            let bootstrap = 0.0;
             Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
         }
     }
@@ -185,19 +183,11 @@ impl PPOReplayBuffer {
         }
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
-        for (start, end, is_truncated) in boundaries {
-            // Bootstrap with V(s_end) (the state reached after the chunk's last
-            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
-            let bootstrap = if is_truncated {
-                buffers
-                    .values
-                    .get(end)
-                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            };
+        for (start, end, _is_truncated) in boundaries {
+            // See comment in finalize_gae_blocking: match SF's
+            // value_bootstrap=False default (dones=terminated|truncated zeroes
+            // the GAE bootstrap term for every episode-boundary cut).
+            let bootstrap = 0.0;
             Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
         }
 
@@ -266,19 +256,11 @@ impl PPOReplayBuffer {
 
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
-        for (start, end, is_truncated) in &boundaries_n {
-            // Bootstrap with V(s_end) (the state reached after the chunk's last
-            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
-            let bootstrap = if *is_truncated {
-                buffers
-                    .values
-                    .get(*end)
-                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            };
+        for (start, end, _is_truncated) in &boundaries_n {
+            // See comment in finalize_gae_blocking: match SF's
+            // value_bootstrap=False default (dones=terminated|truncated zeroes
+            // the GAE bootstrap term for every episode-boundary cut).
+            let bootstrap = 0.0;
             Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
         }
 
