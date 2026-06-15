@@ -1,4 +1,3 @@
-use burn_core::module::Initializer;
 use burn_nn::{Linear, LinearConfig};
 use burn_tensor::backend::Backend;
 use burn_tensor::{BasicOps, Float, Tensor, TensorKind};
@@ -140,53 +139,6 @@ impl<
         let layers = dims
             .windows(2)
             .map(|w| LinearConfig::new(w[0], w[1]).init(device))
-            .collect();
-
-        Self {
-            input_dim,
-            input_dtype,
-            output_dim,
-            output_dtype,
-            layers,
-            activation,
-            _in_k: std::marker::PhantomData,
-            _out_k: std::marker::PhantomData,
-        }
-    }
-
-    /// Like [`Self::new`], but every `Linear` layer's weight is orthogonally initialized
-    /// (`Initializer::Orthogonal { gain }`) with zero bias, matching Sample Factory's
-    /// `--policy_initialization=orthogonal --policy_init_gain=<gain>` (SF applies the same
-    /// `gain` to every layer's orthogonal init and zero-fills all biases).
-    pub fn new_orthogonal(
-        input_dim: usize,
-        input_dtype: DType,
-        hidden_sizes: &[usize],
-        output_dim: usize,
-        output_dtype: DType,
-        activation: ActivationKind<B>,
-        gain: f64,
-        device: &B::Device,
-    ) -> Self {
-        let mut dims = Vec::with_capacity(hidden_sizes.len() + 2);
-        dims.push(input_dim);
-        dims.extend_from_slice(hidden_sizes);
-        dims.push(output_dim);
-
-        let layers = dims
-            .windows(2)
-            .map(|w| {
-                let mut layer = LinearConfig::new(w[0], w[1])
-                    .with_initializer(Initializer::Zeros)
-                    .init(device);
-                layer.weight = Initializer::Orthogonal { gain }.init_with(
-                    [w[0], w[1]],
-                    Some(w[0]),
-                    Some(w[1]),
-                    device,
-                );
-                layer
-            })
             .collect();
 
         Self {

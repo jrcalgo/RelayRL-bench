@@ -206,21 +206,44 @@ units early in training) and was the one major hyperparameter mismatch not yet a
   orthogonally-initialized layers, but — unlike H2 — it does not correlate with MeanReturn
   collapsing outside baseline's normal range.
 
-**Verdict**: ACCEPTED. Both final and AUC improved ~11% on average vs baseline, with no new
-instability mode (dips remain within baseline's normal range) despite the higher run-to-run
-variance (AUC range 79.54-139.18 vs baseline's 73.22-108.50 — wider on both ends, but the upper
-end is the desirable direction). The implementation (`new_orthogonal` + `POLICY_INIT_GAIN=1.0`) is
-kept as the new baseline going forward (commit 83adb7f).
+**Verdict (n=3, initial)**: ACCEPTED. Both final and AUC improved ~11% on average vs baseline,
+with no new instability mode (dips remain within baseline's normal range) despite the higher
+run-to-run variance (AUC range 79.54-139.18 vs baseline's 73.22-108.50 — wider on both ends, but
+the upper end is the desirable direction). The implementation (`new_orthogonal` +
+`POLICY_INIT_GAIN=1.0`) was kept as the new baseline going forward (commit 83adb7f).
 
-**Takeaway for future hypotheses**: network initialization was the most impactful lever found so
-far — orthogonal init with SF's actual gain=1.0 (not the CleanRL-style per-layer gains
-sqrt(2)/0.01/1.0 in the unused `ActorCriticMlp`) measurably narrows the AUC gap. The wider
-run-to-run variance suggests the policy is now more sensitive to the random seed/initial
-trajectory — a natural follow-up is whether SF's LR/clip-ratio annealing (not yet matched) or
-entropy-coefficient tuning could reduce this variance further while preserving the AUC gain.
-Remaining candidates for H5: minibatch/epoch cadence (`episodes_needed_for_steps` vs SF's fixed
-90-step rollout), LR/clip-ratio annealing schedule, and entropy-coefficient/KL-target interaction
-with `train_pi_iters=4` early-stopping.
+**Re-evaluation at n=5 (REVERSED to REJECTED)**: after H5's results raised concerns about
+run-to-run variance at n=3, 2 more runs (run4, run5) of the H4 config were collected to reach
+n=5:
+- final = [153.50, 184.90, 131.00, **79.50**, **129.00**], n=5 avg **135.58** (vs original
+  baseline avg 141.02 — now **-3.9%**, i.e. *below* baseline).
+- AUC = [92.86, 139.18, 79.54, **79.95**, **84.55**], n=5 avg **95.22** (vs original baseline avg
+  93.54 — now only **+1.8%**, well within baseline's own run-to-run noise).
+- Run4 (final=79.50, AUC=79.95) and run5 (final=129.00, AUC=84.55) are both at or below the
+  bottom of the original baseline's range (final 131.8-162.3, AUC 73.22-108.50), pulling the
+  average back to ~parity.
+- Variance increased substantially: final range is now 79.50-184.90 (105.4-point spread, vs
+  baseline's 30.5-point spread); AUC range is 79.54-139.18 (59.6-point spread, vs baseline's
+  35.3-point spread).
+
+**Final verdict**: REJECTED, reverted (`git revert -n 83adb7f`, removing `new_orthogonal` from
+`algorithms/mod.rs` and restoring `GenericMlp::new(...)`/removing `POLICY_INIT_GAIN` in
+`bench_lunar_ppo_tch.rs`). The n=3 "improvement" was a sampling artifact (a lucky high run2):
+at n=5, both final and AUC are statistically indistinguishable from the original baseline, while
+run-to-run variance roughly doubled in spread on both metrics — a strictly worse risk/reward
+profile than the original Kaiming-uniform init. No net diff vs the pre-H4 baseline after revert.
+
+**Takeaway for future hypotheses**: **n=3 is not sufficient to evaluate hypotheses in this
+environment** — the run-to-run AUC/final spread within a single hypothesis's n=3 sample
+(roughly 30-60 points) is comparable to or larger than the between-hypothesis effect sizes we've
+been testing. All hypotheses so far (H1-H5) should be considered n=3-level evidence only; H4's
+reversal after 2 more runs demonstrates this concretely. Going forward: (a) always complete n=5
+before reaching ACCEPT/REJECT, per the original directive, (b) treat n=3 ACCEPTs as provisional
+pending the 2 additional runs before committing to a "new baseline," and (c) consider that
+orthogonal init with gain=1.0, while theoretically well-motivated, does not measurably help this
+particular setup — remaining candidates: minibatch/epoch cadence
+(`episodes_needed_for_steps` vs SF's fixed 90-step rollout), entropy-coefficient schedule, and
+PPO2 value-clipping with a correctly-scaled `old_val` (H2's takeaway).
 
 ## Hypothesis 5: match SF's Adam epsilon (1e-6 vs Burn's default 1e-5) (REJECTED, reverted)
 
