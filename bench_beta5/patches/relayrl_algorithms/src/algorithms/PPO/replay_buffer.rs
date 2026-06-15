@@ -156,12 +156,13 @@ impl PPOReplayBuffer {
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
+            // Bootstrap with V(s_T) (the chunk's own last state), matching the
+            // canonical spinningup-PPO convention for non-terminal cutoffs. The
+            // previous V(s_end) used the *next* observation, which for a real
+            // max_episode_steps truncation (env auto-reset) belongs to a
+            // different episode entirely — a scale-mismatched bootstrap value.
             let bootstrap = if is_truncated {
-                values
-                    .get(end)
-                    .or_else(|| values.get(end.saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
+                values.get(end.saturating_sub(1)).copied().unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -186,13 +187,13 @@ impl PPOReplayBuffer {
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
         for (start, end, is_truncated) in boundaries {
-            // Bootstrap with V(s_end) (the state reached after the chunk's last
-            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
+            // Bootstrap with V(s_T) (the chunk's own last state) — see comment
+            // in finalize_gae_blocking for why V(s_end) is wrong for real
+            // max_episode_steps truncations.
             let bootstrap = if is_truncated {
                 buffers
                     .values
-                    .get(end)
-                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
+                    .get(end.saturating_sub(1))
                     .copied()
                     .unwrap_or(0.0)
             } else {
@@ -267,13 +268,13 @@ impl PPOReplayBuffer {
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
         for (start, end, is_truncated) in &boundaries_n {
-            // Bootstrap with V(s_end) (the state reached after the chunk's last
-            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
+            // Bootstrap with V(s_T) (the chunk's own last state) — see comment
+            // in finalize_gae_blocking for why V(s_end) is wrong for real
+            // max_episode_steps truncations.
             let bootstrap = if *is_truncated {
                 buffers
                     .values
-                    .get(*end)
-                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
+                    .get(end.saturating_sub(1))
                     .copied()
                     .unwrap_or(0.0)
             } else {
