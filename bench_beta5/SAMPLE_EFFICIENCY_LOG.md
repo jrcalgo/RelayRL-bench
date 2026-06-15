@@ -485,3 +485,69 @@ tuning. The leading structural candidate not yet audited: GAE bootstrap correctn
 EnvPool's auto-reset. (A truncation-bootstrap hypothesis was tried pre-log and reverted, but
 predates several since-kept fixes — e.g. GAE-lambda value-targets, fresh-value/fresh-logp
 recomputation — and should be re-audited against the *current* code rather than assumed closed.)
+
+## Hypothesis 9: fix GAE truncation-bootstrap to use V(s_T) instead of V(s_end) (REJECTED, reverted)
+
+**Idea**: Per H8's takeaway, audited `replay_buffer.rs`'s three `compute_gae_episode` call sites
+against the framework's `training/mod.rs` (read-only). Confirmed `trajectory.is_truncated=true`
+is set for three structurally-different conditions: (1) EnvPool's real `max_episode_steps=500`
+time-limit truncation (sub-env auto-resets, so `obs[end]` is the *reset* observation of a
+brand-new episode), (2) a rare termination-at-max-steps edge case, and (3) the 90-step
+rollout-chunk cutoff with the episode still ongoing (`obs[end]` IS the true `s_{T+1}`). All three
+were previously bootstrapped identically with `V(obs[end])` (falling back to `V(obs[end-1])`).
+For cases 1/2, `V(obs[end])` is a scale-mismatched bootstrap value from an unrelated episode.
+OpenAI spinningup-PPO's canonical convention bootstraps non-terminal cutoffs with `V(s_T)`
+(the chunk's own last state, `V(obs[end-1])`), which is a good approximation for case 3
+(`gamma=0.999≈1` ⇒ `V(s_T)≈V(s_{T+1})`) and also fixes cases 1/2 (no longer references a
+different episode's state).
+
+**Change** (PPO algorithm scope, `replay_buffer.rs` only, commit `2a5770d`):
+- In all three call sites (`finalize_gae_blocking`, `finalize_and_drain_blocking`,
+  `finalize_and_drain_first_n_blocking`), changed the `is_truncated=true` bootstrap from
+  `values.get(end).or_else(|| values.get(end-1))...unwrap_or(0.0)` to
+  `values.get(end.saturating_sub(1))...unwrap_or(0.0)` — i.e. always use `V(s_T)`, never
+  `V(s_{T+1})`.
+
+**Results (n=5, vs original baseline: final avg 141.02 range [131.8,162.3], AUC avg 93.54 range
+[73.22,108.50])**:
+- final = [95.70, 159.90, 121.40, 139.60, 124.20], n=5 avg **128.16** (**-9.1%** vs baseline).
+- AUC = [73.89, 120.43, 70.36, 74.47, 89.18], n=5 avg **85.67** (**-8.4%** vs baseline).
+- Run-to-run spread was *wider than baseline on both tails*: run1's final=95.70 is far below
+  baseline's per-run minimum (131.8), while run2's AUC=120.43 exceeds baseline's per-run maximum
+  (108.50). min/max per run: (-198.5,157.5), (-212.4,270.9), (-183.9,155.6), (-179.2,161.5),
+  (-191.4,233.5) — run2/run5 show much higher peak MeanReturns (233.5-270.9) than any baseline
+  run, but this didn't translate into a higher final/AUC overall.
+- ClipFrac nonzero in all 5 runs (186-268/832 epochs, means 0.0578-0.0795, 6-16 epochs/run
+  hitting `>=0.99`) — same "perturbation tax" signature as H6/H7/H8, on the high end of the range
+  seen so far.
+- Throughput: 42517/34797/34459/34678/35526 env-frames/sec, avg ≈36395 — no regression (run1's
+  higher number reflects reduced container load at that moment, not a code effect; a mid-run2
+  container restart required restarting that run from scratch).
+
+**Verdict**: REJECTED, reverted (commit `2a5770d` reverted via `git revert -n`). Both final and
+AUC regressed (-9.1%/-8.4%), continuing the pattern from H6-H8: every change that touches the
+GAE/value computation graph — even one with a sound, independently-justified theoretical basis
+(spinningup-PPO's own bootstrap convention) and a real bug it fixes (cases 1/2's cross-episode
+`V(obs[end])` reference) — produces the same ~0.06-0.08 ClipFrac "perturbation tax" and a
+net-negative n=5 average, *despite* one run (run2) producing this project's new all-time-high
+AUC (120.43) and two runs (run2/run5) reaching peak MeanReturns (233.5/270.9) never seen in any
+prior baseline or hypothesis run. This is the **fourth consecutive REJECT** (H6, H7, H8, H9) for
+graph-touching changes, each independently well-motivated, each showing the same
+0.0000→~0.05-0.08 ClipFrac signature and a degraded n=5 average despite occasional
+best-ever single runs.
+
+**Takeaway for future hypotheses**: the evidence is now overwhelming that *any* perturbation to
+the pi/vf forward+backward graph or its GAE inputs — regardless of correctness or theoretical
+justification — measurably alters this benchmark's chaotic ~830-epoch trajectory, and the n=5
+average for *this specific seed set* has landed negative for all four attempts so far. Two
+non-exclusive interpretations: (a) this seed set is unlucky for graph-perturbing changes
+specifically (the high run2/run5 peaks suggest the *upside* is real but doesn't dominate the
+average), or (b) RelayRL's current configuration sits at a sharp local optimum in trajectory-space
+where small perturbations are net-harmful on average even when they fix real bugs. Given (a)/(b)
+are hard to distinguish at n=5, and four formula/graph-level hypotheses have now all failed
+the same way, the loop should pivot to a different *class* of change for H10: something that
+does NOT touch the pi/vf graph or GAE math at all — e.g. cadence/schedule-level changes
+(rollout length, epochs-per-update, minibatch count/size, LR schedule shape) where SF and
+RelayRL configs may still differ, which perturb the *optimization trajectory* through a
+different mechanism (changing how much data/how many gradient steps occur between evaluations)
+rather than the *per-step numerics*, and thus may not trigger the same ClipFrac signature.
