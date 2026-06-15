@@ -422,3 +422,66 @@ GAE `lambda`/`gamma` fine-tuning, LR annealing/warmup (note: plain linear LR ann
 already tried pre-log and reverted, but a decay schedule combined with entropy annealing was
 not), and SF's `ratio = torch.clamp(ratio, 0.05, 20.0)` numerical-safety clamp (small,
 unexplored, unlikely to move metrics but cheap to test).
+
+## Hypothesis 8: SF's ratio numerical-safety clamp `torch.clamp(ratio, 0.05, 20.0)` (REJECTED, reverted)
+
+**Idea**: SF's `learner.py:591` clamps the raw probability ratio `exp(logp-logp_old)` to
+`[0.05, 20.0]` *before* the PPO clip-ratio objective is computed, "since super large/small values
+can cause numerical problems and are probably noise anyway." RelayRL had no equivalent clamp.
+Per H7's takeaway, this was the last remaining concrete formula-level discrepancy versus SF, and
+was expected to be a near-no-op given the baseline's ratio never leaves `[0.8, 1.2]` (ClipFrac
+steady at `0.0000` across all 5 original baseline runs — well inside `[0.05, 20.0]`).
+
+**Change** (PPO algorithm scope, `kernel.rs` only, commit `a88546b`):
+- In `train_step_discrete`, changed
+  `let ratio = (logp.clone() - logp_old_tensor).exp();`
+  to
+  `let ratio = (logp.clone() - logp_old_tensor).exp().clamp(0.05, 20.0);`
+  (one extra `.clamp()` call; `clipped_ratio`/`clip_obj`/clipfrac formulas unchanged from
+  pre-H7 baseline).
+
+**Results (n=5, vs original baseline: final avg 141.02 range [131.8,162.3], AUC avg 93.54 range
+[73.22,108.50])**:
+- final = [170.30, 134.40, 63.80, 75.60, 133.00], n=5 avg **115.42** (**-18.1%** vs baseline) —
+  the largest regression of any hypothesis so far, and the n=5 average now falls *entirely below*
+  the original baseline's per-run range (115.42 < 131.8).
+- AUC = [101.74, 103.14, 93.13, 69.11, 75.55], n=5 avg **88.53** (**-5.4%** vs baseline).
+- Extreme run-to-run spread: run1 (170.30/101.74) and run2 (134.40/103.14) were the *best or
+  near-best* final/AUC pairs seen in this entire project, while run3 (63.80/93.13) and run4
+  (75.60/69.11) were among the *worst* — run4's AUC=69.11 is a new low (below H2's instability
+  threshold discussion, though MeanReturn itself never collapsed to H2's -45.1-style dip; min/max
+  per run stayed in baseline's normal range: (-186.9,170.3), (-188.8,160.2), (-196.3,161.9),
+  (-206.7,197.6), (-200.4,161.7)).
+- ClipFrac: nonzero in all 5 runs (171-209/832 epochs, means 0.0499-0.0616, 4-10 epochs/run
+  hitting `>=0.99`) — same order of magnitude as H6/H7, despite this clamp being a mathematical
+  identity for every ratio value actually observed in baseline (`[0.8,1.2] ⊂ [0.05,20.0]`).
+- Throughput: 41614/41270/41019/41120/41061 env-frames/sec, avg ≈41217 — no regression.
+
+**Verdict**: REJECTED, reverted (commit `a88546b` reverted via `git revert -n`). Both final and
+AUC regressed, with final's -18.1% being the worst result of any hypothesis to date — yet the
+clamp is a no-op for every ratio value that ever occurs in this regime (confirmed by baseline's
+ClipFrac=0.0000). The only possible mechanism is that adding the `.clamp()` op to the autograd
+graph perturbs LibTorch's floating-point execution order from epoch 1, and PPO's chaotic
+~830-epoch dynamics amplify that perturbation into a *different trajectory* — sometimes much
+better (run1, run2) and sometimes much worse (run3, run4) than baseline, with this seed-set
+landing net-negative.
+
+**Takeaway for future hypotheses — methodological, not just substantive**: H8's result is the
+clearest evidence yet that **any change to the pi/vf forward+backward computation graph — even a
+provably-no-op one — measurably perturbs this benchmark's chaotic trajectory and dominates the
+n=5 signal**. Combined with H6/H7 (both also showed the same "ClipFrac goes from 0.0000 to
+~0.05" signature the instant the graph changes, regardless of mechanism), this strongly suggests:
+(1) the "formula-parity micro-tweak" axis is not just exhausted but actively *counterproductive*
+to keep probing — every remaining SF-vs-RelayRL formula difference we can find is now either
+verified-matched (reward_scale/clip, kl_loss_coeff=0, lr_schedule=constant, grad-norm clip=4.0,
+obs/return normalization, orthogonal init, GAE λ/γ, clip-ratio value and formula, value clipping,
+Adam epsilon — all checked across H1-H8 and the ~17 pre-log hypotheses) or, like H8, a no-op that
+still destabilizes the run; (2) future hypotheses should prefer *structural* changes with
+plausibly large (>15-20%) true effect sizes — large enough to be distinguishable from the
+~±15-20% noise floor *and* from this "any-perturbation" tax — rather than further loss-formula
+tuning. The leading structural candidate not yet audited: GAE bootstrap correctness for
+*truncated* (not terminated) episodes at the 90-step rollout boundary, given `max_episode_steps
+=500` means a large fraction of each epoch's 46080 transitions sit at such boundaries under
+EnvPool's auto-reset. (A truncation-bootstrap hypothesis was tried pre-log and reverted, but
+predates several since-kept fixes — e.g. GAE-lambda value-targets, fresh-value/fresh-logp
+recomputation — and should be re-audited against the *current* code rather than assumed closed.)
