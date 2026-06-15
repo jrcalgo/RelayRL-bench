@@ -221,3 +221,48 @@ entropy-coefficient tuning could reduce this variance further while preserving t
 Remaining candidates for H5: minibatch/epoch cadence (`episodes_needed_for_steps` vs SF's fixed
 90-step rollout), LR/clip-ratio annealing schedule, and entropy-coefficient/KL-target interaction
 with `train_pi_iters=4` early-stopping.
+
+## Hypothesis 5: match SF's Adam epsilon (1e-6 vs Burn's default 1e-5) (REJECTED, reverted)
+
+**Idea**: SF's default `--adam_eps=1e-6` (`cfg.py:280-285`, not overridden by `sf_lunar_bench.py`).
+Burn's `AdamConfig::new()` defaults `epsilon=1e-5` (`burn-optim-0.20.1/src/optim/adam.rs:30-31`).
+Both sides already match on `beta_1=0.9`/`beta_2=0.999` (Burn defaults == SF defaults) and
+`max_grad_norm=4.0`. The Adam epsilon controls the denominator floor of the per-parameter update
+(`lr / (sqrt(v) + eps)`), a well-known PPO implementation detail; a 10x difference could plausibly
+affect step sizes for parameters with small gradient variance, especially post-H4 with
+orthogonally-initialized layers.
+
+**Change** (`kernel.rs`, single line, PPO algorithm scope, additive):
+1. `PPOActorCriticTrainer::new`: `AdamConfig::new().with_epsilon(1e-6).init::<TB, ActorCriticMlp<TB>>().with_grad_clipping(...)`.
+2. `bench_lunar_ppo_tch.rs`: appended `  adam_eps=1e-6` to the config banner.
+
+**Results** (n=3, vs the H4-accepted baseline: final avg 156.47 range [131.00,184.90], AUC avg
+103.86 range [79.54,139.18]):
+- final = [147.10, 132.70, 129.60], avg **136.47** (-12.8% vs baseline avg, within baseline's
+  range but toward its low end).
+- AUC = [82.80, 141.47, 105.53], avg **109.93** (+5.8% vs baseline avg — nominally higher, but
+  well within the ~60-point run-to-run spread both hypotheses exhibit; not distinguishable from
+  noise at n=3).
+- Throughput: 34386/34593/33549 env-frames/sec, avg **≈34176** (essentially unchanged vs H4's
+  ≈33847 — as expected, since the epsilon change has zero per-step cost).
+- ClipFrac: 202/831, 236/832, 177/832 nonzero (means 0.052/0.061/0.045, 7-10 epochs/run hitting
+  `1.0000`) — essentially identical distribution to H4's runs, no new instability.
+- Min/max MeanReturn per run: (-190.1, 163.7), (-185.8, 250.4), (-191.7, 163.7) — in line with H4's
+  ranges (run2's 250.4 is a new high, but within the same noisy-peak pattern as H4's run2's 239.4).
+
+**Verdict**: REJECTED, reverted (`git revert -n` of the implementation commit). AUC's nominal
++5.8% is not a robust improvement given the magnitude of run-to-run variance already observed
+within H4 alone (a ~60-point AUC spread across 3 runs of the *same* config), while final regressed
+-12.8%. No improvement on the primary AUC metric clears the bar required by the H1-H4 precedent
+(H4 was accepted because *both* final and AUC improved together, ~11% each). No net diff vs the
+H4 baseline after revert.
+
+**Takeaway for future hypotheses**: Adam epsilon is NOT a meaningful lever at this scale — both
+betas and now epsilon are matched to SF's defaults with no measurable effect, closing out the
+optimizer-hyperparameter axis. The dominant remaining uncertainty is the very high run-to-run
+variance itself (AUC spreads of ~60 points within a single hypothesis's n=3) — before chasing
+further small hyperparameter deltas, a larger n (e.g., n=5 or n=10) may be needed to distinguish
+real effects from noise at this variance level. Remaining structural candidates: minibatch/epoch
+cadence (`episodes_needed_for_steps` vs SF's fixed 90-step rollout, from H1's takeaway),
+entropy-coefficient schedule, and the framework-level epoch-boundary semantics (out of PPO-only
+scope but worth flagging).
