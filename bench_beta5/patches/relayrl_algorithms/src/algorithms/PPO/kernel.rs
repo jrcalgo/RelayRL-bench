@@ -227,7 +227,10 @@ pub(crate) mod training {
                 BurnTensorData::new(logp_old[..n].to_vec(), [n]),
                 &device,
             );
-            let ratio = (logp.clone() - logp_old_tensor).exp();
+            // Numerical-safety clamp matching SF's learner.py:591 — large/small
+            // ratios are noise (or the result of stale logp_old), and an
+            // unclamped ratio can dominate the batch mean via a single sample.
+            let ratio = (logp.clone() - logp_old_tensor).exp().clamp(0.05, 20.0);
             let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
             let clip_obj = (ratio.clone() * adv_tensor.clone())
                 .min_pair(clipped_ratio * adv_tensor)
