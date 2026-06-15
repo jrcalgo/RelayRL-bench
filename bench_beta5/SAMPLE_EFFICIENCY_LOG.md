@@ -289,3 +289,71 @@ real effects from noise at this variance level. Remaining structural candidates:
 cadence (`episodes_needed_for_steps` vs SF's fixed 90-step rollout, from H1's takeaway),
 entropy-coefficient schedule, and the framework-level epoch-boundary semantics (out of PPO-only
 scope but worth flagging).
+
+## Hypothesis 6: PPO2 value-function clipping with correctly-scaled `old_val` (REJECTED, reverted)
+
+**Idea**: revisit H2's PPO2 value-clipping (matching SF's default `--ppo_clip_value=1.0`,
+`value_clipped = old_values + clamp(new_values - old_values, -1, 1)`,
+`vf_loss = max((new-target)^2, (clipped-target)^2).mean()`), but avoid H2's root-cause: H2
+derived `old_val` from the DENORMALIZED `batch.val` (populated via `value_forward`, which maps the
+network's normalized output back to reward scale using stats from the *previous* epoch),
+producing a scale mismatch against `v_pred`/`ret_normalized` (both in normalized/z-score space)
+and causing severe instability (`ClipFrac=0.9783`, `MeanReturn` dipping to -45.1).
+
+**Change** (PPO algorithm scope, additive, `kernel.rs` + `independent/mod.rs`):
+1. `kernel.rs`: added `const VALUE_CLIP: f32 = 1.0` (matches SF's `--ppo_clip_value` default).
+   `train_step_discrete` gained an `old_val: &[f32]` parameter; value loss is now
+   `v_clipped = old_val + clamp(v_pred - old_val, -1, 1)`,
+   `vf_loss_t = max((v_pred-ret)^2, (v_clipped-ret)^2).mean()` (was plain MSE). Threaded
+   `old_val` through the `PPOKernelTraining::train_step` trait method and its
+   `PPOKernel::Discrete` dispatch.
+2. `independent/mod.rs`: in `run_ppo_sgd_flat`, right after
+   `kernel.set_return_denorm_stats(...)`, added a single no-grad
+   `kernel.trainer.value_forward_flat(&obs_flat, obs_dim)` call over the full batch's obs,
+   producing `old_val_norm` — the RAW network output (same normalized/z-score scale as
+   `ret_normalized` and the in-loop `v_pred`), computed once *before* any SGD steps this epoch.
+   This `old_val_norm` is passed to every `train_step` call this epoch (sliced per-minibatch in
+   the non-full-batch path, though `full_batch=true` here).
+3. `bench_lunar_ppo_tch.rs`: appended `value_clip=1.0 (PPO2, matches SF --ppo_clip_value default)`
+   to the config banner.
+
+**Results (n=5, vs original baseline: final avg 141.02 range [131.8,162.3], AUC avg 93.54 range
+[73.22,108.50])**:
+- final = [155.00, 160.80, 148.10, 145.70, 116.00], n=5 avg **145.12** (**+2.9%** vs baseline).
+- AUC = [107.95, 93.13, 73.89, 89.03, 76.85], n=5 avg **88.17** (**-5.7%** vs baseline).
+- Both metrics' n=5 averages fall within the *original baseline's own* per-run ranges (final
+  range now [116.00,160.80], 44.8-point spread vs baseline's 30.5; AUC range [73.89,107.95],
+  34.1-point spread vs baseline's 35.3) — variance is comparable to baseline, not worse.
+- Min/max MeanReturn per run: (-180.4,169.8), (-199.1,162.3), (-186.4,160.1), (-179.0,158.6),
+  (-188.1,154.3) — all within baseline's normal per-run range (min -208.1 to -183.5, max
+  148.2-169.9). No instability mode like H2's -45.1 AUC-sample dip.
+- ClipFrac: all 5 runs show scattered nonzero values (179/832, 173/832, 180/832, 202/830,
+  170/832 epochs, means 0.0485-0.0562, 3-8 epochs/run hitting `1.0000`) vs the original
+  baseline's steady `0.0000` throughout — a real, consistent side-effect (also seen with H4's
+  orthogonal init), most likely because the new `value_forward_flat` snapshot adds one extra
+  full-batch forward pass per epoch that perturbs LibTorch's floating-point execution/threading
+  order, causing PPO's chaotic training dynamics to diverge onto a different (but
+  statistically similar) trajectory from the very first epoch — not evidence of instability,
+  since `MeanReturn` stayed in-range across all 5 runs.
+- Throughput: 33813/33860/33689/41956/42280 env-frames/sec (last 2 runs measured post a
+  container restart with markedly lower system load — not attributable to the algorithm
+  change itself; avg ≈37120, in line with the ~33-42k range seen across this whole project).
+
+**Verdict**: REJECTED, reverted (commit `2e3c83b` reverted via `git revert -n`). Final's nominal
++2.9% is within baseline's own noise, while AUC regressed -5.7% — failing the H1-H4 precedent
+that ACCEPT requires *both* final and AUC to improve together. Unlike H2, this implementation is
+NOT unstable (no -45.1-style collapse, no near-1.0 ClipFrac runs) — the correctly-scaled `old_val`
+does fix H2's root cause — but PPO2 value-clipping with `clip_value=1.0` simply does not help
+sample efficiency in this 1-epoch-of-46080-samples, 4-SGD-iteration regime: the value function is
+already well-regularized by `vf_coef=1.0` + persistent return normalization + grad-norm clipping,
+so an additional clip on the value target adds noise (the new nonzero ClipFrac) without a
+compensating sample-efficiency gain.
+
+**Takeaway for future hypotheses**: PPO2 value-clipping is now closed out as a candidate (both
+the flawed H2 variant and this correctly-scaled variant fail to improve AUC). The loss-function
+and optimizer axes (H2, H4, H5, H6) have now all been explored without a robust win; remaining
+structural candidates: minibatch/epoch cadence (`episodes_needed_for_steps` vs SF's fixed
+90-step rollout, from H1's takeaway), entropy-coefficient scheduling/annealing (SF anneals
+`exploration_loss_coeff` in some configs; this benchmark may not), and GAE
+`lambda`/`gamma` fine-tuning (currently 0.98/0.999, matched to SF's config but not yet
+independently varied).

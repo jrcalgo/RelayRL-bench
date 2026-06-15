@@ -97,7 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}"
     );
-    println!("  value_clip=1.0 (PPO2, matches SF --ppo_clip_value default)");
     println!("  {num_cores} logical cores");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
