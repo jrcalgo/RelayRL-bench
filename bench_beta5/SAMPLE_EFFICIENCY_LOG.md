@@ -357,3 +357,68 @@ structural candidates: minibatch/epoch cadence (`episodes_needed_for_steps` vs S
 `exploration_loss_coeff` in some configs; this benchmark may not), and GAE
 `lambda`/`gamma` fine-tuning (currently 0.98/0.999, matched to SF's config but not yet
 independently varied).
+
+## Hypothesis 7: match SF's asymmetric PPO clip-ratio formula (REJECTED, reverted)
+
+**Idea**: RelayRL's `train_step_discrete` clamps the probability ratio `r = exp(logp - logp_old)`
+to the symmetric range `[1-e, 1+e]` (here `[0.8, 1.2]` for `clip_ratio=0.2`). SF's
+`learner.py:541-543` instead computes
+`clip_ratio_high = 1 + e` and `clip_ratio_low = 1 / clip_ratio_high` (`[0.8333, 1.2]` for
+`e=0.2`), i.e. an asymmetric range that is symmetric in *log-ratio* space rather than in `r`
+itself (SF's comment notes this also avoids negative ratios for `e >= 1`, which `1-e` cannot).
+Since `clip_ratio=0.2` is matched between the two configs but the actual clipping bound was not,
+this was the first hypothesis across H1-H6 to touch the clip-ratio formula itself.
+
+**Change** (PPO algorithm scope, `kernel.rs` only, commit `695d3e9`):
+- In `train_step_discrete`, replaced
+  `let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);`
+  with
+  ```rust
+  let clip_ratio_high = 1.0 + clip_ratio;
+  let clip_ratio_low = 1.0 / clip_ratio_high;
+  let clipped_ratio = ratio.clone().clamp(clip_ratio_low, clip_ratio_high);
+  ```
+- Updated the `ClipFrac` diagnostic to count `r < clip_ratio_low || r > clip_ratio_high` instead
+  of `|r - 1| > clip_ratio`, so the diagnostic stays consistent with the new clipping bounds.
+
+**Results (n=5, vs original baseline: final avg 141.02 range [131.8,162.3], AUC avg 93.54 range
+[73.22,108.50])**:
+- final = [117.70, 144.70, 157.60, 156.50, 153.60], n=5 avg **146.02** (**+3.5%** vs baseline).
+- AUC = [97.86, 85.69, 94.55, 80.12, 83.03], n=5 avg **88.25** (**-5.7%** vs baseline).
+- Min/max MeanReturn per run: (-192.8,160.5), (-219.6,188.6), (-196.5,167.2), (-196.5,166.6),
+  (-198.8,166.4) — run2's (-219.6,188.6) is slightly beyond the original baseline's typical
+  per-run extremes (min -208.1 to -183.5, max 148.2-169.9) but in the same direction/scale as
+  H6's runs that were judged in-range; not flagged as an instability mode (no -45.1-style
+  AUC-sample collapse like H2).
+- ClipFrac: all 5 runs show substantially more nonzero clipping than H6 or baseline —
+  204/831, 214/832, 192/832, 197/832, 224/832 epochs nonzero (means 0.0541-0.0675, vs H6's
+  0.0485-0.0562 and baseline's steady 0.0000), with 6-13 epochs/run hitting `>=0.99` (vs H6's
+  3-8). This is the expected direct effect of the formula change: the new lower bound
+  `1/(1+e) ≈ 0.8333` is *tighter* than the old `1-e = 0.8`, so more ratios fall outside the
+  (now narrower-on-the-downside) trust region and get clipped/counted.
+- Throughput: 40915/42301/41562/41689/39863 env-frames/sec, avg ≈41266 — in line with the
+  ~33-42k range seen across this whole project; no throughput regression from the formula
+  change (it's three scalar ops, same as before).
+
+**Verdict**: REJECTED, reverted (commit `695d3e9` reverted via `git revert -n`). final's nominal
++3.5% is within baseline's own per-run range (131.8-162.3) and thus within noise, while AUC
+regressed -5.7% — the exact same final/AUC pattern as H6, failing the H1-H4 precedent that
+ACCEPT requires *both* final and AUC to improve together. The asymmetric clip formula is
+numerically correct and matches SF exactly, but in this regime it tightens the effective trust
+region on the downside (more clipping, see ClipFrac above) without translating into faster
+early-training learning (AUC) — any late-training final-return gain is offset by slower
+early progress.
+
+**Takeaway for future hypotheses**: the clip-ratio formula axis is now closed out (H7 fails
+alongside the loss/optimizer axes from H2/H4/H5/H6). Two new observations from H7: (1) the
+final-improves/AUC-regresses pattern has now appeared twice (H6, H7) with both implementations
+that increase mid/late-training clipping/regularization — suggests this benchmark's AUC sample
+points (early epochs, fractions 0.169-0.318 of N) are dominated by *exploration speed*, which
+extra regularization slows down, while final return benefits more from late-training stability.
+A hypothesis that speeds up *early* learning specifically (e.g. higher initial entropy
+coefficient with decay, or a higher initial LR with decay) may be better targeted at the AUC
+metric. (2) remaining unexplored candidates: entropy-coefficient scheduling/annealing,
+GAE `lambda`/`gamma` fine-tuning, LR annealing/warmup (note: plain linear LR annealing was
+already tried pre-log and reverted, but a decay schedule combined with entropy annealing was
+not), and SF's `ratio = torch.clamp(ratio, 0.05, 20.0)` numerical-safety clamp (small,
+unexplored, unlikely to move metrics but cheap to test).
