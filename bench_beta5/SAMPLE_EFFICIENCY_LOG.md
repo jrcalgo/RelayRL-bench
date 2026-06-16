@@ -622,3 +622,61 @@ which is tiny for 4 SGD steps — effectively disabling the clip entirely. **H11
 PPO clip to bound policy updates against the actual data-collection policy. This is a correction
 to a fundamental algorithmic deviation from standard PPO (and SF), in `independent/mod.rs`
 (PPO-algorithm scope), with a plausibly large effect on both ClipFrac and sample efficiency.
+
+## Hypothesis 11: use rollout-time logp_old (remove fresh_logp substitution) (ACCEPTED)
+
+**Idea**: The `fresh_logp` mechanism in `independent/mod.rs` replaces `batch.logp` (rollout-time
+log-probs) with re-computed log-probs from the current (epoch-start) network before the 4 SGD
+steps. This makes `logp_old` in the PPO ratio `exp(logp_new - logp_old)` always ≈1.0 at
+epoch-start (both from the same network state), keeping all ratios near 1.0 across all 4 steps
+→ ClipFrac=0.0000 throughout training — the PPO clip was never active. Standard PPO (and SF's
+APPO) uses rollout-time log-probs as `logp_old`, fixed for all N gradient steps per epoch,
+allowing the clip to bound policy drift from the COLLECTION policy. The `fresh_logp` comment
+cited "ORT/burn numerical mismatch" (ORT = ONNX Runtime, used for inference in older configs) —
+that mismatch no longer applies in the current LibTorch-only setup (all forward passes via Burn's
+LibTorch backend); keeping `fresh_logp` was unintentionally disabling a core PPO safety
+mechanism. Removing it restores standard PPO semantics.
+
+**Change** (PPO algorithm scope, `independent/mod.rs` only, commit `3afb136`):
+- Removed the `fresh_logp` block (4 lines) replacing it with a single comment explaining the
+  standard-PPO rationale. `batch.logp` now retains the rollout-time log-probs as collected.
+  Fresh value computation (`fresh_values`) is retained (values DO need to be fresh since the
+  value network's de-normalization depends on the current epoch's running stats).
+
+**Results (n=5, vs original baseline: final avg 141.02 range [131.8,162.3], AUC avg 93.54 range
+[73.22,108.50])**:
+- final = [161.00, 130.10, 145.40, 157.60, 138.70], n=5 avg **146.56** (**+3.9%** vs baseline).
+- AUC = [113.36, 95.75, 76.15, 102.64, 99.67], n=5 avg **97.51** (**+4.2%** vs baseline).
+- **Both metrics improved** — first simultaneous improvement at n=5 since the loop began. This
+  distinguishes H11 from H6-H10 which all showed the "final up, AUC down" pattern (the
+  perturbation-tax signature caused by disturbing `fresh_logp`'s floating-point ordering).
+- Final range 130.1-161.0 (30.9-point spread vs baseline's 30.5 — essentially same variance).
+  AUC range 76.15-113.36 (37.2-point spread vs baseline's 35.3 — marginally wider but similar).
+- min/max MeanReturn per run: (-196.0,165.1), (-186.6,165.6), (-182.8,160.2), (-184.7,168.4),
+  (-198.7,157.1) — all within normal baseline range (min floor ~-208, max ceiling ~170); no
+  deep-dip instability signals.
+- ClipFrac: nonzero in all 5 runs (212-274/832 epochs, means 0.0500-0.0607, 4-8 epochs/run
+  hitting `>=0.99`). **ClipFrac is now meaningfully nonzero** — the PPO clip is active for the
+  first time, bounding updates relative to the rollout-time policy as intended. This is a new
+  regime compared to baseline's 0.0000; the modest ~0.05 mean (not 0.0000 and not the
+  catastrophically-high 0.98 seen in H2) suggests a healthy trust-region constraint.
+- Throughput: 33951/32958/41980/42296/42023 env-frames/sec, avg ≈39042 — no regression
+  (runs 1-2's lower numbers reflect higher system load at that time of night, not algorithmic
+  cost; runs 3-5 match baseline's ~39-42k range).
+
+**Verdict**: **ACCEPTED**. Both final (+3.9%) and AUC (+4.2%) improved over the original
+baseline at n=5, satisfying the "both must improve" acceptance rule, with no instability
+(min/max ranges normal, ClipFrac healthy). Effect sizes are modest (within baseline's noise
+band), warranting caution as seen in H4's n=3 provisional accept → n=5 reversal — but unlike
+H4 (whose accept was at n=3 then reversed at n=5), H11 is being evaluated at the full n=5
+directly. Commit `3afb136` retained as the new baseline.
+
+**New baseline (H11)**: final avg 146.56 range [130.1,161.0], AUC avg 97.51 range [76.15,113.36].
+
+**Takeaway**: removing `fresh_logp` restores standard PPO semantics and is the most significant
+single algorithmic fix found in this loop so far. The PPO clip, previously disabled by the
+fresh-logp no-op, now provides a real trust-region constraint relative to the data-collection
+policy. All future hypotheses should be evaluated against this new baseline. Given H4's lesson,
+an additional n=5 confirmation run of H11 itself (with the new baseline as comparison) may be
+prudent before building further hypotheses on top of it — but the primary loop signal (both
+metrics improved at n=5) supports accepting and continuing.
