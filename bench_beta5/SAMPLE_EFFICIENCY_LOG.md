@@ -749,7 +749,7 @@ tradeoff is non-monotonic: lam=0.97 does not split the difference; it is strictl
 lam=0.98 on both metrics. Future hypotheses should target a different axis: number of SGD
 iterations per batch (train_pi/vf_iters), policy clip ratio, entropy coefficient, or LR schedule.
 
-## Hypothesis 14: more SGD iterations per batch (train_pi/vf_iters 4 → 8) (IN PROGRESS, n=0/5)
+## Hypothesis 14: more SGD iterations per batch (train_pi/vf_iters 4 → 8) (REJECTED)
 
 **Idea**: Each epoch collects ~46080 transitions (512 envs × 90-step rollout) and runs 4 SGD
 passes over the full batch. With ClipFrac averaging ~0.05 (H11 baseline), the PPO clip constraint
@@ -764,6 +764,44 @@ signaling instability early. Single two-constant change, no algorithm or graph m
 - `const TRAIN_PI_ITERS: u64 = 4` → `const TRAIN_PI_ITERS: u64 = 8`
 - `const TRAIN_VF_ITERS: u64 = 4` → `const TRAIN_VF_ITERS: u64 = 8`
 - `const LAM: f32 = 0.97` reverted to `const LAM: f32 = 0.98` (H13 cleanup)
+
+**Results (n=5, vs H11 baseline: final avg 146.56 range [130.1,161.0], AUC avg 97.51 range [76.15,113.36])**:
+- final = [123.60, 98.40, 95.80, 162.50, 145.90], n=5 avg **125.24** (**-14.6%** vs baseline).
+- AUC = [121.85, 131.16, 137.92, 133.87, 114.79], n=5 avg **127.92** (**+31.2%** vs baseline).
+- AUC improvement (+31.2%) is the largest seen in the entire loop, far exceeding H11's +4.2%.
+  However, final declined sharply (-14.6%), with 3 of 5 runs below the H11 baseline's minimum (130.1).
+  Final range 95.8-162.5 (66.7-point spread, much wider than H11's 30.9 — high instability).
+- ClipFrac: mean 0.0830-0.1072 across runs (avg ~0.094), nonzero in **every single epoch** (100% of
+  790-797 epochs per run). H11 baseline had mean ~0.055 and nonzero in only 25-33% of epochs.
+  Doubling iters doubled ClipFrac and made the clip binding universally — the policy drifts beyond
+  clip bounds on every batch, causing cumulative late-training degradation despite the trust-region.
+- Throughput: 47,474-48,192 env-frames/sec, avg **~47,900** — actually +23% vs H11 baseline (~39k),
+  confirming env stepping (Python/Box2D) dominates wall time; SGD compute cost is negligible.
+  N≈790-796 epochs (vs H11's 832) because higher returns → longer episodes → TRAJ_PER_EPOCH trigger.
+
+**Verdict**: **REJECTED**. Final -14.6% below H11 baseline, failing the "both must improve" rule.
+
+**Takeaway for future hypotheses**: The +31.2% AUC gain confirms that more gradient steps per
+batch is a genuine lever for early sample efficiency. The failure mode is clear from ClipFrac:
+8 iters causes the policy to drift beyond the clip bounds on every epoch (ClipFrac 100%, mean ~0.09
+vs H11's 25%, ~0.055), leading to late-training instability. The right question is whether an
+intermediate iter count (6) finds a sweet spot where AUC improves without fully exhausting the
+trust-region budget. If 6 iters still shows the same tradeoff (AUC+, final-), the iters axis is
+closed and a different approach (e.g., target_kl to cap iters adaptively, or separate pi/vf iters)
+is warranted.
+
+## Hypothesis 15: intermediate SGD iterations (train_pi/vf_iters 4 → 6) (IN PROGRESS, n=0/5)
+
+**Idea**: H14 (8 iters) gave AUC +31.2% but final -14.6%. H11 (4 iters) is the baseline. Testing
+6 iters as the midpoint: ClipFrac should land between H11's ~0.055 and H14's ~0.094, indicating
+a proportionally reduced policy drift per epoch. If 6 iters gives a smaller improvement in AUC
+with proportionally less final degradation — or if the AUC/final tradeoff is nonlinear (the first
+extra iters have most of the AUC benefit without all the final cost) — 6 iters may be the sweet
+spot where both metrics improve. Single two-constant change.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const TRAIN_PI_ITERS: u64 = 8` → `const TRAIN_PI_ITERS: u64 = 6`
+- `const TRAIN_VF_ITERS: u64 = 8` → `const TRAIN_VF_ITERS: u64 = 6`
 
 **Results (n=0/5 in progress)**:
 - Run 1: IN PROGRESS

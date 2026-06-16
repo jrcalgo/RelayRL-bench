@@ -55,8 +55,8 @@ const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4; // matches SF lr=2.5e-4
 const VF_LR: f64 = 2.5e-4;
 const VF_COEF: f32 = 1.0; // matches SF vf_coef default
-const TRAIN_PI_ITERS: u64 = 8; // H14: 4->8, more gradient steps per batch
-const TRAIN_VF_ITERS: u64 = 8;
+const TRAIN_PI_ITERS: u64 = 6; // H15: 4->6, intermediate between H11(4) and H14(8)
+const TRAIN_VF_ITERS: u64 = 6;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
