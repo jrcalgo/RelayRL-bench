@@ -720,7 +720,7 @@ lam=0.97 (eff. horizon ~33 steps) to test whether an intermediate value achieves
 both metrics. If the tradeoff is monotonic (any lam<0.98 helps AUC/hurts final), the lambda axis
 is exhausted and a different direction is needed.
 
-## Hypothesis 13: GAE lambda 0.97 — intermediate between 0.95 and 0.98 (IN PROGRESS, n=0/5)
+## Hypothesis 13: GAE lambda 0.97 — intermediate between 0.95 and 0.98 (REJECTED)
 
 **Idea**: H12 established that lam=0.95 gives AUC +5.8% but final -0.8%. The H11 baseline uses
 lam=0.98. lam=0.97 (eff. horizon ~33 steps, between 0.95's ~20 and 0.98's ~50) may capture some
@@ -730,6 +730,40 @@ lambda/metric tradeoff has a sweet spot between 0.95 and 0.98.
 
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const LAM: f32 = 0.98` → `const LAM: f32 = 0.97`
+
+**Results (n=5, vs H11 baseline: final avg 146.56 range [130.1,161.0], AUC avg 97.51 range [76.15,113.36])**:
+- final = [169.50, 124.40, 106.20, 141.00, 149.40], n=5 avg **138.10** (**-5.8%** vs baseline).
+- AUC = [74.06, 113.72, 65.17, 99.29, 130.29], n=5 avg **96.51** (**-1.0%** vs baseline).
+- Both metrics below baseline — lam=0.97 is worse than lam=0.98 on both axes simultaneously.
+  Unlike lam=0.95 (AUC+/final-), lam=0.97 shows no partial benefit. High variance: final range
+  106.2-169.5 (63.3-point spread vs H11 baseline's 30.9) — lam=0.97 is more unstable than either
+  lam=0.95 or lam=0.98.
+
+**Verdict**: **REJECTED**. Both metrics below H11 baseline. Lambda axis now exhausted:
+- lam=0.95: AUC+5.8%, final-0.8% → REJECTED (AUC up, final down)
+- lam=0.97: AUC-1.0%, final-5.8% → REJECTED (both down)
+- lam=0.98: H11 baseline (best tested value)
+
+**Takeaway for future hypotheses**: Lambda axis is closed — 0.98 is the best tested value. The
+tradeoff is non-monotonic: lam=0.97 does not split the difference; it is strictly worse than
+lam=0.98 on both metrics. Future hypotheses should target a different axis: number of SGD
+iterations per batch (train_pi/vf_iters), policy clip ratio, entropy coefficient, or LR schedule.
+
+## Hypothesis 14: more SGD iterations per batch (train_pi/vf_iters 4 → 8) (IN PROGRESS, n=0/5)
+
+**Idea**: Each epoch collects ~46080 transitions (512 envs × 90-step rollout) and runs 4 SGD
+passes over the full batch. With ClipFrac averaging ~0.05 (H11 baseline), the PPO clip constraint
+is active but not heavily binding — suggesting the policy could safely take additional gradient
+steps per batch without divergence. Doubling to 8 SGD passes per epoch extracts more learning from
+each collected batch, directly improving sample efficiency (same env frames → more gradient
+updates). SF uses `num_epochs=4` but that is not a ceiling for RelayRL. The PPO clip provides a
+trust-region safeguard: if later iterations drift the policy too far, ClipFrac will spike,
+signaling instability early. Single two-constant change, no algorithm or graph modification.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const TRAIN_PI_ITERS: u64 = 4` → `const TRAIN_PI_ITERS: u64 = 8`
+- `const TRAIN_VF_ITERS: u64 = 4` → `const TRAIN_VF_ITERS: u64 = 8`
+- `const LAM: f32 = 0.97` reverted to `const LAM: f32 = 0.98` (H13 cleanup)
 
 **Results (n=0/5 in progress)**:
 - Run 1: IN PROGRESS
