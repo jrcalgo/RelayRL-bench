@@ -680,3 +680,23 @@ policy. All future hypotheses should be evaluated against this new baseline. Giv
 an additional n=5 confirmation run of H11 itself (with the new baseline as comparison) may be
 prudent before building further hypotheses on top of it — but the primary loop signal (both
 metrics improved at n=5) supports accepting and continuing.
+
+## Hypothesis 12: reduce GAE lambda from 0.98 to 0.95 (IN PROGRESS, n=0/5)
+
+**Idea**: Current lam=0.98 matches SF's config. However, with complete episodes up to 500 steps
+and gamma=0.999, the effective advantage horizon = 1/(1-lam) ≈ 50 steps. For early trajectory
+steps in long episodes (e.g., step 1 of a 500-step episode), the advantage estimate incorporates
+all 499 future rewards weighted by (0.999×0.98)^t, creating high variance. Lower lam=0.95 reduces
+the effective horizon to ~20 steps, which could lower advantage variance → more stable early
+learning → improved AUC. SF (0.98), OpenAI SpinningUp (0.97), and Stable Baselines (0.95) all use
+different defaults — lam has not yet been independently varied in this loop despite being listed
+as a "remaining candidate" in H5/H6/H7 takeaways. Pure replay-buffer change, no kernel or loss
+graph modification; zero perturbation risk.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const LAM: f32 = 0.98` → `const LAM: f32 = 0.95`
+
+**Results (n=0/5 in progress)**:
+- Run 1: IN PROGRESS
+
+**Verdict**: PENDING (n=5 required)
