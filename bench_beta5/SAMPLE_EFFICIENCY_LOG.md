@@ -696,6 +696,41 @@ graph modification; zero perturbation risk.
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const LAM: f32 = 0.98` → `const LAM: f32 = 0.95`
 
+**Results (n=5, vs H11 baseline: final avg 146.56 range [130.1,161.0], AUC avg 97.51 range [76.15,113.36])**:
+- final = [137.60, 150.30, 168.40, 116.70, 154.10], n=5 avg **145.42** (**-0.8%** vs baseline).
+- AUC = [115.05, 105.98, 90.56, 83.76, 120.66], n=5 avg **103.20** (**+5.8%** vs baseline).
+- final range 116.7-168.4 (51.7-point spread, wider than H11's 30.9 — lam=0.95 increases run-to-run variance).
+  AUC range 83.76-120.66 (36.9-point spread, slightly wider than H11's 37.2 — similar).
+- Notable negative correlation between final and AUC across runs: high-final runs (run3: 168.40/90.56)
+  tend to have lower AUC, and high-AUC runs (run1: 137.60/115.05, run5: 154.10/120.66) tend to have
+  lower final. This reflects the lam=0.95 tradeoff: shorter effective advantage horizon helps early
+  learning (AUC) but weakens credit assignment for final-episode rewards (final return).
+- ClipFrac: means 0.059-0.071 (nonzero 261-318/832 epochs) — consistent with H11 baseline (~0.05-0.06),
+  as expected (lambda only affects advantages, not the loss graph or logp computation).
+
+**Verdict**: **REJECTED**, reverted (`const LAM: f32 = 0.97` for H13). AUC improved +5.8% but final
+regressed -0.8%, failing the "both must improve" acceptance rule. The AUC gain is genuine and
+consistent across runs, but comes at the expense of the final metric.
+
+**Takeaway for future hypotheses**: lambda is a real lever with a clear directional tradeoff:
+lam=0.95 (eff. horizon ~20 steps) speeds up early learning (AUC) but weakens long-range credit
+assignment (final return), while lam=0.98 (eff. horizon ~50 steps) does the reverse. The tradeoff
+is consistent across all 5 runs (negative correlation between final and AUC). Next step: try
+lam=0.97 (eff. horizon ~33 steps) to test whether an intermediate value achieves improvement in
+both metrics. If the tradeoff is monotonic (any lam<0.98 helps AUC/hurts final), the lambda axis
+is exhausted and a different direction is needed.
+
+## Hypothesis 13: GAE lambda 0.97 — intermediate between 0.95 and 0.98 (IN PROGRESS, n=0/5)
+
+**Idea**: H12 established that lam=0.95 gives AUC +5.8% but final -0.8%. The H11 baseline uses
+lam=0.98. lam=0.97 (eff. horizon ~33 steps, between 0.95's ~20 and 0.98's ~50) may capture some
+of lam=0.95's AUC benefit while recovering the final return. The `IPPOParams::default()` originally
+used lam=0.97; the benchmark overrides to 0.98 to match SF. Testing 0.97 determines whether the
+lambda/metric tradeoff has a sweet spot between 0.95 and 0.98.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const LAM: f32 = 0.98` → `const LAM: f32 = 0.97`
+
 **Results (n=0/5 in progress)**:
 - Run 1: IN PROGRESS
 

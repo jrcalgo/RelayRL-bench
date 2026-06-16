@@ -50,7 +50,7 @@ const ENV_COUNT: u32 = 512;
 const SEED: u64 = 1;
 
 const GAMMA: f32 = 0.999;
-const LAM: f32 = 0.95;
+const LAM: f32 = 0.97;
 const CLIP_RATIO: f32 = 0.2;
 const PI_LR: f64 = 2.5e-4; // matches SF lr=2.5e-4
 const VF_LR: f64 = 2.5e-4;
