@@ -51,7 +51,7 @@ const SEED: u64 = 1;
 
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
-const CLIP_RATIO: f32 = 0.2;
+const CLIP_RATIO: f32 = 0.3; // H17: 0.2->0.3, wider trust region per iter
 const PI_LR: f64 = 2.5e-4; // matches SF lr=2.5e-4
 const VF_LR: f64 = 2.5e-4;
 const VF_COEF: f32 = 1.0; // matches SF vf_coef default
@@ -59,7 +59,7 @@ const TRAIN_PI_ITERS: u64 = 6; // H15: 4->6, intermediate between H11(4) and H14
 const TRAIN_VF_ITERS: u64 = 6;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
-const ENT_COEF: f32 = 0.02; // H16: 0.01->0.02, more exploration incentive
+const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
 
 // 512 trajs/epoch x 512 envs -> ~90 loop iters/epoch

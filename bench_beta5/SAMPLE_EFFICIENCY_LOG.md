@@ -834,7 +834,7 @@ budget (final +1.8%). 8 iters over-optimizes per batch (ClipFrac 2× higher, fin
 Next direction: explore entropy coefficient (currently 0.01, matching SF) to see if more
 exploration early in training can compound the AUC gain.
 
-## Hypothesis 16: increase entropy coefficient 0.01 → 0.02 (IN PROGRESS, n=0/5)
+## Hypothesis 16: increase entropy coefficient 0.01 → 0.02 (REJECTED)
 
 **Idea**: The current ent_coef=0.01 matches SF's default. With 6 SGD iters now established as the
 baseline, the policy updates more aggressively per epoch. A higher entropy bonus (0.02) could
@@ -846,6 +846,42 @@ doubles the exploration incentive. Single constant change on top of the H15 (6-i
 
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const ENT_COEF: f32 = 0.01` → `const ENT_COEF: f32 = 0.02`
+
+**Results (n=5, vs H15 baseline: final avg 149.14 range [143.1,163.7], AUC avg 118.18 range [100.24,129.42])**:
+- final = [138.20, 129.20, 89.00, 144.30, 109.80], n=5 avg **122.10** (**-18.1%** vs baseline).
+- AUC = [124.27, 117.12, 105.86, 122.56, 132.55], n=5 avg **120.47** (**+1.9%** vs baseline).
+- Final collapsed dramatically: 3 of 5 runs below H11 baseline minimum (130.1), spread 89.0-144.3
+  (55.3 points — high variance indicating instability). AUC marginally above baseline (+1.9%),
+  an effect too small to be meaningful given the run-to-run variance.
+- The higher entropy coefficient actively prevents convergence in the 6-iter regime: the policy
+  maintains more randomness throughout training, which helps early exploration (slight AUC bump)
+  but prevents the policy from committing to high-reward actions by the end.
+
+**Verdict**: **REJECTED**. Final -18.1% below H15 baseline. Entropy axis closed: ent_coef=0.01
+(matching SF's default) is optimal; doubling it prevents convergence in the high-iter regime.
+
+**Takeaway for future hypotheses**: Both the entropy axis (0.01 is best) and the lambda axis
+(0.98 is best) are closed. The iter axis found a sweet spot at 6 (H15, accepted). The next
+unexplored axis is the PPO clip ratio. With ClipFrac averaging ~0.088 across all 100% of epochs
+at clip=0.2, the clip is always binding — widening the trust region to clip=0.3 allows larger
+per-iter updates without increasing iter count, potentially compounding H15's per-iter benefit.
+
+## Hypothesis 17: wider PPO clip ratio 0.2 → 0.3 (IN PROGRESS, n=0/5)
+
+**Idea**: H15 established 6 SGD iters/epoch as optimal over 4 iters. ClipFrac is now ~0.088 on
+every epoch (100%), meaning the PPO clip bounds policy updates in every batch. At clip=0.2, the
+ratio r=exp(logp-logp_old) is clamped to [0.8, 1.2]. Widening to clip=0.3 expands the trust
+region to [0.7, 1.3], allowing larger per-iteration policy steps. With 6 iters and each iter
+able to make larger progress, this could further improve sample efficiency (AUC) while keeping
+total epochs at 6 (not the 8 that caused final degradation). The risk is that wider clip allows
+too much drift across 6 iters, replicating H14's final-collapse pattern. ClipFrac will be a
+diagnostic: if it falls toward H11 levels (~0.055), the wider clip is being used productively;
+if it stays near H15 levels (0.088), the extra headroom is occupied by larger updates.
+Single constant change, no algorithm modification. ent_coef reverted to 0.01 (H16 cleanup).
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const CLIP_RATIO: f32 = 0.2` → `const CLIP_RATIO: f32 = 0.3`
+- `const ENT_COEF: f32 = 0.02` reverted to `const ENT_COEF: f32 = 0.01` (H16 cleanup)
 
 **Results (n=0/5 in progress)**:
 - Run 1: IN PROGRESS
