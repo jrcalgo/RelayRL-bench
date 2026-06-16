@@ -51,9 +51,9 @@ const SEED: u64 = 1;
 
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
-const CLIP_RATIO: f32 = 0.3; // H17: 0.2->0.3, wider trust region per iter
-const PI_LR: f64 = 2.5e-4; // matches SF lr=2.5e-4
-const VF_LR: f64 = 2.5e-4;
+const CLIP_RATIO: f32 = 0.2;
+const PI_LR: f64 = 5e-4; // H18: 2.5e-4->5e-4, higher LR on H15 baseline
+const VF_LR: f64 = 5e-4;
 const VF_COEF: f32 = 1.0; // matches SF vf_coef default
 const TRAIN_PI_ITERS: u64 = 6; // H15: 4->6, intermediate between H11(4) and H14(8)
 const TRAIN_VF_ITERS: u64 = 6;

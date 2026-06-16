@@ -866,7 +866,7 @@ unexplored axis is the PPO clip ratio. With ClipFrac averaging ~0.088 across all
 at clip=0.2, the clip is always binding — widening the trust region to clip=0.3 allows larger
 per-iter updates without increasing iter count, potentially compounding H15's per-iter benefit.
 
-## Hypothesis 17: wider PPO clip ratio 0.2 → 0.3 (IN PROGRESS, n=0/5)
+## Hypothesis 17: wider PPO clip ratio 0.2 → 0.3 (REJECTED)
 
 **Idea**: H15 established 6 SGD iters/epoch as optimal over 4 iters. ClipFrac is now ~0.088 on
 every epoch (100%), meaning the PPO clip bounds policy updates in every batch. At clip=0.2, the
@@ -882,6 +882,47 @@ Single constant change, no algorithm modification. ent_coef reverted to 0.01 (H1
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const CLIP_RATIO: f32 = 0.2` → `const CLIP_RATIO: f32 = 0.3`
 - `const ENT_COEF: f32 = 0.02` reverted to `const ENT_COEF: f32 = 0.01` (H16 cleanup)
+
+**Results (n=5, vs H15 baseline: final avg 149.14 range [143.1,163.7], AUC avg 118.18 range [100.24,129.42])**:
+- final = [100.80, 48.90, 196.90, 185.70, 139.50], n=5 avg **134.36** (**-9.9%** vs baseline).
+- AUC = [108.93, 142.09, 103.98, 149.13, 104.06], n=5 avg **121.64** (**+2.9%** vs baseline).
+- Extreme bimodality: two exceptional runs (final 196.90, 185.70; AUC 149.13, 142.09) — near/above
+  SF's 185.88 average — and two collapse runs (final 48.90, 100.80). Final spread 48.9-196.9
+  (148-point range, the most extreme seen in the entire loop). When clip=0.3 converges, it can
+  match or exceed SF; when it collapses, the policy cannot recover.
+- ClipFrac means 0.0609-0.0833 (avg ~0.074) — notably *lower* than H15's ~0.088 at clip=0.2.
+  The wider trust region reduces how often the clip triggers, but when the policy drifts in the
+  wrong direction, there is no safety net to prevent runaway divergence.
+- The bimodality origin: early training instability (AUC samples show wide swings in collapse runs)
+  suggests the wider clip is amplifying initial gradient noise — a small wrong-direction step at
+  clip=0.3 takes the policy further off-track than at clip=0.2, making recovery harder.
+
+**Verdict**: **REJECTED**. Final -9.9% below H15 baseline. Clip ratio axis closed: 0.2 is the
+stable optimum. 0.3 achieves extraordinary results when it converges (comparable to SF) but
+collapses ~40% of the time, pulling the n=5 average below baseline.
+
+**Takeaway for future hypotheses**: The clip=0.3 bimodality result reveals a key property of the
+H15 configuration: with 6 SGD iters, the system is near the stability boundary. Changes that
+increase per-iter step size (clip=0.3) or exploration (ent=0.02) push over the edge into instability.
+The unexplored axes remaining are: learning rate (currently 2.5e-4, matched to SF — an increase
+might improve convergence speed within the stable trust-region budget) and discount factor gamma
+(currently 0.999, also matched to SF).
+
+## Hypothesis 18: learning rate 2.5e-4 → 5e-4 (IN PROGRESS, n=0/5)
+
+**Idea**: The current LR=2.5e-4 matches SF's `learning_rate`. With 6 SGD iters (H15 baseline),
+the policy and value networks update more frequently per epoch. A higher LR (5e-4, 2×) makes
+each gradient step more impactful, potentially converging faster (better AUC) without the
+instability of H16 (entropy) or H17 (wider clip) — those increased *step size variety* while
+this increases *step magnitude* uniformly. The clip=0.2 trust region still bounds per-iter drift,
+providing the same stability guard as H15. Many PPO implementations (Stable Baselines, OpenAI
+Spinning Up) use LR=3e-4 to 1e-3. Single two-constant change (pi_lr and vf_lr together).
+clip_ratio reverted to 0.2 (H17 cleanup).
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const PI_LR: f64 = 2.5e-4` → `const PI_LR: f64 = 5e-4`
+- `const VF_LR: f64 = 2.5e-4` → `const VF_LR: f64 = 5e-4`
+- `const CLIP_RATIO: f32 = 0.3` reverted to `const CLIP_RATIO: f32 = 0.2` (H17 cleanup)
 
 **Results (n=0/5 in progress)**:
 - Run 1: IN PROGRESS
