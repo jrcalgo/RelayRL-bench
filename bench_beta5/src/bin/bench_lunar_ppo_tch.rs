@@ -59,7 +59,7 @@ const TRAIN_PI_ITERS: u64 = 6; // H15: 4->6, intermediate between H11(4) and H14
 const TRAIN_VF_ITERS: u64 = 6;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
-const ENT_COEF: f32 = 0.01;
+const ENT_COEF: f32 = 0.02; // H16: 0.01->0.02, more exploration incentive
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
 
 // 512 trajs/epoch x 512 envs -> ~90 loop iters/epoch
