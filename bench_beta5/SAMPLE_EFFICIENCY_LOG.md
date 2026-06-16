@@ -924,7 +924,71 @@ clip_ratio reverted to 0.2 (H17 cleanup).
 - `const VF_LR: f64 = 2.5e-4` → `const VF_LR: f64 = 5e-4`
 - `const CLIP_RATIO: f32 = 0.3` reverted to `const CLIP_RATIO: f32 = 0.2` (H17 cleanup)
 
+**Results (n=5, vs H15 baseline: final avg 149.14 range [143.1,163.7], AUC avg 118.18 range [100.24,129.42])**:
+- final = [143.30, 154.40, 71.20, 112.20, 147.50], n=5 avg **125.72** (**-15.7%** vs baseline).
+- AUC = [132.81, 121.81, 126.03, 118.59, 136.08], n=5 avg **127.06** (**+7.5%** vs baseline).
+- Same bimodal collapse signature as H17: 2 of 5 runs (71.20, 112.20) collapsed well below the
+  H15 baseline floor (143.1), while the other 3 (143.30, 147.50, 154.40) landed in/near the H15
+  range. AUC improved (+7.5%) because the higher LR accelerates early learning even in the
+  collapse runs, but the final-epoch policy quality degrades in those same runs.
+- ClipFrac trended upward across the run (0.116 -> 0.110 -> 0.128 -> 0.133 -> ...), the highest
+  mean of any hypothesis so far, confirming the higher LR pushes harder into the clip boundary —
+  larger raw gradient steps before clipping translate to more frequent clipping, and in the
+  collapse runs this manifests as instability rather than productive trust-region usage.
+
+**Verdict**: **REJECTED**. Final -15.7% below H15 baseline. Learning rate axis closed at the high
+end: 5e-4 reproduces H17's bimodal collapse pattern (likely via the same mechanism — larger
+per-step drift overwhelms the clip=0.2 trust region in a fraction of seeds). Reverted to LR=2.5e-4.
+
+**Takeaway for future hypotheses**: H17 (clip=0.3) and H18 (LR=5e-4) both show the same failure
+signature: amplify per-step or per-iter drift beyond the H15 stability point and ~40% of runs
+collapse. This consistent bimodality, occurring under a single fixed network-init seed
+(`const SEED: u64 = 1`), raised the question of whether the variance is driven by genuine
+sensitivity to network initialization or by non-deterministic async/thread scheduling — i.e.,
+whether "bimodal" outcomes are a property of the hyperparameter or an artifact of always reusing
+the same nominal seed. See the methodology change below.
+
+## Methodology change: per-run seed protocol
+
+**Problem**: All hypotheses H1-H18 used a hardcoded `const SEED: u64 = 1` to seed the
+Burn/LibTorch backend (`<B as Backend>::seed(&burn_device, SEED)`), which controls network
+weight initialization for both the policy and value MLPs. Every one of the 5 runs per hypothesis
+therefore used the *same* nominal seed. Observed run-to-run variance came entirely from
+non-deterministic async task scheduling and thread interleaving (env stepping, replay buffer
+writes, optimizer steps racing across threads), not from a systematic sweep over independent
+network initializations. This makes it impossible to distinguish "this config is fundamentally
+unstable across initializations" from "this config happened to get an unlucky scheduling
+interleaving in 2 of 5 runs" — a distinction that matters a great deal for H17/H18's bimodal
+results.
+
+**Fix**: `bench_lunar_ppo_tch.rs` now reads the seed from a `PPO_SEED` environment variable at
+runtime (default 1 if unset), instead of a hardcoded constant:
+```rust
+let seed: u64 = std::env::var("PPO_SEED")
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(1);
+...
+<B as burn_tensor::backend::Backend>::seed(&burn_device, seed);
+```
+The header log line now prints `seed={seed}` so every run's log records which seed produced it.
+Each of the 5 runs per hypothesis now uses `PPO_SEED=<run_number>` (1,2,3,4,5), giving a
+systematic i.i.d. sample over 5 distinct network initializations rather than 5 nominally-identical
+runs. The env-side seed inside envpool is unaffected and stays fixed at 1 (only network init
+varies) — this isolates the seed axis to weight initialization specifically.
+
+**Consequence**: Because this changes the distribution of outcomes, all prior n=5 results
+(H1-H18, all using `SEED=1` for every run) are not directly comparable to results gathered under
+the new protocol on a per-run basis, though their averages remain useful as a rough reference
+point. The H15 baseline (current best ACCEPTED config) is re-run under the new protocol below to
+establish a comparable multi-seed baseline before continuing the hypothesis loop.
+
+## H15 multi-seed re-baseline (config: 6 iters, clip=0.2, ent=0.01, lam=0.98, LR=2.5e-4) (n=0/5 in progress)
+
+**Purpose**: Re-establish the H15 baseline under the new `PPO_SEED=1..5` protocol so all future
+ACCEPT/REJECT comparisons (H19+) use a like-for-like multi-seed baseline.
+
 **Results (n=0/5 in progress)**:
-- Run 1: IN PROGRESS
+- Run 1 (PPO_SEED=1): IN PROGRESS
 
 **Verdict**: PENDING (n=5 required)

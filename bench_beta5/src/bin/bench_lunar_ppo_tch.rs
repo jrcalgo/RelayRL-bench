@@ -47,15 +47,14 @@ const OBS_DIM: usize = 8;
 const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 512;
-const SEED: u64 = 1;
 
 const GAMMA: f32 = 0.999;
 const LAM: f32 = 0.98;
 const CLIP_RATIO: f32 = 0.2;
-const PI_LR: f64 = 5e-4; // H18: 2.5e-4->5e-4, higher LR on H15 baseline
-const VF_LR: f64 = 5e-4;
+const PI_LR: f64 = 2.5e-4;
+const VF_LR: f64 = 2.5e-4;
 const VF_COEF: f32 = 1.0; // matches SF vf_coef default
-const TRAIN_PI_ITERS: u64 = 6; // H15: 4->6, intermediate between H11(4) and H14(8)
+const TRAIN_PI_ITERS: u64 = 6; // H15: 6 iters
 const TRAIN_VF_ITERS: u64 = 6;
 const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
@@ -82,6 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "/usr/local/lib/python3.11/dist-packages/onnxruntime/capi/libonnxruntime.so.1.26.0",
     );
 
+    let seed: u64 = std::env::var("PPO_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+
     type B = LibTorch;
 
     let num_cores = std::thread::available_parallelism()
@@ -97,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}"
     );
-    println!("  {num_cores} logical cores");
+    println!("  {num_cores} logical cores  seed={seed}");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
     // ── PPO networks: [128, 128] MLPs for obs=8, act=4 ──────────────────────
@@ -105,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Seed the burn backend so network initialization is reproducible across
     // runs (previously unseeded, contributing to large run-to-run MeanReturn
     // variance even with a fixed env seed).
-    <B as burn_tensor::backend::Backend>::seed(&burn_device, SEED);
+    <B as burn_tensor::backend::Backend>::seed(&burn_device, seed);
     let obs_dtype = DType::Tch(TchDType::F32);
     let act_dtype = DType::Tch(TchDType::F32);
 
