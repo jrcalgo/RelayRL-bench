@@ -551,3 +551,74 @@ does NOT touch the pi/vf graph or GAE math at all — e.g. cadence/schedule-leve
 RelayRL configs may still differ, which perturb the *optimization trajectory* through a
 different mechanism (changing how much data/how many gradient steps occur between evaluations)
 rather than the *per-step numerics*, and thus may not trigger the same ClipFrac signature.
+
+## Hypothesis 10: match SF's value_bootstrap=False (GAE bootstrap=0 for all episode-boundary cuts) (REJECTED, reverted)
+
+**Idea**: Read installed SF source (`sample_factory/algo/learning/learner.py`) directly instead
+of relying on convention. Found: `--value_bootstrap` defaults to `False` (not overridden in
+`sf_lunar_bench.py`), and SF's `batched_sampling.py` sets `dones = terminated | truncated` and
+`time_outs = truncated`. With `value_bootstrap=False`, the reward adjustment
+`buff["rewards"].add_(gamma * V * time_outs * dones)` is NOT applied. SF's `gae_advantages`
+multiplies the bootstrap by `(1 - dones)`, so for every done=1 step — both true terminations
+AND `max_episode_steps=500` truncations — the bootstrap is **0**. This means SF is already in
+the "zero-bootstrap for truncated episodes" regime, directly contradicting the H9 approach
+(bootstrap with V(s_T)) and also different from the original code's V(obs[end]). Setting
+`bootstrap=0.0` unconditionally across all three `compute_gae_episode` call sites in
+`replay_buffer.rs` is the exact formula match.
+
+**Change** (PPO algorithm scope, `replay_buffer.rs` only, commit `c482d06`):
+- In all three call sites (`finalize_gae_blocking`, `finalize_and_drain_blocking`,
+  `finalize_and_drain_first_n_blocking`), replaced the `if *is_truncated { V(obs[end])... }`
+  conditional with `let bootstrap = 0.0;` unconditionally — `_is_truncated` retained in the
+  destructuring but unused. This is the most literal possible match to SF's
+  `(1 - dones) * V(s_{T+1}) = 0` when `dones=1`.
+
+**Results (n=5, vs original baseline: final avg 141.02 range [131.8,162.3], AUC avg 93.54 range
+[73.22,108.50])**:
+- final = [125.90, 238.50, 98.20, 154.30, 103.70], n=5 avg **144.12** (**+2.2%** vs baseline).
+- AUC = [58.90, 86.63, 112.24, 86.15, 85.17], n=5 avg **85.82** (**-8.3%** vs baseline).
+- Extreme variability: final range 98.2-238.5 (140-point spread, far wider than baseline's 30.5)
+  and AUC range 58.90-112.24 (53-point spread, wider than baseline's 35.3, with run1's 58.90
+  setting a new all-time-low and run2's 238.50 a new all-time-high for final return).
+- min/max MeanReturn per run: (-326.2,147.4), (-370.4,241.3), (-249.4,232.6), (-188.8,160.2),
+  (-192.4,163.3) — runs 1-3 have much deeper negative dips than any baseline run (baseline min
+  floor ≈ -208), suggesting early-training instability when bootstrap=0 prevents the value
+  function from getting credit for continued play at rollout boundaries.
+- ClipFrac: 211/831, 221/832, 254/832, 162/832, 202/832 epochs nonzero (means 0.0578-0.0730,
+  9-14 epochs/run hitting `>=0.99`) — same "perturbation tax" ClipFrac signature as H6-H9.
+- Throughput: 35103/36215/36051/34363/35229 env-frames/sec, avg ≈35392 — no regression.
+
+**Verdict**: REJECTED, reverted (commit `c482d06` reverted via `git revert -n`). AUC regressed
+-8.3% while final improved only +2.2% — identical to the H6/H7 pattern (final up ~2-4%, AUC
+down ~5-8%). This is the **fifth consecutive REJECT** (H6–H10), all showing the same signature:
+graph-touching changes → ClipFrac 0.0000→~0.06 → early-training instability → AUC regression.
+Even the most source-code-grounded fix (directly matching SF's `value_bootstrap=False` with
+bootstrap=0) fails to improve AUC.
+
+**Takeaway — root-cause discovery**: During post-analysis, the `fresh_logp` mechanism in
+`independent/mod.rs:528-530` was identified as the likely root cause of **both** the
+baseline's anomalous `ClipFrac=0.0000` AND the "perturbation tax":
+
+```rust
+let fresh_logp = kernel.get_pi_logprobs(&batch.obs, ...);
+if fresh_logp.len() == batch.logp.len() {
+    batch.logp = fresh_logp;  // OVERWRITES rollout-time logp with current-epoch logp
+}
+```
+
+This replaces `logp_old` (from rollout time) with logprobs re-computed from the CURRENT network
+(at epoch-start, before SGD). As a result, the PPO ratio `exp(logp_new - logp_old)` always
+starts at ~1.0 at epoch-start (since `logp_old` was just computed from the same network state),
+making the clip inactive → `ClipFrac=0.0000`. Any change to the computation graph (H6–H10)
+perturbs LibTorch's float execution order → `fresh_logp` differs microscopically from baseline
+→ ratio≠1.0 → `ClipFrac>0` → different trajectory.
+
+Standard PPO (and SF's APPO) uses ROLLOUT-TIME `logp_old` as the fixed reference across all N
+gradient steps within an epoch, which allows the clip to actually function as an importance-
+weight correction (bounding how far the current policy can drift from the COLLECTION policy).
+RelayRL's fresh_logp makes the clip bound only intra-epoch drift from the epoch-start policy —
+which is tiny for 4 SGD steps — effectively disabling the clip entirely. **H11 hypothesis: remove
+`batch.logp = fresh_logp` and use rollout-time logp as standard PPO requires**, allowing the
+PPO clip to bound policy updates against the actual data-collection policy. This is a correction
+to a fundamental algorithmic deviation from standard PPO (and SF), in `independent/mod.rs`
+(PPO-algorithm scope), with a plausibly large effect on both ClipFrac and sample efficiency.

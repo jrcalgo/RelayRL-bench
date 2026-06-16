@@ -520,15 +520,14 @@ where
                 n,
                 self.hyperparams.normalize_returns,
             ) {
-                Some(mut batch) => {
-                    // Recompute logp_old from the current burn model — eliminates both the
-                    // ORT/burn numerical mismatch and same-epoch staleness. Values are already
-                    // refreshed above (fresh_values); this completes the picture for log-probs.
-                    // Cost: one extra CPU forward pass per epoch (no backward).
-                    let fresh_logp = kernel.get_pi_logprobs(&batch.obs, batch.obs_dim, &batch.act);
-                    if fresh_logp.len() == batch.logp.len() {
-                        batch.logp = fresh_logp;
-                    }
+                Some(batch) => {
+                    // Use rollout-time logp as logp_old (standard PPO).
+                    // The previous fresh_logp approach re-computed log-probs from the
+                    // epoch-start network, making ratio≈1.0 at epoch-start and effectively
+                    // disabling the PPO clip (ClipFrac=0.0000 in baseline). Standard PPO
+                    // and SF's APPO keep logp_old fixed from rollout time so the clip
+                    // bounds policy drift relative to the data-collection policy.
+                    // Values are still fresh (fresh_values above); only logp_old changes.
                     jobs.push((kernel, batch))
                 }
                 None => {
