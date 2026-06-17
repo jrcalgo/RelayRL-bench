@@ -1243,7 +1243,8 @@ H24 baseline (final avg 158.06, AUC avg 138.56, n=5).
 - Run 1 (PPO_SEED=1): final=160.90, AUC=134.19, N=831
 - Run 2 (PPO_SEED=2): final=168.10, AUC=142.00, N=831
 - Run 3 (PPO_SEED=3): final=163.10, AUC=146.23, N=831
-- Run 4 (PPO_SEED=4): IN PROGRESS
+- Run 4 (PPO_SEED=4): final=99.80, AUC=135.52, N=831
+- Run 5 (PPO_SEED=5): IN PROGRESS
 
 **Status**: PAUSED to make room for Hypothesis 24 (a combined re-test, see below), which needs
 a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
