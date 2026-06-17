@@ -1223,7 +1223,7 @@ reusable infrastructure — a future hypothesis could revisit this toggle in com
 other changes (e.g. a higher `traj_per_epoch` to soften the early-AUC cost, or pairing with
 an LR/clip adjustment tuned for the more consistent batch composition).
 
-## Hypothesis 23 (retry of H13): GAE lambda 0.97 (IN PROGRESS, n=0/5)
+## Hypothesis 23 (retry of H13): GAE lambda 0.97 (IN PROGRESS, n=1/5)
 
 **Idea**: H13's original n=5 test of lam=0.97 (REJECTED: final-5.8%, AUC-1.0% vs H11 baseline)
 predates the `PPO_SEED` multi-seed protocol — its 5 "runs" varied only by env-side randomness,
@@ -1234,5 +1234,6 @@ retry round (H21 was the first; this is the second).
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const LAM: f32 = 0.98` → `const LAM: f32 = 0.97`
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=1/5 in progress)**:
+- Run 1 (PPO_SEED=1): final=157.00, AUC=110.50, N=829
+- Run 2 (PPO_SEED=2): IN PROGRESS
