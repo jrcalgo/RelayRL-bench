@@ -1242,7 +1242,7 @@ retry round (H21 was the first; this is the second).
 a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
 at `PPO_SEED=3` (with `LAM` set back to `0.97`) once H24 concludes.
 
-## Hypothesis 24: combined re-test (sync_epoch_boundary + normalize_obs + orthogonal_init + adam_eps) (IN PROGRESS, n=0/5)
+## Hypothesis 24: combined re-test (sync_epoch_boundary + normalize_obs + orthogonal_init + adam_eps) (ACCEPTED, n=5/5)
 
 **Idea**: Four levers were each tested individually and each REJECTED or showed no clear effect
 alone — H22 (`sync_epoch_boundary`: final +14.7%, AUC -1.8%), H3 (`normalize_obs`: final +6%
@@ -1271,9 +1271,20 @@ independently after H24's verdict.
 **Baseline for comparison**: H19 multi-seed, final avg 135.64 (range [52.70,193.70]), AUC avg
 127.72 (range [115.79,139.46]), n=5, PPO_SEED=1..5.
 
-**Results (n=1/5 in progress)**:
+**Results (n=5/5)**:
 - Run 1 (PPO_SEED=1): final=163.60, AUC=148.05, N=831
 - Run 2 (PPO_SEED=2): final=163.70, AUC=139.78, N=831
 - Run 3 (PPO_SEED=3): final=162.20, AUC=140.80, N=831
 - Run 4 (PPO_SEED=4): final=142.10, AUC=126.71, N=831
-- Run 5 (PPO_SEED=5): IN PROGRESS
+- Run 5 (PPO_SEED=5): final=158.70, AUC=137.46, N=831
+
+**Aggregate**: final avg 158.06 (range [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]),
+n=5, PPO_SEED=1..5.
+
+**Verdict: ACCEPTED.** final +16.5% (135.64 -> 158.06), AUC +8.5% (127.72 -> 138.56) vs the H19
+baseline — both metrics improve, satisfying the both-must-improve rule, and every one of the 4
+component levers individually failed or showed pure noise. This is the first hypothesis since
+H19 to pass and becomes the new baseline going forward (`SYNC_EPOCH_BOUNDARY=true`,
+`normalize_obs=true`, `POLICY_INIT_GAIN=1.0` orthogonal init, Adam `epsilon=1e-6` all retained).
+H23 (lam=0.97 retest, paused at n=2/5) resumes next, now evaluated against this H24 baseline
+instead of H19's.
