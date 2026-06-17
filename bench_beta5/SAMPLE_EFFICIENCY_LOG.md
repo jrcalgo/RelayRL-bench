@@ -1017,3 +1017,29 @@ is a *measurement correction*, not a regression — no code or hyperparameter ch
 old and new H15 measurements, only the seed-sampling protocol.
 
 **Verdict**: Re-baseline established (not an ACCEPT/REJECT — this is the reference point itself).
+
+## Hypothesis 19: learning rate 2.5e-4 → 3.5e-4 (IN PROGRESS, n=0/5)
+
+**Idea**: H18 tested LR=5e-4 (2x) and showed the same bimodal collapse signature as H17
+(clip=0.3) — under the old single-seed protocol, 2/5 runs collapsed. Now that H15's own
+baseline has been re-measured under multi-seed sampling and shown to be *stable* (no
+bimodality, ClipFrac 0.077-0.095 across all 5 seeds), the open question is whether a smaller LR
+increase lands inside the stable trust-region budget rather than overshooting it the way 5e-4
+did. 3.5e-4 is a 40% increase (vs H18's 100% increase) — large enough to meaningfully speed up
+convergence if the previous result's primary failure mode was step-size magnitude, small enough
+to plausibly stay within the region where clip=0.2 fully absorbs per-iter drift across all 6
+iters without the runaway dynamics seen at 5e-4. This is tested under the new `PPO_SEED=1..5`
+protocol directly, so the n=5 sample is informative about both magnitude and stability
+simultaneously. Single two-constant change (pi_lr and vf_lr together), `clip_ratio` stays at 0.2.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const PI_LR: f64 = 2.5e-4` → `const PI_LR: f64 = 3.5e-4`
+- `const VF_LR: f64 = 2.5e-4` → `const VF_LR: f64 = 3.5e-4`
+
+**Baseline for comparison**: H15 multi-seed re-baseline, final avg 126.30 (range
+[114.20,144.10]), AUC avg 113.10 (range [103.71,122.15]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
+
+**Verdict**: PENDING (n=5 required)
