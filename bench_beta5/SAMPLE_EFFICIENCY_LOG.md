@@ -1161,7 +1161,7 @@ reward versus clip=0.2 at the current LR=3.5e-4 baseline.
 clip_ratio=0.2 remains optimal on this axis; no code revert needed since CLIP_RATIO was only
 changed for this retry and is being reset to 0.2 now.
 
-## Hypothesis 22: synchronous epoch boundary (collect/train barrier) (IN PROGRESS, n=4/5)
+## Hypothesis 22: synchronous epoch boundary (collect/train barrier) (REJECTED, n=5/5)
 
 **Idea**: RelayRL's learner currently overlaps trajectory collection with SGD — `train_ppo`
 spawns each epoch's training as a background job and keeps consuming incoming trajectories via
@@ -1190,4 +1190,35 @@ criterion by itself.
 - Run 2 (PPO_SEED=2): final=156.80, AUC=127.42, N=831, env-frames/sec=37646 (container restart mid-run forced a clean restart from scratch; relaunched, completed normally)
 - Run 3 (PPO_SEED=3): final=154.60, AUC=115.67, N=831, env-frames/sec=38573
 - Run 4 (PPO_SEED=4): final=139.10, AUC=111.86, N=831, env-frames/sec=38232
-- Run 5 (PPO_SEED=5): IN PROGRESS
+- Run 5 (PPO_SEED=5): final=154.00, AUC=127.42, N=831, env-frames/sec=38282
+
+**n=5 averages**: final avg = 155.52 (vs baseline 135.64, **+14.7%**), AUC avg = 125.43
+(vs baseline 127.72, **-1.8%**).
+
+**ClipFrac diagnostics** (mean / nonzero%): run1=0.1146 (54%), run2=0.1271 (54%),
+run3=0.1332 (57%), run4=0.1526 (62%), run5=0.1139 (50%) — all runs show healthy nonzero
+clip activity throughout training, no pathological collapse in any run (unlike H20/H21
+which had outright collapsed seeds). This run set has the most consistent/least-bimodal
+spread of any hypothesis tested this session — directly confirming the reproducibility
+hypothesis: the synchronous barrier eliminates scheduler-timing-driven batch-composition
+variance, giving tighter run-to-run consistency (no collapsed seeds in 5/5).
+
+**Throughput**: env-frames/sec = [34976, 37646, 38573, 38232, 38282], avg ≈ 37542 — only
+modestly below the ~39-41k async baseline (run 1's 34976 was the low outlier, partly due to
+a container restart forcing a mid-run relaunch of run 2 right after). The throughput cost is
+smaller than anticipated; overlap between collection and training was apparently buying less
+wall-clock benefit than expected, since the sync barrier's stall is bounded by `traj_per_epoch`
+channel capacity, not a full-collection-then-train serialization.
+
+**VERDICT: REJECTED** — despite a strong final-return improvement (+14.7%) and the
+hoped-for reproducibility win (tighter spread, no collapsed seeds), AUC averages slightly
+*worse* (-1.8%), failing the "both final AND AUC must improve" rule. The sync barrier seems
+to trade slower early-training progress (higher AUC weight on early epochs) for a stronger
+late-training result and much more consistent convergence — an interesting characterization,
+but not a net sample-efficiency win under the current ACCEPT criterion. Reverting
+`SYNC_EPOCH_BOUNDARY` to `false` in `bench_lunar_ppo_tch.rs`; the framework-side
+`sync_epoch_boundary` flag and macro refactor in `relayrl_framework`/`relayrl_algorithms`
+are left in place (default `false`, zero behavioral change) since they are validated,
+reusable infrastructure — a future hypothesis could revisit this toggle in combination with
+other changes (e.g. a higher `traj_per_epoch` to soften the early-AUC cost, or pairing with
+an LR/clip adjustment tuned for the more consistent batch composition).
