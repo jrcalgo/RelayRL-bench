@@ -1161,7 +1161,7 @@ reward versus clip=0.2 at the current LR=3.5e-4 baseline.
 clip_ratio=0.2 remains optimal on this axis; no code revert needed since CLIP_RATIO was only
 changed for this retry and is being reset to 0.2 now.
 
-## Hypothesis 22: synchronous epoch boundary (collect/train barrier) (IN PROGRESS, n=1/5)
+## Hypothesis 22: synchronous epoch boundary (collect/train barrier) (IN PROGRESS, n=2/5)
 
 **Idea**: RelayRL's learner currently overlaps trajectory collection with SGD — `train_ppo`
 spawns each epoch's training as a background job and keeps consuming incoming trajectories via
@@ -1185,6 +1185,7 @@ mode is expected to show measurably lower throughput than the ~39-41k env-frames
 since collection no longer overlaps training; this is an accepted tradeoff, not a rejection
 criterion by itself.
 
-**Results (n=1/5 in progress)**:
+**Results (n=2/5 in progress)**:
 - Run 1 (PPO_SEED=1): final=173.10, AUC=144.79, N=831, env-frames/sec=34976 (vs ~39-41k async baseline)
-- Run 2 (PPO_SEED=2): IN PROGRESS
+- Run 2 (PPO_SEED=2): final=156.80, AUC=127.42, N=831, env-frames/sec=37646 (container restart mid-run forced a clean restart from scratch; relaunched, completed normally)
+- Run 3 (PPO_SEED=3): IN PROGRESS
