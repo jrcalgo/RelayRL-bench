@@ -122,7 +122,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
             epoch_count.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
 
-        let (max_episode_steps, rollout_len, traj_per_epoch, normalize_obs, device) =
+        let (max_episode_steps, rollout_len, traj_per_epoch, normalize_obs, sync_epoch_boundary, device) =
             match &trainer_spec {
                 PPOTrainerSpec::PPO {
                     args, hyperparams, ..
@@ -139,6 +139,7 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                         p.rollout_len,
                         p.traj_per_epoch as usize,
                         p.normalize_obs,
+                        p.sync_epoch_boundary,
                         args.device.clone(),
                     )
                 }
@@ -181,51 +182,78 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                     let mut trainer = trainer;
                     let mut pending_train: Option<tokio::task::JoinHandle<EpochTrainOutput<B, KindIn, KindOut, Pi>>> = None;
 
+                    // Shared "epoch landed" handling: log + refresh models + republish kernel
+                    // snapshot. Used by both the overlapped and synchronous select branches to
+                    // avoid tripling this block. A macro (not an async closure) is used because
+                    // the block does `.await` while holding `&mut trainer` across awaits.
+                    macro_rules! land_epoch {
+                        ($output:expr) => {{
+                            log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, $output, &learner_epoch_count);
+                            refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
+                            let next_kernel_snapshot = trainer
+                                .get_ppo_actor_kernel()
+                                .map_err(|e| TrainingError::TrainerError(e.to_string()))?
+                                .to_arc_snapshot();
+                            learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
+                        }};
+                    }
+
                     loop {
                         if let Some(ref mut handle) = pending_train {
-                            tokio::select! {
-                                _ = async {
-                                    if let Some(ref mut rx) = shutdown_rx {
-                                        let _ = rx.recv().await;
-                                    } else {
-                                        std::future::pending::<()>().await;
-                                    }
-                                } => {
-                                    break;
-                                }
-
-                                result = handle => {
-                                    let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
-
-                                    log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, output, &learner_epoch_count);
-                                    refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
-                                    let next_kernel_snapshot = trainer
-                                        .get_ppo_actor_kernel()
-                                        .map_err(|e| TrainingError::TrainerError(e.to_string()))?
-                                        .to_arc_snapshot();
-                                    learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
-
-                                    pending_train = trainer.start_epoch_training();
-                                }
-
-                                maybe_traj = traj_rx.recv() => {
-                                    match maybe_traj {
-                                        Some(traj) => {
-                                            trainer.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                            if sync_epoch_boundary {
+                                // Synchronous epoch boundary: do NOT poll traj_rx while training
+                                // is in flight. The producer loop's traj_tx.send().await will
+                                // naturally block once the bounded channel (capacity
+                                // traj_per_epoch) fills, creating a true collect -> train ->
+                                // collect barrier with zero changes to the producer loop.
+                                tokio::select! {
+                                    _ = async {
+                                        if let Some(ref mut rx) = shutdown_rx {
+                                            let _ = rx.recv().await;
+                                        } else {
+                                            std::future::pending::<()>().await;
                                         }
-                                        None => {
-                                            if let Some(handle) = pending_train.take() &&
-                                                let Ok(output) = handle.await {
-                                                    log_epoch::<B, KindIn, KindOut, Pi>(&mut trainer, output, &learner_epoch_count);
-                                                    refresh_models(&learner_runtime, &actor_id, &mut trainer, &learner_device).await?;
-                                                    let next_kernel_snapshot = trainer
-                                                        .get_ppo_actor_kernel()
-                                                        .map_err(|e| TrainingError::TrainerError(e.to_string()))?
-                                                        .to_arc_snapshot();
-                                                    learner_kernel_snapshot.store(Arc::new(next_kernel_snapshot));
-                                                }
+                                    } => {
+                                        break;
+                                    }
 
-                                            break;
+                                    result = handle => {
+                                        let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
+                                        land_epoch!(output);
+                                        pending_train = trainer.start_epoch_training();
+                                    }
+                                }
+                            } else {
+                                tokio::select! {
+                                    _ = async {
+                                        if let Some(ref mut rx) = shutdown_rx {
+                                            let _ = rx.recv().await;
+                                        } else {
+                                            std::future::pending::<()>().await;
+                                        }
+                                    } => {
+                                        break;
+                                    }
+
+                                    result = handle => {
+                                        let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
+                                        land_epoch!(output);
+                                        pending_train = trainer.start_epoch_training();
+                                    }
+
+                                    maybe_traj = traj_rx.recv() => {
+                                        match maybe_traj {
+                                            Some(traj) => {
+                                                trainer.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
+                                            }
+                                            None => {
+                                                if let Some(handle) = pending_train.take() &&
+                                                    let Ok(output) = handle.await {
+                                                        land_epoch!(output);
+                                                    }
+
+                                                break;
+                                            }
                                         }
                                     }
                                 }

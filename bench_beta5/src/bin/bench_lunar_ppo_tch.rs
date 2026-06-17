@@ -60,6 +60,7 @@ const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
+const SYNC_EPOCH_BOUNDARY: bool = false; // opt-in: blocks collection during training (SF-style barrier)
 
 // 512 trajs/epoch x 512 envs -> ~90 loop iters/epoch
 const TRAJ_PER_EPOCH: u64 = 512;
@@ -99,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  loop_steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  vf_coef={VF_COEF}");
     println!(
-        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}"
+        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}"
     );
     println!("  {num_cores} logical cores  seed={seed}");
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -173,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
         max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
         rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),
+        sync_epoch_boundary: SYNC_EPOCH_BOUNDARY,
         ..Default::default()
     };
     let trainer_spec = PPOTrainerSpec::ppo(

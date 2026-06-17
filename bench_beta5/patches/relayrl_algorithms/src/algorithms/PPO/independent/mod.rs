@@ -107,6 +107,12 @@ pub struct IPPOParams {
     pub min_steps_per_epoch: Option<u64>,
     pub max_buffered_episodes: Option<u64>,
     pub rollout_len: Option<usize>,
+    /// When true, the learner blocks on the in-flight training job instead of racing it
+    /// against incoming trajectories (no `traj_rx` arm in the select while training is
+    /// pending). Backpressure from the bounded mpsc channel then stalls the producer loop,
+    /// yielding a synchronous collect->train->collect barrier per epoch (SF-style).
+    /// Default false preserves today's overlapped behavior byte-for-byte.
+    pub sync_epoch_boundary: bool,
 }
 
 impl Default for IPPOParams {
@@ -132,6 +138,7 @@ impl Default for IPPOParams {
             min_steps_per_epoch: None,
             max_buffered_episodes: None,
             rollout_len: None,
+            sync_epoch_boundary: false,
         }
     }
 }
@@ -965,5 +972,10 @@ mod tests {
 
         assert!(params.clip_ratio > 0.0);
         assert!(params.target_kl > 0.0);
+    }
+
+    #[test]
+    fn sync_epoch_boundary_defaults_to_false() {
+        assert!(!IPPOParams::default().sync_epoch_boundary);
     }
 }
