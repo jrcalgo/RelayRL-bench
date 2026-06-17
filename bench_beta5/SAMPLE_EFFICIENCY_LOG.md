@@ -1332,4 +1332,5 @@ both true terminations and `max_episode_steps` truncations).
 
 **Results (n=1/5 in progress)**:
 - Run 1 (PPO_SEED=1): final=130.70, AUC=131.76, N=831
-- Run 2 (PPO_SEED=2): IN PROGRESS
+- Run 2 (PPO_SEED=2): final=93.80, AUC=88.51, N=831
+- Run 3 (PPO_SEED=3): IN PROGRESS
