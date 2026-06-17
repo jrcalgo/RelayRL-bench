@@ -1330,5 +1330,6 @@ both true terminations and `max_episode_steps` truncations).
 **Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=1/5 in progress)**:
+- Run 1 (PPO_SEED=1): final=130.70, AUC=131.76, N=831
+- Run 2 (PPO_SEED=2): IN PROGRESS
