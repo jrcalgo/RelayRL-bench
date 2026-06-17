@@ -60,7 +60,7 @@ const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
-const SYNC_EPOCH_BOUNDARY: bool = false; // opt-in: blocks collection during training (SF-style barrier)
+const SYNC_EPOCH_BOUNDARY: bool = true; // H22: testing SF-style sync collect->train->collect barrier
 
 // 512 trajs/epoch x 512 envs -> ~90 loop iters/epoch
 const TRAJ_PER_EPOCH: u64 = 512;

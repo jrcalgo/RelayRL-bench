@@ -1160,3 +1160,30 @@ reward versus clip=0.2 at the current LR=3.5e-4 baseline.
 **VERDICT: REJECTED** — final -8.7% (fails ACCEPT threshold even though AUC improved). Confirms
 clip_ratio=0.2 remains optimal on this axis; no code revert needed since CLIP_RATIO was only
 changed for this retry and is being reset to 0.2 now.
+
+## Hypothesis 22: synchronous epoch boundary (collect/train barrier) (IN PROGRESS, n=0/5)
+
+**Idea**: RelayRL's learner currently overlaps trajectory collection with SGD — `train_ppo`
+spawns each epoch's training as a background job and keeps consuming incoming trajectories via
+`tokio::select!` while it runs. Sample Factory instead pauses collection entirely during each
+learner step (true synchronous rollout). This overlap is suspected to be part of RelayRL's
+sample-efficiency gap vs SF, and is also a likely source of run-to-run non-reproducibility
+(batch composition varies with scheduler timing). Added a new opt-in `sync_epoch_boundary` flag
+to `IPPOParams` (default false, preserving existing behavior byte-for-byte) that, when true,
+makes the learner block on the in-flight training job instead of racing it against `traj_rx` —
+relying on the bounded mpsc channel's backpressure to stall the producer (env-stepping) loop
+until training completes, with zero changes to the producer loop itself.
+
+**Change**:
+- `bench_beta5/patches/relayrl_algorithms/.../independent/mod.rs`: new `IPPOParams.sync_epoch_boundary: bool` field, default `false`.
+- `bench_beta5/patches/relayrl_framework/.../training/mod.rs`: `train_ppo`'s learner loop branches on the flag — `false` keeps the existing 3-arm select (shutdown/handle/traj_rx), `true` uses a 2-arm select (shutdown/handle only) while training is pending.
+- `bench_beta5/src/bin/bench_lunar_ppo_tch.rs`: `const SYNC_EPOCH_BOUNDARY: bool = true;` for this test (all other constants at current baseline: LR=3.5e-4, clip=0.2).
+
+**Baseline for comparison**: H19 multi-seed, final avg 135.64, AUC avg 127.72, n=5, PPO_SEED=1..5.
+Also tracking `loop steps/sec` / `env-frames/sec` as a secondary throughput diagnostic — sync
+mode is expected to show measurably lower throughput than the ~39-41k env-frames/sec baseline,
+since collection no longer overlaps training; this is an accepted tradeoff, not a rejection
+criterion by itself.
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
