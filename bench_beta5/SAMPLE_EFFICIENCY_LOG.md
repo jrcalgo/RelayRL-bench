@@ -1067,3 +1067,28 @@ clip=0.2, ent=0.01, lam=0.98, **LR=3.5e-4**. This is now the reference point for
 becomes unstable at 5e-4 (H18). A natural next step is to probe between 3.5e-4 and 5e-4 (e.g.
 4e-4) to find the instability threshold more precisely, or to explore an orthogonal axis
 (gamma) now that LR has yielded the first ACCEPT since H15.
+
+## Hypothesis 20: learning rate 3.5e-4 → 4e-4 (IN PROGRESS, n=0/5)
+
+**Idea**: H19 (LR=3.5e-4) was accepted with one collapse run out of five; H18 (LR=5e-4) showed
+two collapse runs out of five. This suggests the collapse *rate* increases monotonically with
+LR somewhere between 3.5e-4 and 5e-4, and probing a point in between (4e-4, roughly the
+midpoint) should clarify whether: (a) the collapse rate keeps climbing smoothly with LR, in
+which case 4e-4 is expected to land between 1 and 2 collapses out of five with intermediate
+final/AUC, or (b) there's a sharper threshold near 5e-4, in which case 4e-4 should look more
+like H19 (mostly stable, net ACCEPT-shaped). Either outcome is informative: if 4e-4 still beats
+H19's average, it becomes the new baseline; if it underperforms H19 despite no worse
+instability, the LR axis is likely already near its local optimum at 3.5e-4. Single
+two-constant change (pi_lr and vf_lr together), all other H19 settings unchanged.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const PI_LR: f64 = 3.5e-4` → `const PI_LR: f64 = 4e-4`
+- `const VF_LR: f64 = 3.5e-4` → `const VF_LR: f64 = 4e-4`
+
+**Baseline for comparison**: H19 multi-seed, final avg 135.64 (range [52.70,193.70]), AUC avg
+127.72 (range [115.79,139.46]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
+
+**Verdict**: PENDING (n=5 required)
