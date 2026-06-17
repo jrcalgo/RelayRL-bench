@@ -1274,4 +1274,5 @@ independently after H24's verdict.
 **Results (n=1/5 in progress)**:
 - Run 1 (PPO_SEED=1): final=163.60, AUC=148.05, N=831
 - Run 2 (PPO_SEED=2): final=163.70, AUC=139.78, N=831
-- Run 3 (PPO_SEED=3): IN PROGRESS
+- Run 3 (PPO_SEED=3): final=162.20, AUC=140.80, N=831
+- Run 4 (PPO_SEED=4): IN PROGRESS
