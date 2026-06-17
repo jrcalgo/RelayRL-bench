@@ -1068,7 +1068,7 @@ becomes unstable at 5e-4 (H18). A natural next step is to probe between 3.5e-4 a
 4e-4) to find the instability threshold more precisely, or to explore an orthogonal axis
 (gamma) now that LR has yielded the first ACCEPT since H15.
 
-## Hypothesis 20: learning rate 3.5e-4 → 4e-4 (IN PROGRESS, n=0/5)
+## Hypothesis 20: learning rate 3.5e-4 → 4e-4 (REJECTED, n=5/5)
 
 **Idea**: H19 (LR=3.5e-4) was accepted with one collapse run out of five; H18 (LR=5e-4) showed
 two collapse runs out of five. This suggests the collapse *rate* increases monotonically with
@@ -1088,7 +1088,25 @@ two-constant change (pi_lr and vf_lr together), all other H19 settings unchanged
 **Baseline for comparison**: H19 multi-seed, final avg 135.64 (range [52.70,193.70]), AUC avg
 127.72 (range [115.79,139.46]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=5/5)**:
+- Run 1 (PPO_SEED=1): final=20.90, AUC=119.29
+- Run 2 (PPO_SEED=2): final=155.80, AUC=130.61
+- Run 3 (PPO_SEED=3): final=115.70, AUC=113.75
+- Run 4 (PPO_SEED=4): final=32.90, AUC=121.91
+- Run 5 (PPO_SEED=5): final=139.80, AUC=123.85
 
-**Verdict**: PENDING (n=5 required)
+n=5 avg: **final=93.02 (-31.4% vs H19 baseline 135.64)**, **AUC=121.88 (-4.6% vs H19 baseline 127.72)**
+
+ClipFrac diagnostics (mean / nonzero%): run1=0.1011 (88%), run2=0.0942 (82%), run3=0.1007 (81%),
+run4=0.1036 (86%), run5=0.1179 (89%) — clip activity is higher and more uniform across all 5
+seeds than H19's, consistent with a less stable optimization regime.
+
+**Outcome**: Two of five runs collapsed severely (20.90, 32.90), versus one collapse out of five
+for H19 (52.70). This resolves the H20 hypothesis's question (b) in favor of: the collapse rate
+increases smoothly with LR rather than there being a sharp threshold near 5e-4 — 4e-4 already
+shows roughly double H19's collapse rate and sits worse than H19 on both final and AUC despite
+being below H18's 5e-4.
+
+**VERDICT: REJECTED** — final -31.4%, AUC -4.6%, both worse than H19 baseline. Confirms 3.5e-4
+is at or near the local optimum on the LR axis; reverting `PI_LR`/`VF_LR` to 3.5e-4 (H19's
+accepted value), which remains the active baseline for H21+.
