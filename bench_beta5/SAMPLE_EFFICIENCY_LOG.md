@@ -1223,7 +1223,7 @@ reusable infrastructure — a future hypothesis could revisit this toggle in com
 other changes (e.g. a higher `traj_per_epoch` to soften the early-AUC cost, or pairing with
 an LR/clip adjustment tuned for the more consistent batch composition).
 
-## Hypothesis 23 (retry of H13): GAE lambda 0.97 (RESTARTED, n=0/5)
+## Hypothesis 23 (retry of H13): GAE lambda 0.97 (REJECTED, n=5/5)
 
 **Idea**: H13's original n=5 test of lam=0.97 (REJECTED: final-5.8%, AUC-1.0% vs H11 baseline)
 predates the `PPO_SEED` multi-seed protocol — its 5 "runs" varied only by env-side randomness,
@@ -1244,7 +1244,16 @@ H24 baseline (final avg 158.06, AUC avg 138.56, n=5).
 - Run 2 (PPO_SEED=2): final=168.10, AUC=142.00, N=831
 - Run 3 (PPO_SEED=3): final=163.10, AUC=146.23, N=831
 - Run 4 (PPO_SEED=4): final=99.80, AUC=135.52, N=831
-- Run 5 (PPO_SEED=5): IN PROGRESS
+- Run 5 (PPO_SEED=5): final=161.70, AUC=143.21, N=831
+
+**Aggregate**: final avg 150.72 (range [99.80,168.10]), AUC avg 140.23 (range [134.19,146.23]),
+n=5, PPO_SEED=1..5.
+
+**Verdict: REJECTED.** final -4.6% (158.06 -> 150.72), AUC +1.2% (138.56 -> 140.23) vs the H24
+baseline — AUC ticks up slightly but final declines (driven largely by run 4's late dip to
+99.80), failing the both-must-improve rule for the second time (H13 and now this retest both
+reject lam=0.97). `LAM` reverts to `0.98`. H24's baseline (final avg 158.06, AUC avg 138.56)
+stands.
 
 **Status**: PAUSED to make room for Hypothesis 24 (a combined re-test, see below), which needs
 a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
