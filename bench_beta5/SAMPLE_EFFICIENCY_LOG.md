@@ -1271,5 +1271,6 @@ independently after H24's verdict.
 **Baseline for comparison**: H19 multi-seed, final avg 135.64 (range [52.70,193.70]), AUC avg
 127.72 (range [115.79,139.46]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=1/5 in progress)**:
+- Run 1 (PPO_SEED=1): final=163.60, AUC=148.05, N=831
+- Run 2 (PPO_SEED=2): IN PROGRESS
