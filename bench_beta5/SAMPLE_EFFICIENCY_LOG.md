@@ -1223,20 +1223,24 @@ reusable infrastructure — a future hypothesis could revisit this toggle in com
 other changes (e.g. a higher `traj_per_epoch` to soften the early-AUC cost, or pairing with
 an LR/clip adjustment tuned for the more consistent batch composition).
 
-## Hypothesis 23 (retry of H13): GAE lambda 0.97 (PAUSED, n=2/5 — resuming after H24)
+## Hypothesis 23 (retry of H13): GAE lambda 0.97 (RESTARTED, n=0/5)
 
 **Idea**: H13's original n=5 test of lam=0.97 (REJECTED: final-5.8%, AUC-1.0% vs H11 baseline)
 predates the `PPO_SEED` multi-seed protocol — its 5 "runs" varied only by env-side randomness,
 not network-init seed, so its variance estimate is unreliable. Retesting under `PPO_SEED=1..5`
-against the current H19 baseline (final avg 135.64, AUC avg 127.72) as part of the queued Tier 1
-retry round (H21 was the first; this is the second).
+as part of the queued Tier 1 retry round (H21 was the first; this is the second).
 
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const LAM: f32 = 0.98` → `const LAM: f32 = 0.97`
 
-**Results (n=2/5, paused)**:
-- Run 1 (PPO_SEED=1): final=157.00, AUC=110.50, N=829
-- Run 2 (PPO_SEED=2): final=53.00, AUC=116.83, N=829
+**Restart note**: the original n=2/5 attempt (run1: final=157.00/AUC=110.50; run2: final=53.00/
+AUC=116.83) was run *before* H24 was accepted, i.e. without `sync_epoch_boundary`,
+`normalize_obs`, orthogonal init, or `adam_eps=1e-6` active. Those two runs are not comparable
+to a post-H24 baseline, so they are discarded and H23 restarts from `PPO_SEED=1` on top of the
+H24 baseline (final avg 158.06, AUC avg 138.56, n=5).
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
 
 **Status**: PAUSED to make room for Hypothesis 24 (a combined re-test, see below), which needs
 a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
