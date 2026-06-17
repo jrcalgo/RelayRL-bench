@@ -1305,3 +1305,30 @@ H19 to pass and becomes the new baseline going forward (`SYNC_EPOCH_BOUNDARY=tru
 `normalize_obs=true`, `POLICY_INIT_GAIN=1.0` orthogonal init, Adam `epsilon=1e-6` all retained).
 H23 (lam=0.97 retest, paused at n=2/5) resumes next, now evaluated against this H24 baseline
 instead of H19's.
+
+## Hypothesis 25 (retry of H10): match SF's value_bootstrap=False (bootstrap=0 for all episode-boundary cuts) (IN PROGRESS, n=0/5)
+
+**Idea**: H10's original n=5 test of this exact change (REJECTED: final+2.2%, AUC-8.3%) — along
+with H6, H7, H8, H9, all also REJECTED with the same "ClipFrac 0.0000 -> ~0.05-0.08 perturbation
+tax" signature — predates H11's fix of the `fresh_logp` bug. Pre-H11, `batch.logp` was
+overwritten with epoch-start-network logprobs instead of true rollout-time logp_old, which made
+the PPO ratio start at ~1.0 every epoch and rendered the clip nearly inert (`ClipFrac=0.0000`
+baseline). H11 (ACCEPTED) restored proper rollout-time logp_old, meaning the PPO clip now
+actually functions as the importance-weight correction it's supposed to be. Every Tier-2
+graph-touching hypothesis (H6-H10) was evaluated against the *pre-H11* broken-clip baseline, so
+their rejections may not hold under the current (H11+H15+H19+H24-stacked) baseline where the
+clip mechanism works correctly. Retesting H10 first since it's the most literal, source-grounded
+match to SF's actual behavior (`value_bootstrap=False` ⇒ bootstrap=0 for all `dones=1` steps,
+both true terminations and `max_episode_steps` truncations).
+
+**Change** (`replay_buffer.rs` only, PPO algorithm scope):
+- In all three call sites (`finalize_gae_blocking`, `finalize_and_drain_blocking`,
+  `finalize_and_drain_first_n_blocking`), replaced the `if is_truncated { V(s_end)... }
+  else { 0.0 }` conditional with unconditional `bootstrap = 0.0`. Identical to H10's original
+  implementation.
+
+**Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
+138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
