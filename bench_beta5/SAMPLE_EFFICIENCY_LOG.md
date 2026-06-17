@@ -1239,8 +1239,9 @@ AUC=116.83) was run *before* H24 was accepted, i.e. without `sync_epoch_boundary
 to a post-H24 baseline, so they are discarded and H23 restarts from `PPO_SEED=1` on top of the
 H24 baseline (final avg 158.06, AUC avg 138.56, n=5).
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=1/5 in progress)**:
+- Run 1 (PPO_SEED=1): final=160.90, AUC=134.19, N=831
+- Run 2 (PPO_SEED=2): IN PROGRESS
 
 **Status**: PAUSED to make room for Hypothesis 24 (a combined re-test, see below), which needs
 a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
