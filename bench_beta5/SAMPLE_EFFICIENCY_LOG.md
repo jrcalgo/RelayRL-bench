@@ -1122,7 +1122,7 @@ reverted-code changes (Tier 2) if time permits. Each retry uses PPO_SEED=1..5 an
 against the current active baseline (H19 multi-seed: final 135.64, AUC 127.72) rather than the
 original single-seed baseline it was compared against historically.
 
-## Hypothesis 21 (retry of H17): clip_ratio 0.2 → 0.3 (IN PROGRESS, n=0/5)
+## Hypothesis 21 (retry of H17): clip_ratio 0.2 → 0.3 (REJECTED, n=5/5)
 
 **Idea**: H17 originally showed extreme bimodality under the single-seed protocol (185+ reward
 in some "runs", collapse to 48-71 in others) despite using the same SEED=1 init every time —
@@ -1136,5 +1136,27 @@ reflect the hypothesis's actual merit.
 
 **Baseline for comparison**: H19 multi-seed, final avg 135.64, AUC avg 127.72, n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=5/5)**:
+- Run 1 (PPO_SEED=1): final=141.10, AUC=117.76
+- Run 2 (PPO_SEED=2): final=43.20, AUC=131.41
+- Run 3 (PPO_SEED=3): final=143.60, AUC=142.25
+- Run 4 (PPO_SEED=4): final=174.80, AUC=143.69
+- Run 5 (PPO_SEED=5): final=116.60, AUC=137.00
+
+n=5 avg: **final=123.86 (-8.7% vs H19 baseline 135.64)**, **AUC=134.42 (+5.2% vs H19 baseline 127.72)**
+
+ClipFrac diagnostics (mean): run1=0.0818, run2=0.0680, run3=0.0828, run4=0.0773, run5=0.0740 —
+notably tighter and more uniform than H17's old single-seed-repeated bimodal pattern; only one
+of five runs (seed=2, final=43.20) showed a real collapse, similar in magnitude to H19's own
+single collapse (seed=4, final=52.70).
+
+**Outcome**: The seed-noise hypothesis partially held — H21 is no longer wildly bimodal the way
+H17 looked under the old protocol (185+ vs 48-71 swings driven by scheduling noise alone). But
+the *true* multi-seed signal is still mixed: AUC improves (+5.2%) while final regresses (-8.7%),
+driven mostly by one collapse run (seed=2). This fails the "both final AND AUC must improve"
+rule outright, regardless of bimodality concerns — clip=0.3 is a genuine net-negative on final
+reward versus clip=0.2 at the current LR=3.5e-4 baseline.
+
+**VERDICT: REJECTED** — final -8.7% (fails ACCEPT threshold even though AUC improved). Confirms
+clip_ratio=0.2 remains optimal on this axis; no code revert needed since CLIP_RATIO was only
+changed for this retry and is being reset to 0.2 now.
