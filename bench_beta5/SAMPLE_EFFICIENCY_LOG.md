@@ -1110,3 +1110,31 @@ being below H18's 5e-4.
 **VERDICT: REJECTED** — final -31.4%, AUC -4.6%, both worse than H19 baseline. Confirms 3.5e-4
 is at or near the local optimum on the LR axis; reverting `PI_LR`/`VF_LR` to 3.5e-4 (H19's
 accepted value), which remains the active baseline for H21+.
+
+## Retry round: pre-seed-fix rejected hypotheses
+
+All hypotheses below (H1-H18, excluding H15/H19 which are already multi-seed) were originally
+tested under the old single-seed protocol (`const SEED: u64 = 1` hardcoded, scheduling-noise-only
+variance across "5 runs"). H17 (clip=0.3) and H18 (LR=5e-4) both displayed strong bimodality under
+that protocol, which is exactly the symptom the PPO_SEED fix targets — a true multi-seed sample
+might land differently. Retrying cheap constant-only changes first (Tier 1), then structural
+reverted-code changes (Tier 2) if time permits. Each retry uses PPO_SEED=1..5 and is compared
+against the current active baseline (H19 multi-seed: final 135.64, AUC 127.72) rather than the
+original single-seed baseline it was compared against historically.
+
+## Hypothesis 21 (retry of H17): clip_ratio 0.2 → 0.3 (IN PROGRESS, n=0/5)
+
+**Idea**: H17 originally showed extreme bimodality under the single-seed protocol (185+ reward
+in some "runs", collapse to 48-71 in others) despite using the same SEED=1 init every time —
+meaning the spread was pure scheduling noise, not a real signal about clip=0.3's stability. Worth
+retesting cleanly with true multi-seed sampling, since the original REJECTED verdict may not
+reflect the hypothesis's actual merit.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const CLIP_RATIO: f32 = 0.2` → `const CLIP_RATIO: f32 = 0.3`
+- All other constants at current baseline values (PI_LR/VF_LR=3.5e-4, the rest unchanged since H15).
+
+**Baseline for comparison**: H19 multi-seed, final avg 135.64, AUC avg 127.72, n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
