@@ -49,7 +49,7 @@ const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 512;
 
 const GAMMA: f32 = 0.999;
-const LAM: f32 = 0.97; // H23: retest of H13 under multi-seed PPO_SEED protocol
+const LAM: f32 = 0.98; // H19 baseline (H23 lam=0.97 retest paused here for H24; resume after H24 verdict)
 const CLIP_RATIO: f32 = 0.2; // H21 REJECTED (clip=0.3: final-8.7%), reverted to H15/H19 baseline
 const PI_LR: f64 = 3.5e-4; // H19 ACCEPTED baseline (H20: 4e-4 rejected, final-31.4%/AUC-4.6%)
 const VF_LR: f64 = 3.5e-4;
@@ -60,7 +60,9 @@ const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
-const SYNC_EPOCH_BOUNDARY: bool = false; // H22 REJECTED (AUC-1.8% despite final+14.7%), reverted to async baseline
+const SYNC_EPOCH_BOUNDARY: bool = true; // H24: combined re-test (was H22, individually REJECTED)
+// matches SF's --policy_initialization=orthogonal --policy_init_gain=1.0 (default). H24: combined re-test.
+const POLICY_INIT_GAIN: f64 = 1.0;
 
 // 512 trajs/epoch x 512 envs -> ~90 loop iters/epoch
 const TRAJ_PER_EPOCH: u64 = 512;
@@ -100,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  loop_steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  vf_coef={VF_COEF}");
     println!(
-        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}"
+        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}  normalize_obs=true  policy_init_gain={POLICY_INIT_GAIN}  adam_eps=1e-6"
     );
     println!("  {num_cores} logical cores  seed={seed}");
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -114,13 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obs_dtype = DType::Tch(TchDType::F32);
     let act_dtype = DType::Tch(TchDType::F32);
 
-    let pi_mlp = GenericMlp::<B, Float, Float>::new(
+    let pi_mlp = GenericMlp::<B, Float, Float>::new_orthogonal(
         OBS_DIM,
         obs_dtype.clone(),
         &[128, 128],
         ACT_DIM,
         act_dtype.clone(),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
+        POLICY_INIT_GAIN,
         &burn_device,
     );
     // Seed the actor with a TorchScript export of the freshly-initialized policy
@@ -135,13 +138,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(DeviceType::Cpu),
     );
     let pi_head = PPOPolicyHead::Discrete(DiscretePPOPolicyHead::new(pi_mlp)?);
-    let vf_mlp = GenericMlp::<B, Float, Float>::new(
+    let vf_mlp = GenericMlp::<B, Float, Float>::new_orthogonal(
         OBS_DIM,
         obs_dtype.clone(),
         &[128, 128],
         1,
         DType::Tch(TchDType::F32),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
+        POLICY_INIT_GAIN,
         &burn_device,
     );
 
@@ -171,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_episode_steps: Some(MAX_STEPS),
         minibatch: Some(MINI_BATCH_SIZE),
         normalize_returns: NORMALIZE_RETURNS,
+        normalize_obs: true, // H24: combined re-test (was H3, individually REJECTED)
         min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
         max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
         rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),

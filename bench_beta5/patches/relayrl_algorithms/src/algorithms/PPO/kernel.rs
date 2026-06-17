@@ -156,6 +156,7 @@ pub(crate) mod training {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
             let optimizer = AdamConfig::new()
+                .with_epsilon(1e-6)
                 .init::<TB, ActorCriticMlp<TB>>()
                 .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {

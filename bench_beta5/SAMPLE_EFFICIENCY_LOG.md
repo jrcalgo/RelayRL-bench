@@ -1223,7 +1223,7 @@ reusable infrastructure — a future hypothesis could revisit this toggle in com
 other changes (e.g. a higher `traj_per_epoch` to soften the early-AUC cost, or pairing with
 an LR/clip adjustment tuned for the more consistent batch composition).
 
-## Hypothesis 23 (retry of H13): GAE lambda 0.97 (IN PROGRESS, n=1/5)
+## Hypothesis 23 (retry of H13): GAE lambda 0.97 (PAUSED, n=2/5 — resuming after H24)
 
 **Idea**: H13's original n=5 test of lam=0.97 (REJECTED: final-5.8%, AUC-1.0% vs H11 baseline)
 predates the `PPO_SEED` multi-seed protocol — its 5 "runs" varied only by env-side randomness,
@@ -1234,6 +1234,42 @@ retry round (H21 was the first; this is the second).
 **Change** (`bench_lunar_ppo_tch.rs`, constant change only):
 - `const LAM: f32 = 0.98` → `const LAM: f32 = 0.97`
 
-**Results (n=1/5 in progress)**:
+**Results (n=2/5, paused)**:
 - Run 1 (PPO_SEED=1): final=157.00, AUC=110.50, N=829
-- Run 2 (PPO_SEED=2): IN PROGRESS
+- Run 2 (PPO_SEED=2): final=53.00, AUC=116.83, N=829
+
+**Status**: PAUSED to make room for Hypothesis 24 (a combined re-test, see below), which needs
+a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
+at `PPO_SEED=3` (with `LAM` set back to `0.97`) once H24 concludes.
+
+## Hypothesis 24: combined re-test (sync_epoch_boundary + normalize_obs + orthogonal_init + adam_eps) (IN PROGRESS, n=0/5)
+
+**Idea**: Four levers were each tested individually and each REJECTED or showed no clear effect
+alone — H22 (`sync_epoch_boundary`: final +14.7%, AUC -1.8%), H3 (`normalize_obs`: final +6%
+noise, AUC flat), H4 (orthogonal weight init gain=1.0: n=3 looked good, reversed at n=5 — final
+-3.9%, AUC +1.8%, both noise), H5 (Adam epsilon 1e-6: final -12.8%, AUC +5.8%, both noise). None
+closed RelayRL's sample-efficiency gap vs SF alone, but each failed for a *different* reason —
+raising the question of whether they interact synergistically when combined. Testing all four
+together as a single combined unit under the established n=5, `PPO_SEED=1..5` protocol against
+the H19 baseline (final avg 135.64, AUC avg 127.72).
+
+**Setup note**: H23 (lam=0.97 retest) was paused at n=2/5 (run1: final=157.00/AUC=110.50; run2:
+final=53.00/AUC=116.83) to revert `LAM` to the H19 baseline `0.98` for this test — H24 must be
+evaluated against the clean H19 baseline, not against H23's untested lambda change. H23 resumes
+independently after H24's verdict.
+
+**Change** (4 components, combined as a single unit):
+1. `algorithms/mod.rs`: re-added `GenericMlp::new_orthogonal(..., gain: f64, device)` (identical
+   to H4's original implementation) — builds each `Linear` layer with `Initializer::Zeros` bias,
+   then overwrites `layer.weight` via `Initializer::Orthogonal{gain}.init_with(...)`.
+2. `kernel.rs`: `PPOActorCriticTrainer::new`'s optimizer construction gained `.with_epsilon(1e-6)`
+   (identical to H5's original change).
+3. `bench_lunar_ppo_tch.rs`: `const POLICY_INIT_GAIN: f64 = 1.0;` added; `SYNC_EPOCH_BOUNDARY`
+   flipped to `true`; `normalize_obs: true` added to the `IPPOParams` literal; `pi_mlp`/`vf_mlp`
+   switched to `GenericMlp::new_orthogonal(..., POLICY_INIT_GAIN, &burn_device)`; banner updated.
+
+**Baseline for comparison**: H19 multi-seed, final avg 135.64 (range [52.70,193.70]), AUC avg
+127.72 (range [115.79,139.46]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 in progress)**:
+- Run 1 (PPO_SEED=1): IN PROGRESS
