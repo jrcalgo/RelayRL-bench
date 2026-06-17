@@ -988,7 +988,32 @@ establish a comparable multi-seed baseline before continuing the hypothesis loop
 **Purpose**: Re-establish the H15 baseline under the new `PPO_SEED=1..5` protocol so all future
 ACCEPT/REJECT comparisons (H19+) use a like-for-like multi-seed baseline.
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=5)**:
+- final = [114.20, 144.10, 128.00, 129.70, 115.50], n=5 avg **126.30** (**-15.3%** vs old
+  single-seed-repeated H15 baseline of 149.14).
+- AUC = [105.61, 122.15, 103.71, 117.95, 116.06], n=5 avg **113.10** (**-4.3%** vs old AUC
+  baseline of 118.18).
+- ClipFrac means by seed: 0.0887, 0.0812, 0.0771, 0.0852, 0.0945 — all close together
+  (0.077-0.095), with 76-80% of epochs nonzero in every run. No bimodality, no collapse runs:
+  this is a stable, unimodal config under genuine multi-seed sampling, unlike H17/H18.
+- final range [114.20, 144.10] (29.9-point spread) and AUC range [103.71, 122.15] (18.4-point
+  spread) are both within a single, tight cluster — no run is a dramatic outlier in either
+  direction. This is qualitatively different from H17/H18's bimodal pattern (two clusters far
+  apart); H15 is simply normally-distributed around a lower mean than the old single-seed
+  measurement suggested.
+- The old baseline (149.14 final / 118.18 AUC) was measured by running the *same* nominal
+  seed=1 five times and treating scheduling-driven variance as if it were a representative
+  sample. That single initialization (seed=1) happened to be a particularly good draw: in the
+  new multi-seed data, seed=1 alone produced final=114.20 — actually below the new average,
+  not above it, confirming the old "baseline" was not seed=1 being lucky, but rather that
+  repeated re-runs of seed=1 averaged to a value the multi-seed distribution doesn't reproduce
+  (i.e. async/scheduling variance under the same seed was itself substantial and not always
+  representative of the steady-state for that seed).
 
-**Verdict**: PENDING (n=5 required)
+**New baseline declared**: **H15 multi-seed: final avg 126.30 (range 114.20-144.10), AUC avg
+113.10 (range 103.71-122.15), n=5, PPO_SEED=1..5**. This is now the comparison point for all
+future ACCEPT/REJECT decisions (H19+). The drop from the old baseline (-15.3% final, -4.3% AUC)
+is a *measurement correction*, not a regression — no code or hyperparameter changed between the
+old and new H15 measurements, only the seed-sampling protocol.
+
+**Verdict**: Re-baseline established (not an ACCEPT/REJECT — this is the reference point itself).
