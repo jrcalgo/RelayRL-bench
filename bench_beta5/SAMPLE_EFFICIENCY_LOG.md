@@ -1039,7 +1039,31 @@ simultaneously. Single two-constant change (pi_lr and vf_lr together), `clip_rat
 **Baseline for comparison**: H15 multi-seed re-baseline, final avg 126.30 (range
 [114.20,144.10]), AUC avg 113.10 (range [103.71,122.15]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 in progress)**:
-- Run 1 (PPO_SEED=1): IN PROGRESS
+**Results (n=5, vs H15 multi-seed baseline: final avg 126.30 range [114.20,144.10], AUC avg
+113.10 range [103.71,122.15])**:
+- final = [160.80, 134.20, 193.70, 52.70, 136.80], n=5 avg **135.64** (**+7.4%** vs baseline).
+- AUC = [129.92, 115.79, 139.46, 126.63, 126.80], n=5 avg **127.72** (**+12.9%** vs baseline).
+- One collapse run (seed=4: final=52.70, while its own AUC=126.63 stayed above baseline —
+  it learned well early then degraded late) and one exceptional run (seed=3: final=193.70,
+  AUC=139.46 — matches/exceeds SF's 185.88 average). The other three seeds (1,2,5) landed in a
+  normal 134-161 band, consistent with H15's range. This is a much milder version of H17/H18's
+  bimodality: 1 of 5 runs collapsed (vs 2 of 5 for H17/H18), and the collapse didn't drag the
+  average below baseline.
+- ClipFrac means 0.0907-0.0978 (avg ~0.095) — all 5 seeds close together, slightly higher than
+  H15's multi-seed range (0.077-0.095), consistent with the larger LR driving slightly harder
+  into the clip boundary, but not enough to destabilize most seeds.
 
-**Verdict**: PENDING (n=5 required)
+**Verdict**: **ACCEPTED**. Final +7.4% and AUC +12.9%, both above the H15 multi-seed baseline.
+LR=3.5e-4 becomes the new baseline value (supersedes LR=2.5e-4). Note: 1/5 seeds still
+collapsed, so this config is not perfectly stable — future hypotheses should keep tracking
+per-seed outcomes (not just averages) to monitor whether further changes increase or decrease
+the collapse rate.
+
+**New baseline declared**: **H19 (LR=3.5e-4) multi-seed: final avg 135.64 (range
+[52.70,193.70]), AUC avg 127.72 (range [115.79,139.46]), n=5, PPO_SEED=1..5**. Config: 6 iters,
+clip=0.2, ent=0.01, lam=0.98, **LR=3.5e-4**. This is now the reference point for H20+.
+
+**Takeaway for future hypotheses**: The LR axis is productive between 2.5e-4 and 3.5e-4 but
+becomes unstable at 5e-4 (H18). A natural next step is to probe between 3.5e-4 and 5e-4 (e.g.
+4e-4) to find the instability threshold more precisely, or to explore an orthogonal axis
+(gamma) now that LR has yielded the first ACCEPT since H15.
