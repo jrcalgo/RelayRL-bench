@@ -1382,7 +1382,7 @@ form) — SF's choice keeps the bound symmetric in log-ratio space instead of in
 
 **Results (n=1/5 in progress)**:
 - Run 1 (PPO_SEED=1): final=149.40, AUC=148.18, N=831
-- Run 2 (PPO_SEED=2): PENDING
+- Run 2 (PPO_SEED=2): final=167.30, AUC=155.64, N=831
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
 - Run 5 (PPO_SEED=5): PENDING
