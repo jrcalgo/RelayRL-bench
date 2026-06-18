@@ -1457,3 +1457,34 @@ sample-efficiency win. Reverted (cherry-picked `2e3c83b`'s `old_val`/`VALUE_CLIP
 plumbing removed from `kernel.rs`, `independent/mod.rs`, and the banner line in
 `bench_lunar_ppo_tch.rs`, restoring plain MSE value loss). H24's baseline (final avg 158.06, AUC
 avg 138.56) stands.
+
+## Hypothesis 28 (retry of H8): SF's ratio numerical-safety clamp `torch.clamp(ratio, 0.05, 20.0)` (IN PROGRESS, n=0/5)
+
+**Idea**: last remaining Tier-2 candidate after H25 (GAE bootstrap, closed), H26 (asymmetric
+clip, REJECTED split), H27 (PPO2 value clipping, REJECTED split). H8's original n=5 test
+(REJECTED: final-18.1%, AUC-5.4%, the worst regression of any hypothesis in the project, despite
+the clamp being a mathematical no-op since baseline's ratio never leaves `[0.8,1.2]` — well
+inside `[0.05,20.0]`) produced the clearest evidence of the "perturbation tax": *any* change to
+the pi/vf autograd graph, even a provably-inert one, measurably perturbs LibTorch's chaotic
+~830-epoch trajectory. That test predates H11's fix of the `fresh_logp` bug. H26 and H27 already
+showed that under the post-H11 functional-clip regime, graph perturbations now land as *mild*
+mixed/split results (small AUC gains, small final losses) rather than H8's dramatic -18.1%/-5.4%
+double regression — so retesting H8 itself directly checks whether H11 also defused the most
+extreme prior perturbation-tax casualty, or whether this particular no-op clamp has some other
+mechanism causing an outsized effect regardless of clip functionality.
+
+**Change** (`kernel.rs` only, PPO algorithm scope): cherry-picked H8's original implementation
+(commit `a88546b`) onto the current H24-baseline tree — applied with no conflicts. In
+`train_step_discrete`, changed `let ratio = (logp.clone() - logp_old_tensor).exp();` to
+`let ratio = (logp.clone() - logp_old_tensor).exp().clamp(0.05, 20.0);` (one extra `.clamp()`
+call; `clipped_ratio`/`clip_obj`/clipfrac formulas unchanged).
+
+**Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
+138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING
