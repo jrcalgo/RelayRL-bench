@@ -1512,7 +1512,7 @@ clip: REJECTED; H28 ratio safety clamp: REJECTED) — every concrete SF-vs-Relay
 difference identified across the whole project (H1-H10, re-verified H25-H28) is now closed out
 without finding a second accept after H24.
 
-## Hypothesis 29: ablate `sync_epoch_boundary` from the H24 stack (IN PROGRESS, n=0/5)
+## Hypothesis 29: ablate `sync_epoch_boundary` from the H24 stack (ablation REJECTED — necessary, n=5/5)
 
 **Idea**: H24 combined 4 levers — `sync_epoch_boundary` (H22, individually REJECTED: final+14.7%,
 AUC-1.8%), `normalize_obs` (H3, individually REJECTED: final+6% noise, AUC flat),
@@ -1533,9 +1533,28 @@ all left unchanged (still active) from the H24 stack.
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 pending)**:
+**Results (n=5/5 complete)**:
 - Run 1 (PPO_SEED=1): final=168.70, AUC=130.01, N=828
 - Run 2 (PPO_SEED=2): final=69.30, AUC=123.11, N=829
 - Run 3 (PPO_SEED=3): final=119.60, AUC=124.92, N=829
 - Run 4 (PPO_SEED=4): final=143.10, AUC=136.74, N=830
-- Run 5 (PPO_SEED=5): PENDING
+- Run 5 (PPO_SEED=5): final=158.70, AUC=129.07, N=829
+
+**Aggregate**: final avg 131.88 (range [69.30,168.70]), AUC avg 128.77 (range [123.11,136.74]),
+n=5, PPO_SEED=1..5.
+
+**Verdict: ablation REJECTED — `sync_epoch_boundary` is load-bearing, keep it.** Removing it from
+the H24 stack drops final -16.6% (158.06 -> 131.88) and AUC -7.1% (138.56 -> 128.77), both
+substantial regressions (run 2's final=69.30 with a terminal `ClipFrac=1.0000` epoch is the
+worst single-run final score recorded in the whole H19-H29 era, suggesting a late-training
+instability event becomes possible without the collect/train barrier). Unlike the Tier-2 retests
+(H26-H28), this is not a wash — `sync_epoch_boundary` alone accounts for most of H24's combined
+gain over H19 (H19 baseline was final 135.64/AUC 127.72; without sync here we get
+131.88/128.77 — essentially back to H19's level, despite `normalize_obs`, orthogonal init, and
+`adam_eps=1e-6` all still being active). This confirms `sync_epoch_boundary` was the primary
+driver of H24's synergy, not an inert passenger riding along with the other 3 levers — even
+though H22's individual test of this same lever was REJECTED (final+14.7%, AUC-1.8%) on its own,
+it appears to require at least one of the other 3 co-changes to convert its raw final-score boost
+into a durable AUC improvement too. Reverted (`SYNC_EPOCH_BOUNDARY` back to `true`) — the H24
+stack is restored intact. Continuing the ablation series with the next lever
+(`normalize_obs`).
