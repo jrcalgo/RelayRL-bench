@@ -703,6 +703,22 @@ fn run_ppo_sgd_flat<
     // reward scale.
     kernel.set_return_denorm_stats(batch.ret_mean, batch.ret_std);
 
+    // PPO2 value clipping (matches SF's default --ppo_clip_value=1.0): snapshot
+    // the value head's raw (normalized/z-score-space) predictions on this batch's
+    // obs *before* any SGD steps, so `old_val` is on the same scale as `ret_normalized`
+    // and `v_pred` inside `train_step_discrete` (both raw net.vf_forward output).
+    let old_val_norm: Vec<f32> = match super::kernel::training::obs_flat_from_tdata(&batch.obs) {
+        Ok(obs_flat) => match &kernel {
+            PPOKernel::Discrete(k) => k
+                .trainer
+                .as_ref()
+                .map(|t| t.value_forward_flat(&obs_flat, obs_dim))
+                .unwrap_or_else(|| vec![0.0; n]),
+            PPOKernel::Continuous(_) => vec![0.0; n],
+        },
+        Err(_) => vec![0.0; n],
+    };
+
     let mut first_pi_loss: Option<f32> = None;
     let mut first_vf_loss: Option<f32> = None;
     let mut final_pi_loss = 0.0f32;
@@ -738,6 +754,7 @@ fn run_ppo_sgd_flat<
                     &batch.adv_norm,
                     &batch.logp,
                     &ret_normalized,
+                    &old_val_norm,
                     clip_ratio,
                     ent_coef,
                     compute_stats,
@@ -748,6 +765,7 @@ fn run_ppo_sgd_flat<
                 let adv_mb: Vec<f32> = mb.iter().map(|&j| batch.adv_norm[j]).collect();
                 let logp_mb: Vec<f32> = mb.iter().map(|&j| batch.logp[j]).collect();
                 let ret_mb: Vec<f32> = mb.iter().map(|&j| ret_normalized[j]).collect();
+                let old_val_mb: Vec<f32> = mb.iter().map(|&j| old_val_norm[j]).collect();
                 kernel.train_step(
                     &obs_mb,
                     obs_dim,
@@ -755,6 +773,7 @@ fn run_ppo_sgd_flat<
                     &adv_mb,
                     &logp_mb,
                     &ret_mb,
+                    &old_val_mb,
                     clip_ratio,
                     ent_coef,
                     compute_stats,

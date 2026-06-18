@@ -1355,7 +1355,7 @@ truncations) removes real signal the value function needs to credit ongoing epis
 and this is a genuine effect, not noise. H24's baseline (final avg 158.06, AUC avg 138.56)
 stands; the GAE-bootstrap axis (H1, H9, H10/H25) is now closed out across both clip regimes.
 
-## Hypothesis 26 (retry of H7): SF's asymmetric clip-ratio bounds [1/(1+e), 1+e] (IN PROGRESS, n=0/5)
+## Hypothesis 26 (retry of H7): SF's asymmetric clip-ratio bounds [1/(1+e), 1+e] (REJECTED, n=5/5)
 
 **Idea**: H7's original n=5 test of this exact change (REJECTED, same "ClipFrac 0.0000 -> noise"
 signature as H6, H8, H9, H10) predates H11's fix of the `fresh_logp` bug, which had rendered the
@@ -1380,7 +1380,7 @@ form) — SF's choice keeps the bound symmetric in log-ratio space instead of in
 **Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=1/5 in progress)**:
+**Results (n=5/5 complete)**:
 - Run 1 (PPO_SEED=1): final=149.40, AUC=148.18, N=831
 - Run 2 (PPO_SEED=2): final=167.30, AUC=155.64, N=831
 - Run 3 (PPO_SEED=3): final=159.80, AUC=150.11, N=831
@@ -1401,3 +1401,42 @@ relatively weak 124.50). Reverted (`clip_ratio_low`/`clip_ratio_high` asymmetric
 matching `ClipFrac` diagnostic -> restored the symmetric `[1-clip_ratio, 1+clip_ratio]` clamp and
 `|r - 1| > clip_ratio` ClipFrac count) in `kernel.rs`. H24's baseline (final avg 158.06, AUC avg
 138.56) stands.
+
+## Hypothesis 27 (retry of H6): PPO2 value-function clipping, correctly-scaled `old_val` (IN PROGRESS, n=0/5)
+
+**Idea**: continuing the Tier-2 structural-retry round (H25, H26 both REJECTED so far), H6 is the
+next candidate: PPO2-style clipped value loss matching SF's default `--ppo_clip_value=1.0`,
+`v_clipped = old_val + clamp(v_pred - old_val, -1, 1)`, `vf_loss = max((v_pred-ret)^2,
+(v_clipped-ret)^2).mean()`. H6's original n=5 test (REJECTED: final+2.9%, AUC-5.7%, both within
+noise of the original pre-H24 baseline) used a correctly-scaled `old_val` (a no-grad
+`value_forward_flat` snapshot taken once per epoch before any SGD steps, on the same
+normalized/z-score scale as `v_pred` and `ret_normalized`) — unlike H2's flawed denormalized
+`old_val`, which caused real instability (`ClipFrac=0.9783`, `MeanReturn` dipping to -45.1). Of
+all the Tier-2 graph-touching changes, this is the most substantive structurally (an actual
+second forward pass + a different value-loss shape, not just a clip-bound tweak), making it a
+reasonable next candidate to retest under H24's functional-clip baseline.
+
+**Change**: cherry-picked H6's original implementation (commit `2e3c83b`) onto the current
+H24-baseline tree — applied cleanly to `kernel.rs` and `independent/mod.rs` with no conflicts;
+only the `bench_lunar_ppo_tch.rs` banner line needed manual merging (kept the H24-era
+`seed={seed}` suffix while adding H6's `value_clip=1.0` banner line). Net effect, identical to
+H6's original:
+- `kernel.rs`: added `const VALUE_CLIP: f32 = 1.0`; `train_step_discrete` gained an `old_val:
+  &[f32]` parameter; value loss is now `v_clipped = old_val + clamp(v_pred - old_val, -1, 1)`,
+  `vf_loss_t = max((v_pred-ret)^2, (v_clipped-ret)^2).mean()` (was plain MSE). Threaded
+  `old_val` through `PPOKernelTraining::train_step` and its `PPOKernel::Discrete` dispatch.
+- `independent/mod.rs`: in `run_ppo_sgd_flat`, right after `kernel.set_return_denorm_stats(...)`,
+  added a single no-grad `value_forward_flat` call over the full batch's obs producing
+  `old_val_norm`, passed to every `train_step` call this epoch.
+- `bench_lunar_ppo_tch.rs`: appended `value_clip=1.0 (PPO2, matches SF --ppo_clip_value default)`
+  to the config banner.
+
+**Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
+138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING
