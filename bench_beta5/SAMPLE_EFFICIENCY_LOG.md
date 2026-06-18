@@ -1402,7 +1402,7 @@ matching `ClipFrac` diagnostic -> restored the symmetric `[1-clip_ratio, 1+clip_
 `|r - 1| > clip_ratio` ClipFrac count) in `kernel.rs`. H24's baseline (final avg 158.06, AUC avg
 138.56) stands.
 
-## Hypothesis 27 (retry of H6): PPO2 value-function clipping, correctly-scaled `old_val` (IN PROGRESS, n=0/5)
+## Hypothesis 27 (retry of H6): PPO2 value-function clipping, correctly-scaled `old_val` (REJECTED, n=5/5)
 
 **Idea**: continuing the Tier-2 structural-retry round (H25, H26 both REJECTED so far), H6 is the
 next candidate: PPO2-style clipped value loss matching SF's default `--ppo_clip_value=1.0`,
@@ -1439,4 +1439,22 @@ H6's original:
 - Run 2 (PPO_SEED=2): final=145.90, AUC=149.76, N=831
 - Run 3 (PPO_SEED=3): final=157.40, AUC=134.41, N=831
 - Run 4 (PPO_SEED=4): final=147.10, AUC=143.11, N=831
-- Run 5 (PPO_SEED=5): PENDING
+- Run 5 (PPO_SEED=5): final=160.60, AUC=140.03, N=831 (run restarted from scratch after an
+  unrelated container reboot killed the original attempt mid-training at epoch 815; the discarded
+  partial run is not counted)
+
+**Aggregate**: final avg 154.88 (range [145.90,163.40]), AUC avg 142.01 (range [134.41,149.76]),
+n=5, PPO_SEED=1..5.
+
+**Verdict: REJECTED.** final -2.0% (158.06 -> 154.88), AUC +2.5% (138.56 -> 142.01) vs the H24
+baseline — another split result (AUC up, final down, same pattern as H26), failing the
+both-must-improve rule. ClipFrac is now nonzero in most runs (0.0000, 0.1333, 0.3469, 0.0000,
+0.1304 at the final epoch) vs H24's steady `0.0000` — the same "any graph perturbation nudges
+ClipFrac off zero" signature seen across H6-H10/H25/H26, here driven by the extra
+`value_forward_flat` snapshot pass. The correctly-scaled PPO2 value clip is not unstable (no
+H2-style collapse; all 5 runs land within H24's normal final/AUC range) but, like H26, nets out
+as a wash that fails strictly on `final` while marginally helping `AUC` — not a real
+sample-efficiency win. Reverted (cherry-picked `2e3c83b`'s `old_val`/`VALUE_CLIP`/clipped vf-loss
+plumbing removed from `kernel.rs`, `independent/mod.rs`, and the banner line in
+`bench_lunar_ppo_tch.rs`, restoring plain MSE value loss). H24's baseline (final avg 158.06, AUC
+avg 138.56) stands.
