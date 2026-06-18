@@ -1354,3 +1354,35 @@ result; the straightforward interpretation is that zero-bootstrapping every trun
 truncations) removes real signal the value function needs to credit ongoing episodes correctly,
 and this is a genuine effect, not noise. H24's baseline (final avg 158.06, AUC avg 138.56)
 stands; the GAE-bootstrap axis (H1, H9, H10/H25) is now closed out across both clip regimes.
+
+## Hypothesis 26 (retry of H7): SF's asymmetric clip-ratio bounds [1/(1+e), 1+e] (IN PROGRESS, n=0/5)
+
+**Idea**: H7's original n=5 test of this exact change (REJECTED, same "ClipFrac 0.0000 -> noise"
+signature as H6, H8, H9, H10) predates H11's fix of the `fresh_logp` bug, which had rendered the
+PPO clip nearly inert pre-H11 (`ClipFrac=0.0000` baseline). H25 just demonstrated that retesting
+a Tier-2 graph-touching hypothesis under the current functional-clip regime can produce a result
+(rejection, even more strongly) that is informative rather than baseline-irrelevant — so the
+remaining H6-H9 candidates are each worth a clean re-test against the H24 baseline rather than
+assuming H7-H10's original verdicts still hold. H7 retests SF's asymmetric clip formula: SF
+clamps the ratio to `[1/(1+epsilon), 1+epsilon]` rather than RelayRL's original symmetric
+`[1-epsilon, 1+epsilon]`. The two are equivalent to first order in epsilon but differ at typical
+PPO clip values (e.g. epsilon=0.2 gives `[0.833, 1.2]` for SF vs `[0.8, 1.2]` for the symmetric
+form) — SF's choice keeps the bound symmetric in log-ratio space instead of in `r` itself.
+
+**Change** (`kernel.rs` only, PPO algorithm scope):
+- In `PPOActorCriticTrainer`'s SGD step, replaced
+  `clipped_ratio = ratio.clamp(1.0 - clip_ratio, 1.0 + clip_ratio)` with
+  `clip_ratio_high = 1.0 + clip_ratio; clip_ratio_low = 1.0 / clip_ratio_high; clipped_ratio =
+  ratio.clamp(clip_ratio_low, clip_ratio_high)`.
+- Updated the `ClipFrac` diagnostic to count `r < clip_ratio_low || r > clip_ratio_high` instead
+  of `|r - 1| > clip_ratio`, so the diagnostic stays consistent with the new clipping bounds.
+
+**Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
+138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING
