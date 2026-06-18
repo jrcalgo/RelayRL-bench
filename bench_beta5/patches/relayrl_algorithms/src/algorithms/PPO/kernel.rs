@@ -135,10 +135,6 @@ pub(crate) mod training {
         }
     }
 
-    /// PPO2 value-function clip range, matches Sample Factory's default
-    /// `--ppo_clip_value=1.0`.
-    const VALUE_CLIP: f32 = 1.0;
-
     pub struct PPOActorCriticTrainer {
         pub network: Option<ActorCriticMlp<TB>>,
         pub optimizer: OptimizerAdaptor<Adam, ActorCriticMlp<TB>, TB>,
@@ -193,7 +189,6 @@ pub(crate) mod training {
             adv: &[f32],
             logp_old: &[f32],
             ret: &[f32],
-            old_val: &[f32],
             clip_ratio: f32,
             ent_coef: f32,
             compute_stats: bool,
@@ -202,8 +197,7 @@ pub(crate) mod training {
                 .min(act_flat.len())
                 .min(adv.len())
                 .min(logp_old.len())
-                .min(ret.len())
-                .min(old_val.len());
+                .min(ret.len());
             if n == 0 {
                 return (0.0, 0.0, zero_pi_info().1);
             }
@@ -246,22 +240,13 @@ pub(crate) mod training {
                 .mean();
             let pi_loss_t = -(clip_obj + ent_coef * entropy_t.clone());
 
-            // ── Value head (PPO2 clipped value loss, matches SF's default
-            // --ppo_clip_value=1.0) ──────────────────────────────────────
+            // ── Value head ────────────────────────────────────────────────
             let v_pred = net.vf_forward(obs).reshape([n]);
             let ret_tensor = Tensor::<TB, 1, Float>::from_data(
                 BurnTensorData::new(ret[..n].to_vec(), [n]),
                 &device,
             );
-            let old_val_tensor = Tensor::<TB, 1, Float>::from_data(
-                BurnTensorData::new(old_val[..n].to_vec(), [n]),
-                &device,
-            );
-            let v_clipped = old_val_tensor.clone()
-                + (v_pred.clone() - old_val_tensor).clamp(-VALUE_CLIP, VALUE_CLIP);
-            let vf_loss_unclipped = (v_pred - ret_tensor.clone()).powf_scalar(2.0);
-            let vf_loss_clipped = (v_clipped - ret_tensor).powf_scalar(2.0);
-            let vf_loss_t = vf_loss_unclipped.max_pair(vf_loss_clipped).mean();
+            let vf_loss_t = (v_pred - ret_tensor).powf_scalar(2.0).mean();
 
             // ── Combined loss → single backward pass ──────────────────────
             let vf_coef_t = self.vf_coef;
@@ -551,7 +536,6 @@ pub trait PPOKernelTraining<
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
-        old_val: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         compute_stats: bool,
@@ -1169,7 +1153,6 @@ impl<
         adv: &[f32],
         logp_old: &[f32],
         ret: &[f32],
-        old_val: &[f32],
         clip_ratio: f32,
         ent_coef: f32,
         compute_stats: bool,
@@ -1190,7 +1173,6 @@ impl<
                             adv,
                             logp_old,
                             ret,
-                            old_val,
                             clip_ratio,
                             ent_coef,
                             compute_stats,

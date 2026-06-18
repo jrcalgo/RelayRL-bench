@@ -1355,7 +1355,7 @@ truncations) removes real signal the value function needs to credit ongoing epis
 and this is a genuine effect, not noise. H24's baseline (final avg 158.06, AUC avg 138.56)
 stands; the GAE-bootstrap axis (H1, H9, H10/H25) is now closed out across both clip regimes.
 
-## Hypothesis 26 (retry of H7): SF's asymmetric clip-ratio bounds [1/(1+e), 1+e] (REJECTED, n=5/5)
+## Hypothesis 26 (retry of H7): SF's asymmetric clip-ratio bounds [1/(1+e), 1+e] (IN PROGRESS, n=0/5)
 
 **Idea**: H7's original n=5 test of this exact change (REJECTED, same "ClipFrac 0.0000 -> noise"
 signature as H6, H8, H9, H10) predates H11's fix of the `fresh_logp` bug, which had rendered the
@@ -1380,7 +1380,7 @@ form) — SF's choice keeps the bound symmetric in log-ratio space instead of in
 **Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=5/5 complete)**:
+**Results (n=1/5 in progress)**:
 - Run 1 (PPO_SEED=1): final=149.40, AUC=148.18, N=831
 - Run 2 (PPO_SEED=2): final=167.30, AUC=155.64, N=831
 - Run 3 (PPO_SEED=3): final=159.80, AUC=150.11, N=831
@@ -1401,7 +1401,6 @@ relatively weak 124.50). Reverted (`clip_ratio_low`/`clip_ratio_high` asymmetric
 matching `ClipFrac` diagnostic -> restored the symmetric `[1-clip_ratio, 1+clip_ratio]` clamp and
 `|r - 1| > clip_ratio` ClipFrac count) in `kernel.rs`. H24's baseline (final avg 158.06, AUC avg
 138.56) stands.
-
 ## Hypothesis 27 (retry of H6): PPO2 value-function clipping, correctly-scaled `old_val` (REJECTED, n=5/5)
 
 **Idea**: continuing the Tier-2 structural-retry round (H25, H26 both REJECTED so far), H6 is the
@@ -1434,7 +1433,7 @@ H6's original:
 **Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 pending)**:
+**Results (n=5/5 complete)**:
 - Run 1 (PPO_SEED=1): final=163.40, AUC=142.74, N=831
 - Run 2 (PPO_SEED=2): final=145.90, AUC=149.76, N=831
 - Run 3 (PPO_SEED=3): final=157.40, AUC=134.41, N=831
