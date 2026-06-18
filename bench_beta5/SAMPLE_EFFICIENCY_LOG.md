@@ -1534,7 +1534,7 @@ all left unchanged (still active) from the H24 stack.
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
 **Results (n=0/5 pending)**:
-- Run 1 (PPO_SEED=1): PENDING
+- Run 1 (PPO_SEED=1): final=168.70, AUC=130.01, N=828
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
