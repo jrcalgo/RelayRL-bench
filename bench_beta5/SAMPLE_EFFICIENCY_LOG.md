@@ -1380,8 +1380,8 @@ form) — SF's choice keeps the bound symmetric in log-ratio space instead of in
 **Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 pending)**:
-- Run 1 (PPO_SEED=1): PENDING
+**Results (n=1/5 in progress)**:
+- Run 1 (PPO_SEED=1): final=149.40, AUC=148.18, N=831
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
