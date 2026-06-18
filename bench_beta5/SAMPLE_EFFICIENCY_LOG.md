@@ -1438,5 +1438,5 @@ H6's original:
 - Run 1 (PPO_SEED=1): final=163.40, AUC=142.74, N=831
 - Run 2 (PPO_SEED=2): final=145.90, AUC=149.76, N=831
 - Run 3 (PPO_SEED=3): final=157.40, AUC=134.41, N=831
-- Run 4 (PPO_SEED=4): PENDING
+- Run 4 (PPO_SEED=4): final=147.10, AUC=143.11, N=831
 - Run 5 (PPO_SEED=5): PENDING
