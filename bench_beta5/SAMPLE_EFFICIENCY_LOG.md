@@ -1511,3 +1511,31 @@ exhausted** (H25 GAE-bootstrap: closed/REJECTED; H26 asymmetric clip: REJECTED; 
 clip: REJECTED; H28 ratio safety clamp: REJECTED) — every concrete SF-vs-RelayRL formula/structural
 difference identified across the whole project (H1-H10, re-verified H25-H28) is now closed out
 without finding a second accept after H24.
+
+## Hypothesis 29: ablate `sync_epoch_boundary` from the H24 stack (IN PROGRESS, n=0/5)
+
+**Idea**: H24 combined 4 levers — `sync_epoch_boundary` (H22, individually REJECTED: final+14.7%,
+AUC-1.8%), `normalize_obs` (H3, individually REJECTED: final+6% noise, AUC flat),
+orthogonal init (H4, individually REJECTED: reversed sign at n=5), and Adam `epsilon=1e-6` (H5,
+individually REJECTED: final-12.8%, AUC+5.8%, both noise) — and the combination ACCEPTED
+(final+16.5%, AUC+8.5%). Since each lever failed alone but the stack succeeded, it's unclear
+whether all 4 are necessary or whether 1-2 are doing the real work while the rest are inert/noise
+riding along. Starting an ablation series: remove one lever at a time from the H24 stack and
+retest at n=5 against the H24 baseline. If removing a lever doesn't hurt (sometimes even helps),
+that lever isn't pulling its weight in the combination. First ablation: `sync_epoch_boundary`,
+since H22 alone had the largest individual `final` effect (+14.7%) of the four and is the most
+likely single driver — testing whether it's necessary, sufficient, or replaceable by the other 3.
+
+**Change** (`bench_lunar_ppo_tch.rs` only): `SYNC_EPOCH_BOUNDARY` flipped from `true` back to
+`false`; `normalize_obs=true`, `POLICY_INIT_GAIN=1.0` (orthogonal init), and Adam `epsilon=1e-6`
+all left unchanged (still active) from the H24 stack.
+
+**Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
+[142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING

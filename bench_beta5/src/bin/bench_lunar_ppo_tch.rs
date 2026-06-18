@@ -60,7 +60,7 @@ const TARGET_KL: f32 = 1.0; // effectively disabled (SF has no KL early-stop)
 const MINI_BATCH_SIZE: usize = 46_080; // matches SF batch_size = 512 envs x 90-step rollout
 const ENT_COEF: f32 = 0.01;
 const NORMALIZE_RETURNS: bool = true; // per-batch normalization (no persistent RunningMeanStd)
-const SYNC_EPOCH_BOUNDARY: bool = true; // H24: combined re-test (was H22, individually REJECTED)
+const SYNC_EPOCH_BOUNDARY: bool = false; // H29: ablate from H24 stack (was true since H24)
 // matches SF's --policy_initialization=orthogonal --policy_init_gain=1.0 (default). H24: combined re-test.
 const POLICY_INIT_GAIN: f64 = 1.0;
 
