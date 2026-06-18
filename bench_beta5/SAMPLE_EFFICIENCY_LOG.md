@@ -1536,6 +1536,6 @@ all left unchanged (still active) from the H24 stack.
 **Results (n=0/5 pending)**:
 - Run 1 (PPO_SEED=1): final=168.70, AUC=130.01, N=828
 - Run 2 (PPO_SEED=2): final=69.30, AUC=123.11, N=829
-- Run 3 (PPO_SEED=3): PENDING
+- Run 3 (PPO_SEED=3): final=119.60, AUC=124.92, N=829
 - Run 4 (PPO_SEED=4): PENDING
 - Run 5 (PPO_SEED=5): PENDING
