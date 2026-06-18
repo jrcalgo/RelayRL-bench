@@ -1486,5 +1486,5 @@ call; `clipped_ratio`/`clip_obj`/clipfrac formulas unchanged).
 - Run 1 (PPO_SEED=1): final=153.30, AUC=142.46, N=831
 - Run 2 (PPO_SEED=2): final=166.60, AUC=134.08, N=831
 - Run 3 (PPO_SEED=3): final=161.70, AUC=149.81, N=831
-- Run 4 (PPO_SEED=4): PENDING
+- Run 4 (PPO_SEED=4): final=159.30, AUC=142.32, N=831
 - Run 5 (PPO_SEED=5): PENDING
