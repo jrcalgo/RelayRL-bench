@@ -1483,7 +1483,7 @@ call; `clipped_ratio`/`clip_obj`/clipfrac formulas unchanged).
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
 **Results (n=0/5 pending)**:
-- Run 1 (PPO_SEED=1): PENDING
+- Run 1 (PPO_SEED=1): final=153.30, AUC=142.46, N=831
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
