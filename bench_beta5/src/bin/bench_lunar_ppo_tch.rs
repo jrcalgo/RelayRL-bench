@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  loop_steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  vf_coef={VF_COEF}");
     println!(
-        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}  normalize_obs=true  policy_init_gain={POLICY_INIT_GAIN}  adam_eps=1e-6"
+        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}  normalize_obs=false  policy_init_gain={POLICY_INIT_GAIN}  adam_eps=1e-6"
     );
     println!("  {num_cores} logical cores  seed={seed}");
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_episode_steps: Some(MAX_STEPS),
         minibatch: Some(MINI_BATCH_SIZE),
         normalize_returns: NORMALIZE_RETURNS,
-        normalize_obs: true, // H24: combined re-test (was H3, individually REJECTED)
+        normalize_obs: false, // H30: ablate from H24 stack (was true since H24)
         min_steps_per_epoch: Some(MIN_STEPS_PER_EPOCH),
         max_buffered_episodes: Some(MAX_BUFFERED_EPISODES),
         rollout_len: Some(MINI_BATCH_SIZE / ENV_COUNT as usize),

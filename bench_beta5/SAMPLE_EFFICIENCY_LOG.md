@@ -1558,3 +1558,26 @@ it appears to require at least one of the other 3 co-changes to convert its raw 
 into a durable AUC improvement too. Reverted (`SYNC_EPOCH_BOUNDARY` back to `true`) — the H24
 stack is restored intact. Continuing the ablation series with the next lever
 (`normalize_obs`).
+
+## Hypothesis 30: ablate `normalize_obs` from the H24 stack (IN PROGRESS, n=0/5)
+
+**Idea**: continuing the H24 component-ablation series (H29 found `sync_epoch_boundary` is
+load-bearing — removing it alone regressed final -16.6%/AUC -7.1%, essentially erasing all of
+H24's gain over H19). Next lever: `normalize_obs` (Welford running obs normalization), which was
+individually REJECTED as H3 (final+6% noise, AUC flat). Testing whether it's also load-bearing in
+combination, purely inert (no effect either way), or actually working against the other 3 levers.
+
+**Change** (`bench_lunar_ppo_tch.rs` only): `normalize_obs` flipped from `true` back to `false`
+in the `IPPOParams` literal (and the banner's hardcoded `normalize_obs=true` literal updated to
+`false` to match); `sync_epoch_boundary=true`, `POLICY_INIT_GAIN=1.0` (orthogonal init), and Adam
+`epsilon=1e-6` all left unchanged (still active) from the H24 stack.
+
+**Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
+[142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING
