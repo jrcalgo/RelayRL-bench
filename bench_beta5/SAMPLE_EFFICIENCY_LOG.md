@@ -1385,4 +1385,19 @@ form) — SF's choice keeps the bound symmetric in log-ratio space instead of in
 - Run 2 (PPO_SEED=2): final=167.30, AUC=155.64, N=831
 - Run 3 (PPO_SEED=3): final=159.80, AUC=150.11, N=831
 - Run 4 (PPO_SEED=4): final=124.50, AUC=136.81, N=831
-- Run 5 (PPO_SEED=5): PENDING
+- Run 5 (PPO_SEED=5): final=163.00, AUC=123.94, N=831
+
+**Aggregate**: final avg 152.80 (range [124.50,167.30]), AUC avg 142.94 (range [123.94,155.64]),
+n=5, PPO_SEED=1..5.
+
+**Verdict: REJECTED.** final -3.3% (158.06 -> 152.80), AUC +3.2% (138.56 -> 142.94) vs the H24
+baseline — a split result (AUC up, final down), failing the both-must-improve rule. Unlike H25's
+sharp two-sided regression, this is genuinely mixed: the asymmetric bound widens the lower clip
+threshold from 0.8 to ~0.833 (at clip=0.2), which lets the policy correct downward more
+aggressively when an action's probability needs to drop — plausibly a mild early/mid-training AUC
+benefit — but the looser-than-symmetric lower bound also seems to make the very end of training
+(epoch ~830) noisier/less converged (final regresses in 3/5 seeds vs H24, including run 4's
+relatively weak 124.50). Reverted (`clip_ratio_low`/`clip_ratio_high` asymmetric bounds and the
+matching `ClipFrac` diagnostic -> restored the symmetric `[1-clip_ratio, 1+clip_ratio]` clamp and
+`|r - 1| > clip_ratio` ClipFrac count) in `kernel.rs`. H24's baseline (final avg 158.06, AUC avg
+138.56) stands.

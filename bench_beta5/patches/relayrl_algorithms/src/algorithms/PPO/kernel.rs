@@ -229,11 +229,7 @@ pub(crate) mod training {
                 &device,
             );
             let ratio = (logp.clone() - logp_old_tensor).exp();
-            // H26 (retry of H7): SF's asymmetric clip bounds [1/(1+e), 1+e] instead of
-            // the symmetric [1-e, 1+e] (symmetric in log-ratio space, not in r itself).
-            let clip_ratio_high = 1.0 + clip_ratio;
-            let clip_ratio_low = 1.0 / clip_ratio_high;
-            let clipped_ratio = ratio.clone().clamp(clip_ratio_low, clip_ratio_high);
+            let clipped_ratio = ratio.clone().clamp(1.0 - clip_ratio, 1.0 + clip_ratio);
             let clip_obj = (ratio.clone() * adv_tensor.clone())
                 .min_pair(clipped_ratio * adv_tensor)
                 .mean();
@@ -280,7 +276,7 @@ pub(crate) mod training {
                 .unwrap_or_else(|_| vec![1.0; n]);
             let clipfrac = ratio_values
                 .iter()
-                .filter(|r| **r < clip_ratio_low || **r > clip_ratio_high)
+                .filter(|r| (**r - 1.0).abs() > clip_ratio)
                 .count() as f32
                 / n as f32;
 
