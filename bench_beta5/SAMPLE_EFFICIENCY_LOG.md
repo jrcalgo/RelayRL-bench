@@ -1306,7 +1306,7 @@ H19 to pass and becomes the new baseline going forward (`SYNC_EPOCH_BOUNDARY=tru
 H23 (lam=0.97 retest, paused at n=2/5) resumes next, now evaluated against this H24 baseline
 instead of H19's.
 
-## Hypothesis 25 (retry of H10): match SF's value_bootstrap=False (bootstrap=0 for all episode-boundary cuts) (IN PROGRESS, n=0/5)
+## Hypothesis 25 (retry of H10): match SF's value_bootstrap=False (bootstrap=0 for all episode-boundary cuts) (REJECTED, n=5/5)
 
 **Idea**: H10's original n=5 test of this exact change (REJECTED: final+2.2%, AUC-8.3%) — along
 with H6, H7, H8, H9, all also REJECTED with the same "ClipFrac 0.0000 -> ~0.05-0.08 perturbation
@@ -1335,4 +1335,22 @@ both true terminations and `max_episode_steps` truncations).
 - Run 2 (PPO_SEED=2): final=93.80, AUC=88.51, N=831
 - Run 3 (PPO_SEED=3): final=181.50, AUC=113.53, N=831
 - Run 4 (PPO_SEED=4): final=126.20, AUC=69.52, N=831
-- Run 5 (PPO_SEED=5): IN PROGRESS
+- Run 5 (PPO_SEED=5): final=163.20, AUC=86.23, N=831
+
+**Aggregate**: final avg 139.08 (range [93.80,181.50]), AUC avg 97.91 (range [69.52,131.76]),
+n=5, PPO_SEED=1..5. (Run 3 was restarted from scratch after an unrelated container reboot killed
+the original attempt mid-training at epoch 595; the discarded partial run is not counted.)
+
+**Verdict: REJECTED.** final -12.0% (158.06 -> 139.08), AUC -29.3% (138.56 -> 97.91) vs the H24
+baseline — both metrics regress sharply, AUC especially. Reverted (`bootstrap=0.0` unconditional
+-> restored the `is_truncated`-gated `V(s_end)` bootstrap) in all three `replay_buffer.rs` call
+sites. Despite H11 fixing the `fresh_logp` bug and making the PPO clip functional again (ClipFrac
+nonzero in 4/5 runs here, unlike H10's original all-`0.0000` baseline), the literal
+`value_bootstrap=False` match still hurts substantially — if anything, *more* than it did
+pre-H11 (AUC -29.3% here vs -8.3% in the original H10). The "perturbation tax" theory from
+H6-H10's takeaways was specific to the pre-H11 broken-clip regime and doesn't explain this
+result; the straightforward interpretation is that zero-bootstrapping every truncation
+(including the very common 90-step rollout-chunk cutoffs, not just true `max_episode_steps`
+truncations) removes real signal the value function needs to credit ongoing episodes correctly,
+and this is a genuine effect, not noise. H24's baseline (final avg 158.06, AUC avg 138.56)
+stands; the GAE-bootstrap axis (H1, H9, H10/H25) is now closed out across both clip regimes.

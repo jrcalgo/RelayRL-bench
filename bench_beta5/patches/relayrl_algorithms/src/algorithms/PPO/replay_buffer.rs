@@ -155,10 +155,16 @@ impl PPOReplayBuffer {
         buffers.values[..fill_len].copy_from_slice(&values[..fill_len]);
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
-        for (start, end, _is_truncated) in boundaries {
-            // H25 (retry of H10): match SF's value_bootstrap=False, bootstrap=0 for
-            // all episode-boundary cuts including truncations.
-            let bootstrap = 0.0;
+        for (start, end, is_truncated) in boundaries {
+            let bootstrap = if is_truncated {
+                values
+                    .get(end)
+                    .or_else(|| values.get(end.saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
         }
     }
@@ -179,10 +185,19 @@ impl PPOReplayBuffer {
         }
 
         let boundaries: Vec<_> = buffers.episode_boundaries.clone();
-        for (start, end, _is_truncated) in boundaries {
-            // H25 (retry of H10): match SF's value_bootstrap=False, bootstrap=0 for
-            // all episode-boundary cuts including truncations.
-            let bootstrap = 0.0;
+        for (start, end, is_truncated) in boundaries {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
+            let bootstrap = if is_truncated {
+                buffers
+                    .values
+                    .get(end)
+                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             Self::compute_gae_episode(&mut buffers, gamma, lam, start, end, bootstrap);
         }
 
@@ -251,10 +266,19 @@ impl PPOReplayBuffer {
 
         let boundaries_n: Vec<_> = buffers.episode_boundaries[..n].to_vec();
         let versions_n: Vec<i64> = buffers.episode_versions[..n].to_vec();
-        for (start, end, _is_truncated) in &boundaries_n {
-            // H25 (retry of H10): match SF's value_bootstrap=False, bootstrap=0 for
-            // all episode-boundary cuts including truncations.
-            let bootstrap = 0.0;
+        for (start, end, is_truncated) in &boundaries_n {
+            // Bootstrap with V(s_end) (the state reached after the chunk's last
+            // action), falling back to V(s_{end-1}) if s_end isn't buffered yet.
+            let bootstrap = if *is_truncated {
+                buffers
+                    .values
+                    .get(*end)
+                    .or_else(|| buffers.values.get(end.saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             Self::compute_gae_episode(&mut buffers, gamma, lam, *start, *end, bootstrap);
         }
 
