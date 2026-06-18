@@ -1607,3 +1607,30 @@ landed in a band 3.5-14% below the H24 baseline's per-run AUC values) is enough 
 rather than simplify it away. Reverted (`normalize_obs` back to `true` in the `IPPOParams` literal
 and the banner string) — the H24 stack is restored intact. Continuing the ablation series with the
 next lever: orthogonal init (`POLICY_INIT_GAIN`/`GenericMlp::new_orthogonal`).
+
+## Hypothesis 31: ablate orthogonal init from the H24 stack (IN PROGRESS, n=0/5)
+
+**Idea**: continuing the H24 component-ablation series. H29 found `sync_epoch_boundary` strongly
+load-bearing (final -16.6%/AUC -7.1% without it); H30 found `normalize_obs` mildly load-bearing
+(final flat, AUC -4.0% without it). Next lever: orthogonal weight init (gain=1.0, zero bias),
+individually REJECTED as H4 (n=5 reversal: final -3.9%, AUC +1.8%, both noise). Testing whether
+it's load-bearing in the H24 combination, inert, or actively helping/hurting alongside the other
+3 levers.
+
+**Change** (`bench_lunar_ppo_tch.rs` only): `pi_mlp`/`vf_mlp` switched from
+`GenericMlp::new_orthogonal(..., POLICY_INIT_GAIN, &burn_device)` back to plain
+`GenericMlp::new(..., &burn_device)` (Burn's default Kaiming-uniform init, non-zero bias).
+`POLICY_INIT_GAIN` const left in place but unused (dead_code warning only). Banner's
+`policy_init_gain={POLICY_INIT_GAIN}` field replaced with `orthogonal_init=false (H31 ablation)`.
+`sync_epoch_boundary=true`, `normalize_obs=true`, and Adam `epsilon=1e-6` all left unchanged
+(still active) from the H24 stack.
+
+**Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
+[142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING
