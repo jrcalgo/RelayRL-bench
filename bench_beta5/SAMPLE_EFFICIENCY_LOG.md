@@ -1559,7 +1559,7 @@ into a durable AUC improvement too. Reverted (`SYNC_EPOCH_BOUNDARY` back to `tru
 stack is restored intact. Continuing the ablation series with the next lever
 (`normalize_obs`).
 
-## Hypothesis 30: ablate `normalize_obs` from the H24 stack (IN PROGRESS, n=4/5)
+## Hypothesis 30: ablate `normalize_obs` from the H24 stack (RESOLVED, n=5/5)
 
 **Idea**: continuing the H24 component-ablation series (H29 found `sync_epoch_boundary` is
 load-bearing — removing it alone regressed final -16.6%/AUC -7.1%, essentially erasing all of
@@ -1575,7 +1575,7 @@ in the `IPPOParams` literal (and the banner's hardcoded `normalize_obs=true` lit
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=4/5)**:
+**Results (n=5/5)**:
 - Run 1 (PPO_SEED=1): final=164.60, AUC=125.76, N=831, ClipFrac mean=0.1286 (58% nonzero),
   env-frames/sec=39952
 - Run 2 (PPO_SEED=2): final=154.60, AUC=142.42, N=831, ClipFrac mean=0.1299 (58% nonzero),
@@ -1584,4 +1584,26 @@ in the `IPPOParams` literal (and the banner's hardcoded `normalize_obs=true` lit
   env-frames/sec=38082
 - Run 4 (PPO_SEED=4): final=155.90, AUC=118.76, N=831, ClipFrac mean=0.1287 (52% nonzero),
   env-frames/sec=38566
-- Run 5 (PPO_SEED=5): PENDING
+- Run 5 (PPO_SEED=5): final=157.70, AUC=135.35, N=831, ClipFrac mean=0.1200 (56% nonzero),
+  env-frames/sec=39152
+
+**n=5 averages**: final = [164.60, 154.60, 164.30, 155.90, 157.70], avg **159.42** (range
+[154.60,164.60], 10.0-point spread — notably tighter than H24's own [142.10,163.70] 21.6-point
+spread). AUC = [125.76, 142.42, 142.75, 118.76, 135.35], avg **133.01** (range [118.76,142.75],
+24.0-point spread, similar to H24's [126.71,148.05] 21.3-point spread). Vs the H24 baseline
+(final avg 158.06, AUC avg 138.56): final is essentially unchanged (**+0.86%**), while AUC drops
+**-4.0%** — a real but modest regression, an order of magnitude smaller than H29's
+`sync_epoch_boundary` ablation (final -16.6%, AUC -7.1%). ClipFrac stayed in the same elevated
+~0.12-0.13 mean / ~52-58% nonzero band across all 5 runs as the full H24 stack (this is driven by
+`sync_epoch_boundary`, not `normalize_obs`).
+
+**Verdict: ablation REJECTED (mild) — `normalize_obs` makes a modest positive contribution to
+AUC, keep it.** Unlike `sync_epoch_boundary` (H29), `normalize_obs` is not strongly load-bearing —
+removing it leaves the late-training `final` metric statistically unchanged — but it does cost a
+consistent ~4% on the AUC (early/mid-training convergence-speed) metric, in the same direction as
+H24's overall gain over H19. Since the "both must regress substantially" bar isn't met, this is a
+weaker signal than H29's, but the one-sided AUC cost (not a coin-flip — every run in this set
+landed in a band 3.5-14% below the H24 baseline's per-run AUC values) is enough to keep the lever
+rather than simplify it away. Reverted (`normalize_obs` back to `true` in the `IPPOParams` literal
+and the banner string) — the H24 stack is restored intact. Continuing the ablation series with the
+next lever: orthogonal init (`POLICY_INIT_GAIN`/`GenericMlp::new_orthogonal`).
