@@ -1458,7 +1458,7 @@ plumbing removed from `kernel.rs`, `independent/mod.rs`, and the banner line in
 `bench_lunar_ppo_tch.rs`, restoring plain MSE value loss). H24's baseline (final avg 158.06, AUC
 avg 138.56) stands.
 
-## Hypothesis 28 (retry of H8): SF's ratio numerical-safety clamp `torch.clamp(ratio, 0.05, 20.0)` (IN PROGRESS, n=0/5)
+## Hypothesis 28 (retry of H8): SF's ratio numerical-safety clamp `torch.clamp(ratio, 0.05, 20.0)` (REJECTED, n=5/5)
 
 **Idea**: last remaining Tier-2 candidate after H25 (GAE bootstrap, closed), H26 (asymmetric
 clip, REJECTED split), H27 (PPO2 value clipping, REJECTED split). H8's original n=5 test
@@ -1482,9 +1482,32 @@ call; `clipped_ratio`/`clip_obj`/clipfrac formulas unchanged).
 **Baseline for comparison**: H24 multi-seed, final avg 158.06 (range [142.10,163.70]), AUC avg
 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=0/5 pending)**:
+**Results (n=5/5 complete)**:
 - Run 1 (PPO_SEED=1): final=153.30, AUC=142.46, N=831
 - Run 2 (PPO_SEED=2): final=166.60, AUC=134.08, N=831
 - Run 3 (PPO_SEED=3): final=161.70, AUC=149.81, N=831
 - Run 4 (PPO_SEED=4): final=159.30, AUC=142.32, N=831
-- Run 5 (PPO_SEED=5): PENDING
+- Run 5 (PPO_SEED=5): final=132.60, AUC=133.02, N=831
+
+**Aggregate**: final avg 154.70 (range [132.60,166.60]), AUC avg 140.34 (range [133.02,149.81]),
+n=5, PPO_SEED=1..5.
+
+**Verdict: REJECTED.** final -2.1% (158.06 -> 154.70), AUC +1.3% (138.56 -> 140.34) vs the H24
+baseline — a third consecutive split result in the post-H11 Tier-2 round (H26: -3.3%/+3.2%, H27:
+-2.0%/+2.5%, H28: -2.1%/+1.3%), failing the both-must-improve rule each time. ClipFrac is nonzero
+in all 5 runs here (0.0230-0.3824) despite the clamp still being a provable no-op for this
+baseline's ratio range — confirming the "perturbation tax" mechanism from the original H8 still
+operates post-H11, but its *magnitude* has shrunk dramatically: H8's original pre-H11 result was
+final -18.1%/AUC -5.4% (the worst regression of the whole project), while this retest is a mild
+-2.1%/+1.3% wash, well inside normal seed-to-seed noise. This confirms H11's `fresh_logp` fix did
+defuse the extreme perturbation-tax casualties (H7/H8's double-digit regressions) — graph changes
+now perturb the trajectory only mildly — but a mild perturbation still isn't a *gain*: three
+different Tier-2 graph-touching changes (asymmetric clip, PPO2 value clip, ratio safety clamp)
+all converge on the same small-negative-final/small-positive-AUC signature, suggesting this is
+now just the generic "any change to the autograd graph" noise floor, not signal from any of the
+three specific mechanisms. Reverted (`.exp().clamp(0.05, 20.0)` -> plain `.exp()`) in `kernel.rs`.
+H24's baseline (final avg 158.06, AUC avg 138.56) stands. **Tier-2 structural retries are now
+exhausted** (H25 GAE-bootstrap: closed/REJECTED; H26 asymmetric clip: REJECTED; H27 PPO2 value
+clip: REJECTED; H28 ratio safety clamp: REJECTED) — every concrete SF-vs-RelayRL formula/structural
+difference identified across the whole project (H1-H10, re-verified H25-H28) is now closed out
+without finding a second accept after H24.
