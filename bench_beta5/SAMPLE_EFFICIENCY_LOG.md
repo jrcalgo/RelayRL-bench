@@ -1559,7 +1559,7 @@ into a durable AUC improvement too. Reverted (`SYNC_EPOCH_BOUNDARY` back to `tru
 stack is restored intact. Continuing the ablation series with the next lever
 (`normalize_obs`).
 
-## Hypothesis 30: ablate `normalize_obs` from the H24 stack (IN PROGRESS, n=2/5)
+## Hypothesis 30: ablate `normalize_obs` from the H24 stack (IN PROGRESS, n=3/5)
 
 **Idea**: continuing the H24 component-ablation series (H29 found `sync_epoch_boundary` is
 load-bearing — removing it alone regressed final -16.6%/AUC -7.1%, essentially erasing all of
@@ -1575,11 +1575,12 @@ in the `IPPOParams` literal (and the banner's hardcoded `normalize_obs=true` lit
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=2/5)**:
+**Results (n=3/5)**:
 - Run 1 (PPO_SEED=1): final=164.60, AUC=125.76, N=831, ClipFrac mean=0.1286 (58% nonzero),
   env-frames/sec=39952
 - Run 2 (PPO_SEED=2): final=154.60, AUC=142.42, N=831, ClipFrac mean=0.1299 (58% nonzero),
   env-frames/sec=38275
-- Run 3 (PPO_SEED=3): PENDING
+- Run 3 (PPO_SEED=3): final=164.30, AUC=142.75, N=831, ClipFrac mean=0.1254 (55% nonzero),
+  env-frames/sec=38082
 - Run 4 (PPO_SEED=4): PENDING
 - Run 5 (PPO_SEED=5): PENDING
