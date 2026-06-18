@@ -1436,7 +1436,7 @@ H6's original:
 
 **Results (n=0/5 pending)**:
 - Run 1 (PPO_SEED=1): final=163.40, AUC=142.74, N=831
-- Run 2 (PPO_SEED=2): PENDING
+- Run 2 (PPO_SEED=2): final=145.90, AUC=149.76, N=831
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
 - Run 5 (PPO_SEED=5): PENDING
