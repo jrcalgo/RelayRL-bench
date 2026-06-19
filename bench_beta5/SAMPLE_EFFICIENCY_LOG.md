@@ -1665,6 +1665,27 @@ remaining lever is tested — orthogonal init is now flagged as a strong candida
 removal/simplification from the production config, since it adds implementation complexity
 (`new_orthogonal`, the `Initializer` import) for zero measured benefit. Continuing the ablation
 series with the final lever: Adam `epsilon=1e-6`.
+
+## Hypothesis 32: ablate Adam `epsilon=1e-6` from the H24 stack (IN PROGRESS, n=0/5)
+
+**Idea**: concluding the H24 component-ablation series. H29 found `sync_epoch_boundary` strongly
+load-bearing (final -16.6%/AUC -7.1% without it); H30 found `normalize_obs` mildly load-bearing
+for AUC (-4.0% without it); H31 found orthogonal init inert (no measurable effect either way).
+Final lever: Adam `epsilon=1e-6` (vs Burn's default `1e-5`), individually REJECTED as H5
+(final -12.8%, AUC +5.8%, both within noise at n=3). Testing whether it's load-bearing in the H24
+combination, inert, or actively helping/hurting alongside the other 3 levers.
+
+**Change** (`kernel.rs` only): `PPOActorCriticTrainer::new`'s `AdamConfig::new().with_epsilon(1e-6)`
+reverted to plain `AdamConfig::new()` (Burn's default `epsilon=1e-5`). Banner's
+`adam_eps={...}` literal in `bench_lunar_ppo_tch.rs` updated to `adam_eps=1e-5 (H32 ablation,
+Burn default)`. `sync_epoch_boundary=true`, `normalize_obs=true`, and orthogonal init
+(`POLICY_INIT_GAIN=1.0`) all left unchanged (still active) from the H24 stack.
+
+**Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
+[142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
