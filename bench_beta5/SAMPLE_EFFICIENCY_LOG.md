@@ -1608,7 +1608,7 @@ rather than simplify it away. Reverted (`normalize_obs` back to `true` in the `I
 and the banner string) — the H24 stack is restored intact. Continuing the ablation series with the
 next lever: orthogonal init (`POLICY_INIT_GAIN`/`GenericMlp::new_orthogonal`).
 
-## Hypothesis 31: ablate orthogonal init from the H24 stack (IN PROGRESS, n=2/5)
+## Hypothesis 31: ablate orthogonal init from the H24 stack (IN PROGRESS, n=3/5)
 
 **Idea**: continuing the H24 component-ablation series. H29 found `sync_epoch_boundary` strongly
 load-bearing (final -16.6%/AUC -7.1% without it); H30 found `normalize_obs` mildly load-bearing
@@ -1628,11 +1628,13 @@ it's load-bearing in the H24 combination, inert, or actively helping/hurting alo
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=2/5)**:
+**Results (n=3/5)**:
 - Run 1 (PPO_SEED=1): final=142.10, AUC=131.85, N=831, ClipFrac mean=0.1081 (50% nonzero),
   env-frames/sec=39097
 - Run 2 (PPO_SEED=2): final=151.20, AUC=138.44, N=831, ClipFrac mean=0.1125 (54% nonzero),
   env-frames/sec=39644
+- Run 3 (PPO_SEED=3): final=166.50, AUC=146.22, N=831, ClipFrac mean=0.1013 (51% nonzero),
+  env-frames/sec=38116
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
