@@ -1737,7 +1737,7 @@ future confirmation hypothesis, but not pursued automatically here since it woul
 re-deriving a new n=5 result rather than being implied by the individual ablations alone (joint
 effects are not guaranteed additive).
 
-## Hypothesis 33: H24-lite stack — keep only `sync_epoch_boundary` + `normalize_obs` (IN PROGRESS, n=4/5)
+## Hypothesis 33: H24-lite stack — keep only `sync_epoch_boundary` + `normalize_obs` (RESOLVED, n=5/5)
 
 **Idea**: the H29-H32 ablation series found that of H24's 4 stacked levers, only
 `sync_epoch_boundary` (strongly load-bearing) and `normalize_obs` (mildly load-bearing) actually
@@ -1756,7 +1756,7 @@ left in place but unused.
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5. Also relevant: H19
 baseline (pre-H24), final avg 135.64, AUC avg 127.72.
 
-**Results (n=4/5)**:
+**Results (n=5/5)**:
 - Run 1 (PPO_SEED=1): final=162.00, AUC=130.55, N=831, ClipFrac mean=0.1072 (50% nonzero),
   env-frames/sec=34929
 - Run 2 (PPO_SEED=2): final=158.70, AUC=137.81, N=831, ClipFrac mean=0.0981 (47% nonzero),
@@ -1765,7 +1765,36 @@ baseline (pre-H24), final avg 135.64, AUC avg 127.72.
   env-frames/sec=35199
 - Run 4 (PPO_SEED=4): final=158.30, AUC=141.11, N=831, ClipFrac mean=0.0866 (47% nonzero),
   env-frames/sec=34549
-- Run 2 (PPO_SEED=2): PENDING
-- Run 3 (PPO_SEED=3): PENDING
-- Run 4 (PPO_SEED=4): PENDING
-- Run 5 (PPO_SEED=5): PENDING
+- Run 5 (PPO_SEED=5): final=157.20, AUC=142.73, N=831, ClipFrac mean=0.1023 (40% nonzero),
+  env-frames/sec=35346
+
+**Averages (n=5)**: final avg = 157.24 (range [150.00,162.00]), AUC avg = 138.78 (range
+[130.55,142.73]).
+
+**Verdict: ACCEPT — the H24-lite stack matches full H24's performance.** Versus the H24
+full-stack baseline (final avg 158.06, AUC avg 138.56), the lite stack scores final -0.52% and
+AUC +0.16% — both differences are far smaller than the run-to-run spread within either
+hypothesis's own 5 seeds, i.e. statistically indistinguishable from full H24. This confirms,
+jointly, what H31 and H32 each found individually: orthogonal init and Adam `epsilon=1e-6`
+contribute nothing measurable to H24's gain over H19, and dropping both at once does not produce
+any negative (or positive) interaction effect — the two inert levers really are inert, separately
+and together. The lite stack's ClipFrac profile (means 0.087-0.107, 40-50% nonzero) is consistent
+with the full H24 stack and with H29-H32's ablations, confirming `sync_epoch_boundary` (still
+active) remains the dominant driver of the perturbation-tax/ClipFrac signature, not the two
+dropped levers.
+
+**No revert needed.** Unlike every other ablation in this series (H29, H30 reverted their
+removed lever back after testing; H31/H32 also reverted back to keep the H24 stack intact for
+the next ablation), H33 is the terminal step of the series — its purpose was to validate a
+*proposed simplification*, not to isolate one lever's effect while preserving the rest. Since
+the result confirms no loss, the current code tree (`bench_lunar_ppo_tch.rs`'s `pi_mlp`/`vf_mlp`
+built via plain `GenericMlp::new(...)`, `kernel.rs`'s optimizer built via plain `AdamConfig::new()`
+with Burn's default `epsilon=1e-5`, `sync_epoch_boundary=true`, `normalize_obs=true`) is kept
+as-is and adopted as the new lasting production baseline, superseding H24's more complex 4-lever
+version with an equally-performing 2-lever version. `POLICY_INIT_GAIN` remains defined but unused
+(dead code) — left in place as a documented relic of the lite-stack simplification rather than
+deleted, since `new_orthogonal` is still present in `algorithms/mod.rs` for any future hypothesis
+that wants to re-test orthogonal init in a different context.
+
+**New reference baseline going forward: H24-lite, final avg 157.24, AUC avg 138.78, n=5,
+PPO_SEED=1..5.**
