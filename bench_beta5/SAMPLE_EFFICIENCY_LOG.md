@@ -1666,7 +1666,7 @@ removal/simplification from the production config, since it adds implementation 
 (`new_orthogonal`, the `Initializer` import) for zero measured benefit. Continuing the ablation
 series with the final lever: Adam `epsilon=1e-6`.
 
-## Hypothesis 32: ablate Adam `epsilon=1e-6` from the H24 stack (IN PROGRESS, n=2/5)
+## Hypothesis 32: ablate Adam `epsilon=1e-6` from the H24 stack (IN PROGRESS, n=3/5)
 
 **Idea**: concluding the H24 component-ablation series. H29 found `sync_epoch_boundary` strongly
 load-bearing (final -16.6%/AUC -7.1% without it); H30 found `normalize_obs` mildly load-bearing
@@ -1684,11 +1684,13 @@ Burn default)`. `sync_epoch_boundary=true`, `normalize_obs=true`, and orthogonal
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=2/5)**:
+**Results (n=3/5)**:
 - Run 1 (PPO_SEED=1): final=156.30, AUC=144.37, N=831, ClipFrac mean=0.1030 (52% nonzero),
   env-frames/sec=39107
 - Run 2 (PPO_SEED=2): final=161.70, AUC=152.63, N=831, ClipFrac mean=0.1080 (51% nonzero),
   env-frames/sec=38980
+- Run 3 (PPO_SEED=3): final=149.60, AUC=134.71, N=831, ClipFrac mean=0.1036 (49% nonzero),
+  env-frames/sec=39419
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
