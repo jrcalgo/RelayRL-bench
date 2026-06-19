@@ -1608,7 +1608,7 @@ rather than simplify it away. Reverted (`normalize_obs` back to `true` in the `I
 and the banner string) — the H24 stack is restored intact. Continuing the ablation series with the
 next lever: orthogonal init (`POLICY_INIT_GAIN`/`GenericMlp::new_orthogonal`).
 
-## Hypothesis 31: ablate orthogonal init from the H24 stack (IN PROGRESS, n=4/5)
+## Hypothesis 31: ablate orthogonal init from the H24 stack (RESOLVED, n=5/5)
 
 **Idea**: continuing the H24 component-ablation series. H29 found `sync_epoch_boundary` strongly
 load-bearing (final -16.6%/AUC -7.1% without it); H30 found `normalize_obs` mildly load-bearing
@@ -1628,7 +1628,7 @@ it's load-bearing in the H24 combination, inert, or actively helping/hurting alo
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=4/5)**:
+**Results (n=5/5)**:
 - Run 1 (PPO_SEED=1): final=142.10, AUC=131.85, N=831, ClipFrac mean=0.1081 (50% nonzero),
   env-frames/sec=39097
 - Run 2 (PPO_SEED=2): final=151.20, AUC=138.44, N=831, ClipFrac mean=0.1125 (54% nonzero),
@@ -1637,6 +1637,34 @@ it's load-bearing in the H24 combination, inert, or actively helping/hurting alo
   env-frames/sec=38116
 - Run 4 (PPO_SEED=4): final=154.30, AUC=140.36, N=831, ClipFrac mean=0.1120 (54% nonzero),
   env-frames/sec=40632
+- Run 5 (PPO_SEED=5): final=149.30, AUC=133.17, N=831, ClipFrac mean=0.1011 (48% nonzero),
+  env-frames/sec=39321
+
+**n=5 averages**: final = [142.10, 151.20, 166.50, 154.30, 149.30], avg **152.68** (range
+[142.10,166.50], 24.4-point spread — wider than H24's own [142.10,163.70] 21.6-point spread, but
+in the same order of magnitude). AUC = [131.85, 138.44, 146.22, 140.36, 133.17], avg **138.01**
+(range [131.85,146.22], 14.4-point spread — notably tighter than H24's [126.71,148.05] 21.3-point
+spread). Vs the H24 baseline (final avg 158.06, AUC avg 138.56): final drops a modest **-3.4%**,
+while AUC is essentially unchanged (**-0.4%**) — the smallest effect of any lever tested in this
+ablation series so far (H29: final -16.6%/AUC -7.1%; H30: final +0.9%/AUC -4.0%). ClipFrac
+dropped slightly vs H24/H30's ~0.12-0.13 mean to ~0.10-0.11 mean here, still in the same elevated
+band driven by `sync_epoch_boundary`, with 48-54% of epochs nonzero across all 5 runs (similar
+distribution to H30, just a touch lower magnitude — plausibly because Kaiming-uniform's smaller
+initial weights yield smaller early-training policy steps than orthogonal init's gain=1.0).
+
+**Verdict: ablation ACCEPTED (inert) — orthogonal init has no measurable effect in the H24 stack.**
+Unlike `sync_epoch_boundary` (H29, strongly load-bearing) and `normalize_obs` (H30, mildly
+load-bearing for AUC), removing orthogonal init leaves both final and AUC within noise of the
+full H24 stack — AUC's -0.4% is indistinguishable from zero, and final's -3.4% is well inside the
+run-to-run spread already seen within H24 itself. This mirrors H4's own standalone n=5 verdict
+(orthogonal init alone: final -3.9%, AUC +1.8%, both noise) — orthogonal init does not help
+*or* hurt, whether alone (H4) or stacked with the other 3 H24 levers (H31). Reverted
+(`pi_mlp`/`vf_mlp` back to `GenericMlp::new_orthogonal(..., POLICY_INIT_GAIN, &burn_device)`,
+banner restored to `policy_init_gain={POLICY_INIT_GAIN}`) for stack consistency while the
+remaining lever is tested — orthogonal init is now flagged as a strong candidate for future
+removal/simplification from the production config, since it adds implementation complexity
+(`new_orthogonal`, the `Initializer` import) for zero measured benefit. Continuing the ablation
+series with the final lever: Adam `epsilon=1e-6`.
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
