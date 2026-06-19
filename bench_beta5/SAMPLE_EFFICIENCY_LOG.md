@@ -1666,7 +1666,7 @@ removal/simplification from the production config, since it adds implementation 
 (`new_orthogonal`, the `Initializer` import) for zero measured benefit. Continuing the ablation
 series with the final lever: Adam `epsilon=1e-6`.
 
-## Hypothesis 32: ablate Adam `epsilon=1e-6` from the H24 stack (IN PROGRESS, n=4/5)
+## Hypothesis 32: ablate Adam `epsilon=1e-6` from the H24 stack (RESOLVED, n=5/5)
 
 **Idea**: concluding the H24 component-ablation series. H29 found `sync_epoch_boundary` strongly
 load-bearing (final -16.6%/AUC -7.1% without it); H30 found `normalize_obs` mildly load-bearing
@@ -1684,7 +1684,7 @@ Burn default)`. `sync_epoch_boundary=true`, `normalize_obs=true`, and orthogonal
 **Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5.
 
-**Results (n=4/5)**:
+**Results (n=5/5)**:
 - Run 1 (PPO_SEED=1): final=156.30, AUC=144.37, N=831, ClipFrac mean=0.1030 (52% nonzero),
   env-frames/sec=39107
 - Run 2 (PPO_SEED=2): final=161.70, AUC=152.63, N=831, ClipFrac mean=0.1080 (51% nonzero),
@@ -1693,6 +1693,49 @@ Burn default)`. `sync_epoch_boundary=true`, `normalize_obs=true`, and orthogonal
   env-frames/sec=39419
 - Run 4 (PPO_SEED=4): final=158.60, AUC=138.06, N=831, ClipFrac mean=0.1087 (52% nonzero),
   env-frames/sec=38936
+- Run 5 (PPO_SEED=5): final=156.10, AUC=136.34, N=831, ClipFrac mean=0.1012 (47% nonzero),
+  env-frames/sec=38923
+
+**n=5 averages**: final = [156.30, 161.70, 149.60, 158.60, 156.10], avg **156.46** (range
+[149.60,161.70], 12.1-point spread — the tightest of any hypothesis in this entire project,
+about half H24's own [142.10,163.70] 21.6-point spread). AUC = [144.37, 152.63, 134.71, 138.06,
+136.34], avg **141.22** (range [134.71,152.63], 17.9-point spread, tighter than H24's
+[126.71,148.05] 21.3-point spread). Vs the H24 baseline (final avg 158.06, AUC avg 138.56): final
+drops a trivial **-1.0%**, while AUC nominally *improves* **+1.9%** — both well within noise,
+with the two metrics moving in opposite directions (a clean signature of no real effect, not a
+"final up/AUC down" perturbation-tax pattern). ClipFrac stayed in the same ~0.10-0.11 mean /
+47-52% nonzero band as H31, driven entirely by `sync_epoch_boundary`.
+
+**Verdict: ablation ACCEPTED (inert) — Adam epsilon=1e-6 has no measurable effect in the H24
+stack.** Like orthogonal init (H31), removing this lever leaves both metrics within noise of the
+full stack, with final and AUC moving in opposite directions — the clearest possible "no effect"
+signature. This mirrors H5's own standalone n=3 verdict (epsilon alone: final -12.8%, AUC +5.8%,
+both judged noise) — Adam epsilon does not help *or* hurt, whether alone (H5) or stacked with the
+other 3 H24 levers (H32). Reverted (`.with_epsilon(1e-6)` restored in `kernel.rs`, banner back to
+`adam_eps=1e-6`) for stack consistency — Adam epsilon is now flagged, alongside orthogonal init
+(H31), as a candidate for future removal/simplification from the production config, since
+neither measurably contributes to H24's gain over H19.
+
+**Ablation series conclusion (H29-H32)**: all 4 components of the H24 stack have now been
+individually ablated against the full-stack baseline (final avg 158.06, AUC avg 138.56):
+- `sync_epoch_boundary` (H29): **strongly load-bearing** — final -16.6%, AUC -7.1% without it.
+  Accounts for the large majority of H24's gain over the H19 baseline (final 135.64, AUC 127.72).
+- `normalize_obs` (H30): **mildly load-bearing** — final flat (+0.9%), AUC -4.0% without it.
+  Contributes a modest, one-sided improvement to early/mid-training convergence speed.
+- orthogonal init (H31): **inert** — final -3.4%, AUC -0.4% without it, both within noise.
+- Adam `epsilon=1e-6` (H32): **inert** — final -1.0%, AUC +1.9% without it, both within noise,
+  moving in opposite directions.
+
+This explains H24's combined success despite three of its four components individually failing
+(H22, H3, H4, H5 were all individually REJECTED): `sync_epoch_boundary` was the real driver all
+along, with `normalize_obs` providing a secondary boost; orthogonal init and Adam epsilon are
+along for the ride, contributing neither benefit nor harm in combination, matching their inert
+standalone results. A minimal "H24-lite" stack of just `sync_epoch_boundary` +
+`normalize_obs` (dropping orthogonal init and the epsilon tweak) would likely retain
+~all of H24's measured gain while reducing implementation complexity — a natural candidate for a
+future confirmation hypothesis, but not pursued automatically here since it would require
+re-deriving a new n=5 result rather than being implied by the individual ablations alone (joint
+effects are not guaranteed additive).
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING

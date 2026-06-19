@@ -155,8 +155,8 @@ pub(crate) mod training {
         ) -> Self {
             let device = <TB as burn_tensor::backend::Backend>::Device::default();
             let network = ActorCriticMlp::new(obs_dim, hidden_sizes, act_dim, &device);
-            // H32: ablate Adam epsilon=1e-6 from the H24 stack (was .with_epsilon(1e-6), Burn default 1e-5)
             let optimizer = AdamConfig::new()
+                .with_epsilon(1e-6)
                 .init::<TB, ActorCriticMlp<TB>>()
                 .with_grad_clipping(GradientClipping::Norm(4.0));
             Self {
