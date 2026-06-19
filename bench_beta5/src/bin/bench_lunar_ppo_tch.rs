@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  loop_steps={TOTAL_STEPS}  env-frames={total_env_frames}");
     println!("  gamma={GAMMA}  lam={LAM}  clip={CLIP_RATIO}  pi_lr={PI_LR}  vf_lr={VF_LR}  vf_coef={VF_COEF}");
     println!(
-        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}  normalize_obs=true  policy_init_gain={POLICY_INIT_GAIN}  adam_eps=1e-6"
+        "  pi_iters={TRAIN_PI_ITERS}  vf_iters={TRAIN_VF_ITERS}  target_kl={TARGET_KL}  ent_coef={ENT_COEF}  traj/epoch={TRAJ_PER_EPOCH}  mb={MINI_BATCH_SIZE}  normalize_returns={NORMALIZE_RETURNS}  sync_epoch_boundary={SYNC_EPOCH_BOUNDARY}  normalize_obs=true  orthogonal_init=false  adam_eps=1e-5 (H33: H24-lite, dropped inert levers)"
     );
     println!("  {num_cores} logical cores  seed={seed}");
     println!("═══════════════════════════════════════════════════════════════════\n");
@@ -116,14 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obs_dtype = DType::Tch(TchDType::F32);
     let act_dtype = DType::Tch(TchDType::F32);
 
-    let pi_mlp = GenericMlp::<B, Float, Float>::new_orthogonal(
+    // H33: H24-lite stack — orthogonal init dropped (ablation-ACCEPTED/inert per H31)
+    let pi_mlp = GenericMlp::<B, Float, Float>::new(
         OBS_DIM,
         obs_dtype.clone(),
         &[128, 128],
         ACT_DIM,
         act_dtype.clone(),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
-        POLICY_INIT_GAIN,
         &burn_device,
     );
     // Seed the actor with a TorchScript export of the freshly-initialized policy
@@ -138,14 +138,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(DeviceType::Cpu),
     );
     let pi_head = PPOPolicyHead::Discrete(DiscretePPOPolicyHead::new(pi_mlp)?);
-    let vf_mlp = GenericMlp::<B, Float, Float>::new_orthogonal(
+    let vf_mlp = GenericMlp::<B, Float, Float>::new(
         OBS_DIM,
         obs_dtype.clone(),
         &[128, 128],
         1,
         DType::Tch(TchDType::F32),
         ActivationKind::ReLU(burn_nn::activation::Relu::new()),
-        POLICY_INIT_GAIN,
         &burn_device,
     );
 

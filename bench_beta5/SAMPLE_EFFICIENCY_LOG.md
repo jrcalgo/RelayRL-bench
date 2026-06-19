@@ -1736,6 +1736,28 @@ standalone results. A minimal "H24-lite" stack of just `sync_epoch_boundary` +
 future confirmation hypothesis, but not pursued automatically here since it would require
 re-deriving a new n=5 result rather than being implied by the individual ablations alone (joint
 effects are not guaranteed additive).
+
+## Hypothesis 33: H24-lite stack — keep only `sync_epoch_boundary` + `normalize_obs` (IN PROGRESS, n=0/5)
+
+**Idea**: the H29-H32 ablation series found that of H24's 4 stacked levers, only
+`sync_epoch_boundary` (strongly load-bearing) and `normalize_obs` (mildly load-bearing) actually
+contribute; orthogonal init and Adam `epsilon=1e-6` are both inert. Testing whether a "lite"
+stack with just the two load-bearing levers retains ~all of H24's measured gain over H19, since
+joint effects are not guaranteed additive from the individual ablations alone.
+
+**Change** (`bench_lunar_ppo_tch.rs`, `kernel.rs`): `pi_mlp`/`vf_mlp` switched from
+`GenericMlp::new_orthogonal(..., POLICY_INIT_GAIN, ...)` back to plain `GenericMlp::new(...)`
+(drops orthogonal init); `PPOActorCriticTrainer::new`'s `AdamConfig::new().with_epsilon(1e-6)`
+reverted to plain `AdamConfig::new()` (drops the epsilon tweak, back to Burn's default `1e-5`).
+`sync_epoch_boundary=true` and `normalize_obs=true` both left active. `POLICY_INIT_GAIN` const
+left in place but unused.
+
+**Baseline for comparison**: H24 multi-seed (full 4-lever stack), final avg 158.06 (range
+[142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5. Also relevant: H19
+baseline (pre-H24), final avg 135.64, AUC avg 127.72.
+
+**Results (n=0/5 pending)**:
+- Run 1 (PPO_SEED=1): PENDING
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
