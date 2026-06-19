@@ -1737,7 +1737,7 @@ future confirmation hypothesis, but not pursued automatically here since it woul
 re-deriving a new n=5 result rather than being implied by the individual ablations alone (joint
 effects are not guaranteed additive).
 
-## Hypothesis 33: H24-lite stack — keep only `sync_epoch_boundary` + `normalize_obs` (IN PROGRESS, n=1/5)
+## Hypothesis 33: H24-lite stack — keep only `sync_epoch_boundary` + `normalize_obs` (IN PROGRESS, n=2/5)
 
 **Idea**: the H29-H32 ablation series found that of H24's 4 stacked levers, only
 `sync_epoch_boundary` (strongly load-bearing) and `normalize_obs` (mildly load-bearing) actually
@@ -1756,9 +1756,11 @@ left in place but unused.
 [142.10,163.70]), AUC avg 138.56 (range [126.71,148.05]), n=5, PPO_SEED=1..5. Also relevant: H19
 baseline (pre-H24), final avg 135.64, AUC avg 127.72.
 
-**Results (n=1/5)**:
+**Results (n=2/5)**:
 - Run 1 (PPO_SEED=1): final=162.00, AUC=130.55, N=831, ClipFrac mean=0.1072 (50% nonzero),
   env-frames/sec=34929
+- Run 2 (PPO_SEED=2): final=158.70, AUC=137.81, N=831, ClipFrac mean=0.0981 (47% nonzero),
+  env-frames/sec=35413
 - Run 2 (PPO_SEED=2): PENDING
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
