@@ -1800,7 +1800,7 @@ that wants to re-test orthogonal init in a different context.
 **New reference baseline going forward: H24-lite, final avg 157.24, AUC avg 138.78, n=5,
 PPO_SEED=1..5.**
 
-## Hypothesis 34: GAE discount factor gamma 0.999 → 0.995 (IN PROGRESS, n=4/5)
+## Hypothesis 34: GAE discount factor gamma 0.999 → 0.995 (REJECTED, n=5/5)
 
 **Idea**: `gamma=0.999` has been matched to SF's config since the start of this log and never
 independently varied — every prior lever touched either the loss graph, the network, or the
@@ -1832,4 +1832,35 @@ risk" profile as H12/H13/H23's lambda probes.
   env-frames/sec=35212
 - Run 4 (PPO_SEED=4): final=142.10, AUC=129.99, N=831, ClipFrac mean=0.1081 (50% nonzero),
   env-frames/sec=34887
+- Run 5 (PPO_SEED=5): final=153.80, AUC=145.56, N=831, ClipFrac mean=0.1025 (52% nonzero),
+  env-frames/sec=34922
+
+**Aggregate**: final avg 151.68 (range [139.90,170.80]), AUC avg 135.15 (range
+[125.83,145.56]), n=5, PPO_SEED=1..5.
+
+**Verdict: REJECTED.** final -3.5% (157.24 -> 151.68), AUC -2.6% (138.78 -> 135.15) vs the
+H24-lite baseline — both metrics regress, failing the both-must-improve rule. Unlike the lambda
+sweep (H12/H13), which showed a clean directional tradeoff (shorter horizon helps AUC, hurts
+final), shortening the discount horizon via gamma hurts both metrics simultaneously. This makes
+sense given the two parameters' different roles: `lam` only reweights the *already-bootstrapped*
+multi-step advantage estimator (a variance/bias tradeoff over a horizon that's already bounded by
+the value function), whereas `gamma` changes what the value function itself is trained to predict
+— at `gamma=0.995` (effective horizon ~200 steps) the value targets discount away a meaningfully
+larger fraction of each episode's total return than at `gamma=0.999` (effective horizon ~1000,
+i.e. essentially the full undiscounted episode return for any episode ≤500 steps). For
+LunarLander, where landing-on-the-pad terminal rewards/penalties are large and often occur near
+the end of a long episode, discounting more aggressively systematically under-credits the
+trajectory's earlier steps for that outcome — degrading both early-training convergence (AUC) and
+the final converged policy. ClipFrac means (0.089-0.108, 43-52% nonzero) are in the same range as
+the H24-lite baseline, confirming gamma doesn't meaningfully change clip-boundary activity — the
+regression is a credit-assignment effect, not an optimization-stability one. Reverted
+(`const GAMMA: f32 = 0.999`) — the H24-lite baseline (final avg 157.24, AUC avg 138.78) stands.
+
+**Takeaway for future hypotheses**: gamma is closed at 0.999 (the SF-matched value) — unlike
+lambda, which had a genuine interior optimum away from SF's setting, gamma shows no positive
+tradeoff in either direction at this episode length; SF's near-undiscounted choice is already
+correct for LunarLander's reward structure. Remaining untested axes from earlier takeaways:
+entropy-coefficient annealing/scheduling (vs. the fixed `ENT_COEF=0.01` tested in H16), and
+LR annealing/warmup combined with entropy annealing (noted as untried in H6's takeaway, distinct
+from the plain linear LR anneal tried pre-log).
 - Run 5 (PPO_SEED=5): PENDING

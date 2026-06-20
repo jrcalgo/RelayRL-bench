@@ -48,7 +48,7 @@ const ACT_DIM: usize = 4;
 const MAX_STEPS: usize = 500;
 const ENV_COUNT: u32 = 512;
 
-const GAMMA: f32 = 0.995; // H34: gamma axis probe (was 0.999, matched to SF; testing a shorter discount horizon)
+const GAMMA: f32 = 0.999; // H34 REJECTED (gamma=0.995 retest: final-3.5%/AUC-2.6%), reverted to SF-matched value
 const LAM: f32 = 0.98; // H23 REJECTED (lam=0.97 retest on H24 baseline: final-4.6%, AUC+1.2%), revert
 const CLIP_RATIO: f32 = 0.2; // H21 REJECTED (clip=0.3: final-8.7%), reverted to H15/H19 baseline
 const PI_LR: f64 = 3.5e-4; // H19 ACCEPTED baseline (H20: 4e-4 rejected, final-31.4%/AUC-4.6%)
