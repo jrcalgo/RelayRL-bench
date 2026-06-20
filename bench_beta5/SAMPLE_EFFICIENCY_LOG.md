@@ -1800,7 +1800,7 @@ that wants to re-test orthogonal init in a different context.
 **New reference baseline going forward: H24-lite, final avg 157.24, AUC avg 138.78, n=5,
 PPO_SEED=1..5.**
 
-## Hypothesis 34: GAE discount factor gamma 0.999 → 0.995 (IN PROGRESS, n=3/5)
+## Hypothesis 34: GAE discount factor gamma 0.999 → 0.995 (IN PROGRESS, n=4/5)
 
 **Idea**: `gamma=0.999` has been matched to SF's config since the start of this log and never
 independently varied — every prior lever touched either the loss graph, the network, or the
@@ -1823,12 +1823,13 @@ risk" profile as H12/H13/H23's lambda probes.
 **Baseline for comparison**: H24-lite multi-seed (current active baseline), final avg 157.24
 (range [150.00,162.00]), AUC avg 138.78 (range [130.55,142.73]), n=5, PPO_SEED=1..5.
 
-**Results (n=3/5)**:
+**Results (n=4/5)**:
 - Run 1 (PPO_SEED=1): final=170.80, AUC=143.21, N=831, ClipFrac mean=0.0985 (47% nonzero),
   env-frames/sec=34034
 - Run 2 (PPO_SEED=2): final=139.90, AUC=131.15, N=831, ClipFrac mean=0.1013 (49% nonzero),
   env-frames/sec=34731
 - Run 3 (PPO_SEED=3): final=151.80, AUC=125.83, N=831, ClipFrac mean=0.0894 (43% nonzero),
   env-frames/sec=35212
-- Run 4 (PPO_SEED=4): PENDING
+- Run 4 (PPO_SEED=4): final=142.10, AUC=129.99, N=831, ClipFrac mean=0.1081 (50% nonzero),
+  env-frames/sec=34887
 - Run 5 (PPO_SEED=5): PENDING
