@@ -1255,9 +1255,10 @@ baseline — AUC ticks up slightly but final declines (driven largely by run 4's
 reject lam=0.97). `LAM` reverts to `0.98`. H24's baseline (final avg 158.06, AUC avg 138.56)
 stands.
 
-**Status**: PAUSED to make room for Hypothesis 24 (a combined re-test, see below), which needs
-a clean `LAM=0.98` baseline. `LAM` is being temporarily reverted to `0.98` for H24; H23 resumes
-at `PPO_SEED=3` (with `LAM` set back to `0.97`) once H24 concludes.
+**Status**: complete (all 5 runs above), REJECTED, `LAM` reverted to `0.98`. (Note: an earlier
+draft of this entry proposed pausing H23 mid-flight to make room for H24 — that plan was
+superseded once all 5 seeds finished cleanly on top of the H24 baseline; no pause was actually
+needed.)
 
 ## Hypothesis 24: combined re-test (sync_epoch_boundary + normalize_obs + orthogonal_init + adam_eps) (ACCEPTED, n=5/5)
 
@@ -1798,3 +1799,34 @@ that wants to re-test orthogonal init in a different context.
 
 **New reference baseline going forward: H24-lite, final avg 157.24, AUC avg 138.78, n=5,
 PPO_SEED=1..5.**
+
+## Hypothesis 34: GAE discount factor gamma 0.999 → 0.995 (IN PROGRESS, n=0/5)
+
+**Idea**: `gamma=0.999` has been matched to SF's config since the start of this log and never
+independently varied — every prior lever touched either the loss graph, the network, or the
+GAE `lambda` weighting, but never the discount factor itself. `gamma` and `lam` both shape the
+effective advantage horizon (`1/(1-gamma·lam)` for GAE, `1/(1-gamma)` for the raw return), so the
+lambda sweep's lesson (H12/H13: lam=0.95 trades final for AUC, lam=0.97 splits the same way,
+0.98 is optimal) raises the natural follow-up question of whether gamma shows the same
+directional tradeoff. With `max_episode_steps=500`, `gamma=0.999` is nearly undiscounted
+(effective horizon ~1000 steps, longer than any possible episode); `gamma=0.995` shortens the
+effective horizon to ~200 steps — still longer than a full episode, but meaningfully more
+locally-weighted than 0.999. Like the lambda sweep, this is a pure GAE/replay-buffer constant
+(confirmed via `replay_buffer.rs`'s `compute_gae_episode`: `gamma` only enters the TD-residual
+`deltas[i] = rews[i] + gamma * vals[i+1] - vals[i]` and the GAE discount `gamma * lam`) — it does
+not touch the loss graph, network, or optimizer, so this carries the same "zero perturbation
+risk" profile as H12/H13/H23's lambda probes.
+
+**Change** (`bench_lunar_ppo_tch.rs`, constant change only):
+- `const GAMMA: f32 = 0.999` → `const GAMMA: f32 = 0.995`
+
+**Baseline for comparison**: H24-lite multi-seed (current active baseline), final avg 157.24
+(range [150.00,162.00]), AUC avg 138.78 (range [130.55,142.73]), n=5, PPO_SEED=1..5.
+
+**Results (n=1/5)**:
+- Run 1 (PPO_SEED=1): final=170.80, AUC=143.21, N=831, ClipFrac mean=0.0985 (47% nonzero),
+  env-frames/sec=34034
+- Run 2 (PPO_SEED=2): PENDING
+- Run 3 (PPO_SEED=3): PENDING
+- Run 4 (PPO_SEED=4): PENDING
+- Run 5 (PPO_SEED=5): PENDING
