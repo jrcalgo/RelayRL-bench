@@ -1823,10 +1823,11 @@ risk" profile as H12/H13/H23's lambda probes.
 **Baseline for comparison**: H24-lite multi-seed (current active baseline), final avg 157.24
 (range [150.00,162.00]), AUC avg 138.78 (range [130.55,142.73]), n=5, PPO_SEED=1..5.
 
-**Results (n=1/5)**:
+**Results (n=2/5)**:
 - Run 1 (PPO_SEED=1): final=170.80, AUC=143.21, N=831, ClipFrac mean=0.0985 (47% nonzero),
   env-frames/sec=34034
-- Run 2 (PPO_SEED=2): PENDING
+- Run 2 (PPO_SEED=2): final=139.90, AUC=131.15, N=831, ClipFrac mean=0.1013 (49% nonzero),
+  env-frames/sec=34731
 - Run 3 (PPO_SEED=3): PENDING
 - Run 4 (PPO_SEED=4): PENDING
 - Run 5 (PPO_SEED=5): PENDING
