@@ -1863,4 +1863,16 @@ correct for LunarLander's reward structure. Remaining untested axes from earlier
 entropy-coefficient annealing/scheduling (vs. the fixed `ENT_COEF=0.01` tested in H16), and
 LR annealing/warmup combined with entropy annealing (noted as untried in H6's takeaway, distinct
 from the plain linear LR anneal tried pre-log).
-- Run 5 (PPO_SEED=5): PENDING
+
+## Direct framework comparison (post-H34): RelayRL vs Sample Factory, perf-profiled
+
+After H34, the user requested a direct sequential 1:1 benchmark against Sample Factory itself
+(rather than another internal hypothesis), profiled with `perf stat`. Full writeup, matched
+hyperparameter table, results, and analysis are in `SF_VS_RELAYRL_COMPARISON.md` (same directory).
+Headline result (single seed=1, current H24-lite baseline vs SF, both ~38.3M env frames): RelayRL
+final=164.70/AUC=140.12 vs SF final=181.86/AUC=179.16 (SF +10.4% final, +27.9% AUC — reproduces
+this log's sample-efficiency gap at the single-seed level); RelayRL is 1.61x faster in wall-clock
+throughput (38,420 vs 23,918 env-frames/sec) due to its synchronous single-process `rayon`
+architecture vs SF's multi-process async design, visible in `perf stat`'s software-event counters
+(SF: 3.75x more page-faults; RelayRL: 26x more context-switches, consistent with each framework's
+respective concurrency model).

@@ -6,9 +6,9 @@ Mapping from bench_lunar_ppo_tch.rs constants -> SF APPO CLI args:
   GAMMA=0.999          -> --gamma=0.999
   LAM=0.98             -> --gae_lambda=0.98
   CLIP_RATIO=0.2       -> --ppo_clip_ratio=0.2
-  PI_LR=VF_LR=2.5e-4   -> --learning_rate=2.5e-4 --lr_schedule=constant
+  PI_LR=VF_LR=3.5e-4   -> --learning_rate=3.5e-4 --lr_schedule=constant
   VF_COEF=1.0          -> --value_loss_coeff=1.0
-  TRAIN_PI/VF_ITERS=4  -> --num_epochs=4
+  TRAIN_PI/VF_ITERS=6  -> --num_epochs=6
   ENT_COEF=0.01        -> --exploration_loss_coeff=0.01
   NORMALIZE_RETURNS    -> --normalize_returns=True (SF default)
   MINI_BATCH=46080     -> --batch_size=46080 --rollout=90 (46080 = 512 envs x 90)
@@ -75,11 +75,11 @@ DEFAULT_ARGS = [
     "--ppo_clip_ratio=0.2",
     "--value_loss_coeff=1.0",
     "--exploration_loss_coeff=0.01",
-    "--num_epochs=4",
+    "--num_epochs=6",
     "--num_batches_per_epoch=1",
     "--rollout=90",
     "--batch_size=46080",
-    "--learning_rate=2.5e-4",
+    "--learning_rate=3.5e-4",
     "--lr_schedule=constant",
     "--normalize_returns=True",
     "--normalize_input=True",
