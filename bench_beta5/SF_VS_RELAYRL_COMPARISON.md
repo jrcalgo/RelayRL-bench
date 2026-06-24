@@ -104,3 +104,55 @@ rm -rf envs/lunar_ppo_tch models/lunar_ppo_tch
 Logs and raw `perf` output for this comparison: `/tmp/sf_h24lite_run1.log`,
 `/tmp/sf_h24lite_run1_perf.txt`, `/tmp/relayrl_h24lite_run1.log`,
 `/tmp/relayrl_h24lite_run1_perf.txt` (not committed — ephemeral container paths).
+
+## Follow-up: can RelayRL's context-switch count be reduced?
+
+The 26x context-switch multiplier above traces to LibTorch's intra-op thread pool, not `rayon`
+directly: with `sync_epoch_boundary=true`, collection and SGD training already run on disjoint
+phases, but LibTorch's CPU thread pool is left unconstrained (default: one thread per core,
+contending with rayon's own worker threads and EnvPool's C++ thread pool for the same 4 physical
+cores). Sample Factory avoids this by deliberately pinning `torch.set_num_threads(1)` in every
+rollout/inference worker process (`sample_factory/algo/utils/torch_utils.py`,
+`rollout_worker.py:65`).
+
+Two variants were implemented and benchmarked (`PPO_SEED=1`, same `perf stat` software-event set,
+same machine):
+
+| Variant | wall time | env-frames/sec | context-switches |
+|---|---|---|---|
+| Baseline (H24-lite, unconstrained LibTorch threads) | 999.5s | 38,420 | 32,394,819 |
+| Global `OMP_NUM_THREADS=1`/`MKL_NUM_THREADS=1` (naive, matches SF's blanket approach) | 1308.1s | 29,355 | 8,076,385 |
+| Phase-toggled (`tch::set_num_threads(1)` during collection/inference, `set_num_threads(num_cores)` only inside `start_epoch_training()`) | 1190.3s | 32,261 | 34,171,668 |
+
+**Verdict: neither variant is an improvement; the phase-toggled approach is rejected.** The naive
+global cap does cut context-switches by 75%, confirming the diagnosis that LibTorch's thread pool
+is the dominant source — but it costs 24% throughput, because LibTorch's SGD passes (the actual
+matmul-heavy compute, run on a dedicated tokio worker thread concurrently with the main collection
+loop) are themselves multi-threaded in the baseline and lose real parallelism when capped to 1.
+
+The phase-toggled approach was implemented specifically to keep that training-time parallelism
+(toggling `tch::set_num_threads()` to 1 before `start_epoch_training()` and back up to
+`num_cores` once a training task is pending, at all 3 call sites in
+`training/mod.rs::train_ppo`) while still constraining threads during collection. It does **not**
+work: context-switches went *up* slightly versus the baseline (34.17M vs 32.39M, +5.5%) rather
+than down, and throughput dropped 16% (32,261 vs 38,420 env-frames/sec) — worse than doing
+nothing, though still better than the naive blanket cap. The most likely explanation is that
+`set_num_threads()` is not a cheap atomic toggle: each call reconfigures (and on this LibTorch
+build, appears to tear down/recreate) the intra-op worker thread pool, and at 832 epochs x 2
+toggles/epoch this adds on the order of 1,600 thread-pool reconfigurations over the run — the
+teardown/recreation overhead itself generates additional context-switches and stalls that outweigh
+any savings from running single-threaded during the (already comparatively cheap) collection
+phase.
+
+**Conclusion**: the framework's elevated context-switch count is a true artifact of LibTorch's
+unconstrained thread pool, but neither a blanket cap nor a phase-toggled cap actually increases
+throughput in this configuration — both regress it (24% and 16% respectively) for a join-the-dots
+reduction in context-switches that doesn't translate into wall-clock benefit on this 4-core
+machine. The H24-lite baseline (default unconstrained LibTorch threading) remains the better
+choice and stands as-is; no thread-toggling change is recommended for adoption. A higher-core-count
+machine, where LibTorch's training-phase parallelism has more headroom to actually pay for itself,
+might change this calculus — untested here due to the 4-core sandbox constraint.
+
+Logs and raw `perf` output for this follow-up: `/tmp/relayrl_h24lite_1thread_run1.log`,
+`/tmp/relayrl_h24lite_1thread_perf.txt`, `/tmp/relayrl_phasetoggled_run1.log`,
+`/tmp/relayrl_phasetoggled_perf.txt` (not committed — ephemeral container paths).
