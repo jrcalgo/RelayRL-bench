@@ -106,20 +106,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
             Ok(())
         }
 
-        // LibTorch's intra-op thread pool is process-global: every forward/backward call
-        // pays the cost of waking/parking it regardless of how small the op is. Collection
-        // (one [128,128] MLP forward per env-step, n_envs small relative to a full SGD
-        // batch) gains nothing from multi-threading and just thrashes the pool; training
-        // (a full mini_batch-sized matmul) does benefit. Since sync_epoch_boundary
-        // serializes collection and training (the only overlap is the brief window before
-        // the bounded traj channel fills), pin to 1 thread by default and only raise it for
-        // the span a training task is actually in flight. No-op on non-tch backends.
-        #[inline(always)]
-        fn set_torch_intraop_threads(_n: i32) {
-            #[cfg(feature = "tch-backend")]
-            tch::set_num_threads(_n);
-        }
-
         #[inline(always)]
         fn log_epoch<B2, KindIn2, KindOut2, Pi2>(
             trainer: &mut PPOTrainer<B2, KindIn2, KindOut2, Pi2>,
@@ -164,10 +150,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                 }
             };
 
-        let train_threads: i32 = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(1);
-
         tokio::task::block_in_place(|| {
             let local_runtime = tokio::task::LocalSet::new();
 
@@ -195,11 +177,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                 let learner_runtime = Arc::clone(&runtime);
                 let learner_device = device.clone();
                 let learner_kernel_snapshot = Arc::clone(&kernel_snapshot);
-
-                // Collection (per-env-step inference) starts before any training task is in
-                // flight; pin to 1 thread until the first `start_epoch_training()` call below
-                // actually raises it.
-                set_torch_intraop_threads(1);
 
                 let learner_handle = tokio::task::spawn_local(async move {
                     let mut trainer = trainer;
@@ -244,7 +221,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                         let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
                                         land_epoch!(output);
                                         pending_train = trainer.start_epoch_training();
-                                        set_torch_intraop_threads(if pending_train.is_some() { train_threads } else { 1 });
                                     }
                                 }
                             } else {
@@ -263,7 +239,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                         let output = result.map_err(|e| TrainingError::TrainerError(format!("[TrainingInterface] {} - PPO EpochTrainOutput join failed: {}", actor_id, e)))?;
                                         land_epoch!(output);
                                         pending_train = trainer.start_epoch_training();
-                                        set_torch_intraop_threads(if pending_train.is_some() { train_threads } else { 1 });
                                     }
 
                                     maybe_traj = traj_rx.recv() => {
@@ -289,7 +264,6 @@ impl<B: Backend + BackendMatcher<Backend = B>> TrainingInterface<B> {
                                     let epoch_started = trainer.receive_trajectory(traj).await.map_err(|e| TrainingError::TrainerError(e.to_string()))?;
                                     if epoch_started {
                                         pending_train = trainer.start_epoch_training();
-                                        set_torch_intraop_threads(if pending_train.is_some() { train_threads } else { 1 });
                                     }
                                 }
                                 None => {
