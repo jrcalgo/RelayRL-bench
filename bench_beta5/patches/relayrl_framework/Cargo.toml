@@ -87,6 +87,7 @@ profile = [
 tch-backend = [
     "relayrl_types/tch-backend",
     "relayrl_types/tch-model",
+    "tch",
 ]
 training-server = []
 zmq-transport = [
@@ -109,6 +110,12 @@ features = ["concurrent-map"]
 
 [dependencies.arc-swap]
 version = "1.9.1"
+
+[dependencies.tch]
+version = "=0.22.0"
+default-features = false
+features = ["download-libtorch"]
+optional = true
 
 [dependencies.arrow]
 version = "57.3.0"

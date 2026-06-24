@@ -4418,6 +4418,7 @@ dependencies = [
  "relayrl_types",
  "serde",
  "serde_json",
+ "tch",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
